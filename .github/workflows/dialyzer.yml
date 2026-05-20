@@ -1,0 +1,37 @@
+name: Dialyzer
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dialyzer-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dialyzer:
+    name: Dialyzer
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Elixir with PLT cache
+        uses: ./.github/actions/setup-elixir
+        with:
+          mix-env: dev
+          cache-plt: "true"
+
+      - name: Compile (dev)
+        env:
+          MIX_ENV: dev
+        run: mix compile
+
+      - name: Run Dialyzer
+        env:
+          MIX_ENV: dev
+        run: mix dialyzer --format short

@@ -1,0 +1,62 @@
+name: Set up Elixir with shared cache
+description: >
+  Installs Elixir/OTP and restores deps + _build + PLT caches.
+  Workflows that share the same `mix-env` reuse compiled state when
+  `mix.lock` has not changed.
+
+inputs:
+  elixir-version:
+    description: Elixir version
+    required: false
+    default: "1.19"
+  otp-version:
+    description: Erlang/OTP version
+    required: false
+    default: "28"
+  mix-env:
+    description: MIX_ENV to scope the _build cache (test or dev)
+    required: true
+  cache-plt:
+    description: Whether to restore/save the PLT cache (only dialyzer needs it)
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Beam
+      uses: erlef/setup-beam@8d44588995e53ce789721e96227122a67826542d # v1.24.0
+      with:
+        elixir-version: ${{ inputs.elixir-version }}
+        otp-version: ${{ inputs.otp-version }}
+
+    - name: Cache deps
+      uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+      with:
+        path: deps
+        key: deps-${{ runner.os }}-${{ inputs.elixir-version }}-${{ inputs.otp-version }}-${{ hashFiles('mix.lock') }}
+        restore-keys: |
+          deps-${{ runner.os }}-${{ inputs.elixir-version }}-${{ inputs.otp-version }}-
+
+    - name: Cache _build (${{ inputs.mix-env }})
+      uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+      with:
+        path: _build/${{ inputs.mix-env }}
+        key: build-${{ runner.os }}-${{ inputs.elixir-version }}-${{ inputs.otp-version }}-${{ inputs.mix-env }}-${{ hashFiles('mix.lock') }}
+        restore-keys: |
+          build-${{ runner.os }}-${{ inputs.elixir-version }}-${{ inputs.otp-version }}-${{ inputs.mix-env }}-
+
+    - name: Cache PLT
+      if: inputs.cache-plt == 'true'
+      uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+      with:
+        path: priv/plts
+        key: plt-${{ runner.os }}-${{ inputs.elixir-version }}-${{ inputs.otp-version }}-${{ hashFiles('mix.lock') }}
+        restore-keys: |
+          plt-${{ runner.os }}-${{ inputs.elixir-version }}-${{ inputs.otp-version }}-
+
+    - name: Fetch deps
+      env:
+        MIX_ENV: ${{ inputs.mix-env }}
+      shell: bash
+      run: mix deps.get

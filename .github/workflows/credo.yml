@@ -1,0 +1,31 @@
+name: Credo
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: credo-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  credo:
+    name: Credo
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Elixir
+        uses: ./.github/actions/setup-elixir
+        with:
+          mix-env: dev
+
+      - name: Credo (high priority only)
+        env:
+          MIX_ENV: dev
+        run: mix credo --min-priority=high

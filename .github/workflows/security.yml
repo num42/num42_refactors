@@ -1,0 +1,36 @@
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly scan on Mondays at 06:00 UTC catches new CVEs/retired packages
+    # even when no PR activity triggers the workflow.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: mix deps.audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Elixir
+        uses: ./.github/actions/setup-elixir
+        with:
+          mix-env: dev
+
+      - name: Audit dependencies for known CVEs
+        env:
+          MIX_ENV: dev
+        run: mix deps.audit

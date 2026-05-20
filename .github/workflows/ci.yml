@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: Elixir ${{ matrix.elixir }} / OTP ${{ matrix.otp }}
@@ -18,25 +22,17 @@ jobs:
         include:
           - { elixir: "1.18", otp: "27" }
           - { elixir: "1.19", otp: "28" }
-    steps:
-      - uses: actions/checkout@v4
 
-      - uses: erlef/setup-beam@v1
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Elixir
+        uses: ./.github/actions/setup-elixir
         with:
           elixir-version: ${{ matrix.elixir }}
           otp-version: ${{ matrix.otp }}
+          mix-env: test
 
-      - name: Cache deps
-        uses: actions/cache@v4
-        with:
-          path: |
-            deps
-            _build
-          key: ${{ runner.os }}-mix-${{ matrix.elixir }}-${{ matrix.otp }}-${{ hashFiles('**/mix.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-mix-${{ matrix.elixir }}-${{ matrix.otp }}-
-
-      - run: mix deps.get
       - run: mix format --check-formatted
       - run: mix compile --warnings-as-errors
       - run: mix test

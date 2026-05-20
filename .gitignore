@@ -22,6 +22,9 @@ erl_crash.dump
 # Ignore package tarball (built via "mix hex.build").
 num42_refactors-*.tar
 
+# Dialyzer PLT cache (built locally via "mix dialyzer").
+/priv/plts/
+
 # macOS
 .DS_Store
 
