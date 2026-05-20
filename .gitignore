@@ -22,3 +22,24 @@ erl_crash.dump
 # Ignore package tarball (built via "mix hex.build").
 num42_refactors-*.tar
 
+# macOS
+.DS_Store
+
+# Editors / IDEs
+*.swp
+*~
+.vscode/
+.idea/
+
+# Local env / Nix dev shell
+.env
+.env.*
+!.env.example
+.envrc.local
+.devenv*
+.devenv.local.nix
+.direnv
+.pre-commit-config.yaml
+
+# Claude Code lokale Einstellungen
+.claude/settings.local.json
