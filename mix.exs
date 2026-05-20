@@ -34,7 +34,6 @@ defmodule Num42.Refactors.MixProject do
   defp deps do
     [
       {:sourceror, "~> 1.7"},
-      {:phoenix_live_view, "~> 1.0", optional: true},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
@@ -54,7 +53,7 @@ defmodule Num42.Refactors.MixProject do
     [
       main: "readme",
       source_ref: "v#{@version}",
-      extras: ["README.md", "CHANGELOG.md"]
+      extras: ["README.md", "CHANGELOG.md", "LICENSE"]
     ]
   end
 end

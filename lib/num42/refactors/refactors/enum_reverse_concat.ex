@@ -22,14 +22,14 @@ defmodule Num42.Refactors.Refactors.EnumReverseConcat do
   ## What we match
 
   - `Enum.reverse(a) ++ b` (direct call, then ++)
-  - `a |> Enum.reverse() ++ b` (pipe form ending in `Enum.reverse/0`)
+  - `a |> Enum.reverse() ++ b` (pipe form ending in `Enum.reverse`/0)
 
   ## What we skip
 
   - `a ++ Enum.reverse(b)` — different operation; the right-side
     reverse can't be folded into a left-side call.
   - `Enum.reverse(a, b)` — already in the target form.
-  - `List.reverse(a) ++ b` — `List.reverse/1` doesn't exist with this
+  - `List.reverse(a) ++ b` — `List.reverse`/1 doesn't exist with this
     semantic; we don't touch other modules.
 
   ## Idempotence
