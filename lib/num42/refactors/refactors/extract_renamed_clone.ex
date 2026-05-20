@@ -101,7 +101,8 @@ defmodule Num42.Refactors.Refactors.ExtractRenamedClone do
   def prepare(opts), do: Keyword.get(opts, :source_files) |> prepared_for_paths(opts)
 
   @impl Num42.Refactors.Refactor
-  def transform(source, opts), do: Keyword.get(opts, :prepared) |> rewrite_with_plan_or_passthrough(source)
+  def transform(source, opts),
+    do: Keyword.get(opts, :prepared) |> rewrite_with_plan_or_passthrough(source)
 
   @doc """
   Build a rewrite plan from `[{path, source_string}]` tuples.
@@ -612,7 +613,8 @@ defmodule Num42.Refactors.Refactors.ExtractRenamedClone do
 
   defp arg_names_or_empty({_name, _, nil}), do: []
 
-  defp apply_plan_to_parse_result({:ok, ast}, plan, source), do: ast |> apply_plan_to_ast(source, plan)
+  defp apply_plan_to_parse_result({:ok, ast}, plan, source),
+    do: ast |> apply_plan_to_ast(source, plan)
 
   defp apply_plan_to_parse_result({:error, _}, _plan, source), do: source
 
