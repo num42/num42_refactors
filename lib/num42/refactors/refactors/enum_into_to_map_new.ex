@@ -1,0 +1,96 @@
+defmodule Num42.Refactors.Refactors.EnumIntoToMapNew do
+  @moduledoc """
+  Rewrites `Enum.into(coll, %{})` to `Map.new(coll)`.
+
+  Fires only when the accumulator is the empty-map AST literal
+  (`{:%{}, _, []}`). `Enum.into/2` with a non-empty map merges into the
+  existing map and is **not** equivalent to `Map.new/1` — leaving those
+  alone is intentional, hence the capture guard on `acc`.
+
+  ## Defers to `EnumMapIntoToMapNew`
+
+  When `coll` is itself `Enum.map(_, _)`, the more specific refactor
+  (`EnumMapIntoToMapNew`) collapses the whole pipe into `Map.new/2`
+  with the mapper as the second arg. We exclude that case here so
+  the alphabetic dispatch order doesn't have us rewrite to
+  `Map.new(Enum.map(...))` first and starve the more specific match.
+
+  Source emission goes through `Sourceror.to_string/1`; `mix format`
+  re-pipes after the refactor runs.
+  """
+
+  use Num42.Refactors.Refactor
+
+  alias Sourceror.Patch
+
+  @impl Num42.Refactors.Refactor
+  def description, do: "Enum.into(coll, %{}) -> Map.new(coll)"
+
+  @impl Num42.Refactors.Refactor
+  def priority, do: 140
+
+  @impl Num42.Refactors.Refactor
+  def explanation do
+    """
+    `Enum.into/2` is the general "fold into a collectable" interface and
+    its second argument can be *any* map — meaning the reader has to
+    check whether `acc` is `%{}` or a non-empty map before they know if
+    this is "build a fresh map" or "merge into an existing one".
+    `Map.new/1` is the dedicated constructor and removes that ambiguity:
+    it can only mean the first thing.
+    """
+  end
+
+  @impl Num42.Refactors.Refactor
+  def reformat_after?, do: true
+
+  @impl Num42.Refactors.Refactor
+  def transform(source, _opts), do: Sourceror.parse_string(source) |> apply_patches(source)
+
+  defp build_patches(ast),
+    do:
+      ast
+      |> Macro.prewalker()
+      |> Enum.flat_map(&maybe_patch/1)
+
+  # Direct call: Enum.into(coll, %{})
+  defp maybe_patch(
+         {{:., _, [{:__aliases__, _, [:Enum]}, :into]}, _, [coll, {:%{}, _, []}]} = node
+       ) do
+    if defers_to_enum_map?(coll) do
+      []
+    else
+      [Patch.replace(node, "Map.new(#{Sourceror.to_string(coll)})")]
+    end
+  end
+
+  # Pipe form: coll |> Enum.into(%{})
+  # AST: {:|>, _, [coll, {Enum.into_call, [], [%{}]}]}
+  defp maybe_patch(
+         {:|>, _,
+          [
+            coll,
+            {{:., _, [{:__aliases__, _, [:Enum]}, :into]}, _, [{:%{}, _, []}]}
+          ]} = node
+       ) do
+    if defers_to_enum_map?(coll) do
+      []
+    else
+      [Patch.replace(node, "Map.new(#{Sourceror.to_string(coll)})")]
+    end
+  end
+
+  defp maybe_patch(_), do: []
+
+  # Defer to EnumMapIntoToMapNew when coll is `Enum.map(...)`.
+  defp defers_to_enum_map?({{:., _, [{:__aliases__, _, [:Enum]}, :map]}, _, _}), do: true
+  defp defers_to_enum_map?(_), do: false
+
+  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
+
+  defp apply_patches({:error, _}, source), do: source
+
+  defp patch_or_passthrough([], source), do: source
+
+  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
+end
