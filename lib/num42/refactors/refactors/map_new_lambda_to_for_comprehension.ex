@@ -225,7 +225,7 @@ defmodule Num42.Refactors.Refactors.MapNewLambdaToForComprehension do
        )
        when kind in [:filter, :reject] do
     render_predicate(pred, generator_var, kind)
-    |> handle_render_predicate(acc, generator_var, lhs)
+    |> continue_lift_or_skip(acc, generator_var, lhs)
   end
 
   defp lift_filter_chain({:|>, _, _}, _generator_var, _acc), do: :skip
@@ -236,7 +236,7 @@ defmodule Num42.Refactors.Refactors.MapNewLambdaToForComprehension do
   # parameter for the generator variable. `kind` is `:filter` (pass
   # condition through) or `:reject` (negate).
   defp render_predicate(predicate, generator_var, kind),
-    do: predicate_to_expr(predicate, generator_var) |> handle_predicate_to_expr(kind)
+    do: predicate_to_expr(predicate, generator_var) |> render_predicate_text(kind)
 
   # Convert a predicate AST into an expression that references
   # `generator_var` instead of its own binding.
@@ -261,7 +261,7 @@ defmodule Num42.Refactors.Refactors.MapNewLambdaToForComprehension do
          generator_var
        )
        when is_atom(lambda_var) and is_atom(ctx) do
-    bare_var_name(generator_var) |> handle_bare_var_name(body, lambda_var)
+    bare_var_name(generator_var) |> rebind_or_skip(body, lambda_var)
   end
 
   defp predicate_to_expr(_, _), do: :skip
@@ -364,16 +364,12 @@ defmodule Num42.Refactors.Refactors.MapNewLambdaToForComprehension do
 
   defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_render_predicate({:ok, condition}, acc, generator_var, lhs),
+  defp continue_lift_or_skip({:ok, condition}, acc, generator_var, lhs),
     do: lhs |> lift_filter_chain(generator_var, [condition | acc])
 
-  defp handle_render_predicate(:skip, _acc, _generator_var, _lhs), do: :skip
+  defp continue_lift_or_skip(:skip, _acc, _generator_var, _lhs), do: :skip
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_predicate_to_expr({:ok, expr_ast}, kind) do
+  defp render_predicate_text({:ok, expr_ast}, kind) do
     text = expr_ast |> strip_comments() |> Sourceror.to_string()
 
     case kind do
@@ -382,12 +378,10 @@ defmodule Num42.Refactors.Refactors.MapNewLambdaToForComprehension do
     end
   end
 
-  defp handle_predicate_to_expr(:skip, _kind), do: :skip
+  defp render_predicate_text(:skip, _kind), do: :skip
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_bare_var_name({:ok, gen_name}, body, lambda_var),
+  defp rebind_or_skip({:ok, gen_name}, body, lambda_var),
     do: {:ok, rebind_var(body, lambda_var, gen_name)}
 
-  defp handle_bare_var_name(:skip, _body, _lambda_var), do: :skip
+  defp rebind_or_skip(:skip, _body, _lambda_var), do: :skip
 end

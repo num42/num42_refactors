@@ -151,7 +151,7 @@ defmodule Num42.Refactors.Refactors.PipeReassign do
   defp maybe_patch({:=, _, [lhs, rhs]} = node, source) do
     with {:ok, lhs_name} <- bare_var_name(lhs),
          {:ok, callee_ast, [first_arg | rest_args]} <- callable_with_args(rhs),
-         true <- length(rest_args) >= 1,
+         true <- rest_args != [],
          {:ok, ^lhs_name} <- bare_var_name(first_arg),
          {:ok, lhs_text} <- render_lhs_or_callee(source, lhs),
          {:ok, callee_text} <- render_lhs_or_callee(source, callee_ast),

@@ -298,7 +298,7 @@ defmodule Num42.Refactors.Refactors.ExpandShortFormBindings do
 
   defp map_key_binding({key_ast, {name, _, ctx} = node})
        when is_atom(name) and is_atom(ctx) do
-    key_atom(key_ast) |> handle_key_atom(name, node)
+    key_atom(key_ast) |> binding_from_key(name, node)
   end
 
   defp map_key_binding(_), do: []
@@ -514,7 +514,7 @@ defmodule Num42.Refactors.Refactors.ExpandShortFormBindings do
     rhs_target_from_split(subtokens, n, ctx, rhs_is_call?)
   end
 
-  defp tail_pluralized?(subtokens), do: List.last(subtokens) |> handle_tail_pluralized_last()
+  defp tail_pluralized?(subtokens), do: List.last(subtokens) |> pluralized?()
 
   defp prepend_pp_or_keep({:ok, pp}, tail_compound),
     do: {:ok, [pp, tail_compound] |> Enum.join("_")}
@@ -534,17 +534,13 @@ defmodule Num42.Refactors.Refactors.ExpandShortFormBindings do
 
   defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_key_atom({:ok, key}, name, node) do
+  defp binding_from_key({:ok, key}, name, node) do
     if underscore?(name), do: [], else: [{name, node, {key, [], []}}]
   end
 
-  defp handle_key_atom(:error, _name, _node), do: []
+  defp binding_from_key(:error, _name, _node), do: []
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_tail_pluralized_last(nil), do: false
+  defp pluralized?(nil), do: false
 
-  defp handle_tail_pluralized_last(last), do: singularize(last) != last
+  defp pluralized?(last), do: singularize(last) != last
 end

@@ -41,5 +41,5 @@ num42_refactors-*.tar
 .direnv
 .pre-commit-config.yaml
 
-# Claude Code lokale Einstellungen
-.claude/settings.local.json
+# Claude Code lokale Einstellungen und Memories (privat, nie pushen)
+.claude/

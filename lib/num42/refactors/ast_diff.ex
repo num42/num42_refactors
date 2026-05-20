@@ -222,7 +222,7 @@ defmodule Num42.Refactors.AstDiff do
   defp same_outer_shape?([first | rest]) do
     cond do
       is_tuple(first) and tuple_size(first) == 3 ->
-        rest |> Enum.all?(fn n -> is_3tuple?(n) and same_3tuple_shape?(first, n) end)
+        rest |> Enum.all?(fn n -> tuple3?(n) and same_3tuple_shape?(first, n) end)
 
       is_tuple(first) and tuple_size(first) == 2 ->
         rest |> Enum.all?(fn n -> is_tuple(n) and tuple_size(n) == 2 end)
@@ -240,7 +240,7 @@ defmodule Num42.Refactors.AstDiff do
     end
   end
 
-  defp is_3tuple?(t), do: is_tuple(t) and tuple_size(t) == 3
+  defp tuple3?(t), do: is_tuple(t) and tuple_size(t) == 3
 
   # Two 3-tuple AST nodes share an outer shape when their forms match
   # (modulo meta) and their args are list-vs-list with the same length,

@@ -14,9 +14,18 @@ defmodule Num42.Refactors.MixProject do
       deps: deps(),
       package: package(),
       docs: docs(),
+      dialyzer: dialyzer(),
       description: description(),
       source_url: @source_url,
       name: "Num42.Refactors"
+    ]
+  end
+
+  defp dialyzer do
+    [
+      plt_file: {:no_warn, "priv/plts/dialyzer.plt"},
+      plt_add_apps: [:mix, :eex],
+      ignore_warnings: ".dialyzer_ignore.exs"
     ]
   end
 
@@ -36,7 +45,8 @@ defmodule Num42.Refactors.MixProject do
       {:sourceror, "~> 1.7"},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
-      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
+      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
+      {:mix_audit, "~> 2.1", only: [:dev, :test], runtime: false}
     ]
   end
 

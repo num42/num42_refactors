@@ -766,7 +766,7 @@ defmodule Num42.Refactors.Refactors.IfLiftToClauses do
 
     head =
       "#{kind} #{fn_name}(" <>
-        Enum.join(head_slots |> Enum.map(&elem(&1, 0)), ", ") <> ")" <> guard_text
+        Enum.map_join(head_slots, ", ", &elem(&1, 0)) <> ")" <> guard_text
 
     do_clause = render_clause(head, plan.do_body_ast, plan.do_text)
 

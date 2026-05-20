@@ -276,8 +276,8 @@ defmodule Num42.Refactors.Refactors.SortFunctions do
     |> MapSet.new()
   end
 
-  defp is_def_node({def_or_defp, _, _}) when def_or_defp in [:def, :defp], do: true
-  defp is_def_node(_), do: false
+  defp def_node?({def_or_defp, _, _}) when def_or_defp in [:def, :defp], do: true
+  defp def_node?(_), do: false
   defp last_node_of_block({:fn_block, _, _, nodes}), do: List.last(nodes)
 
   defp leading_indent(source, line) do
@@ -337,7 +337,7 @@ defmodule Num42.Refactors.Refactors.SortFunctions do
 
   defp sort_key({:fn_block, name, arity, nodes} = block, heex_set) do
     visibility =
-      case nodes |> Enum.find(&is_def_node/1) do
+      case nodes |> Enum.find(&def_node?/1) do
         {:def, _, _} -> 0
         {:defp, _, _} -> 1
         _ -> 0

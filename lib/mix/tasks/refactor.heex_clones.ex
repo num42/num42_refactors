@@ -94,10 +94,11 @@ defmodule Mix.Tasks.Refactor.HeexClones do
     # would otherwise re-read it once per occurrence.
     file_cache = if code?, do: %{}, else: nil
 
-    modes
-    |> Enum.reduce(file_cache, fn mode, cache ->
-      render_mode(mode, Map.get(result, mode, []), top, code?, context, cache)
-    end)
+    _ =
+      modes
+      |> Enum.reduce(file_cache, fn mode, cache ->
+        render_mode(mode, Map.get(result, mode, []), top, code?, context, cache)
+      end)
 
     summary = modes |> Enum.map(&"#{&1}=#{length(Map.get(result, &1, []))}")
     Mix.shell().info("\n[heex-clones] cluster totals: #{summary |> Enum.join(" ")}")
@@ -161,7 +162,8 @@ defmodule Mix.Tasks.Refactor.HeexClones do
 
   defp file_lines(nil, file), do: {File.read!(file) |> String.split("\n"), nil}
 
-  defp file_lines(cache, file), do: Map.fetch(cache, file) |> handle_file_lines_fetch(cache, file)
+  defp file_lines(cache, file),
+    do: Map.fetch(cache, file) |> cached_or_read_lines(cache, file)
 
   defp resolve_modes([]), do: [:exact, :class_stripped, :attrs_stripped]
 
@@ -179,28 +181,24 @@ defmodule Mix.Tasks.Refactor.HeexClones do
   defp load_inputs do
     path = Path.join(File.cwd!(), @config_path)
 
-    File.read(path) |> handle_load_inputs_read(path)
+    File.read(path) |> parse_config_or_raise(path)
   end
 
   defp expand_inputs(patterns), do: expand_inputs_shared(patterns)
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_file_lines_fetch({:ok, lines}, cache, _file), do: {lines, cache}
+  defp cached_or_read_lines({:ok, lines}, cache, _file), do: {lines, cache}
 
-  defp handle_file_lines_fetch(:error, cache, file) do
+  defp cached_or_read_lines(:error, cache, file) do
     lines = File.read!(file) |> String.split("\n")
     {lines, Map.put(cache, file, lines)}
   end
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_load_inputs_read({:ok, contents}, path) do
+  defp parse_config_or_raise({:ok, contents}, path) do
     {config, _} = Code.eval_string(contents, [], file: path)
     Keyword.fetch!(config, :inputs)
   end
 
-  defp handle_load_inputs_read({:error, _}, path),
+  defp parse_config_or_raise({:error, _}, path),
     do:
       "#{@config_path} not found at #{path}. Pass paths explicitly or create the config."
       |> Mix.raise()

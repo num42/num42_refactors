@@ -79,7 +79,7 @@ defmodule Num42.Refactors.Refactors.ExtractIntraModuleClone do
   def transform(source, opts) do
     min_mass = Keyword.get(opts, :min_mass, @default_min_mass)
 
-    Sourceror.parse_string(source) |> handle_parse_string(min_mass, source)
+    Sourceror.parse_string(source) |> apply_to_parse_result(min_mass, source)
   end
 
   defp apply_to_ast(ast, source, min_mass) do
@@ -138,11 +138,11 @@ defmodule Num42.Refactors.Refactors.ExtractIntraModuleClone do
   defp name_arity(clause), do: {name_of(clause), arity_of(clause)}
 
   defp name_of({kind, _, [head | _]}) when kind in [:def, :defp] do
-    strip_when(head) |> handle_strip_when()
+    strip_when(head) |> name_atom_or_nil()
   end
 
   defp arity_of({kind, _, [head | _]}) when kind in [:def, :defp] do
-    strip_when(head) |> handle_strip_when_2()
+    strip_when(head) |> arity_of_head()
   end
 
   defp strip_when({:when, _, [inner | _]}), do: inner
@@ -260,40 +260,25 @@ defmodule Num42.Refactors.Refactors.ExtractIntraModuleClone do
   end
 
   defp clause_replacement_patch(clause, replacement),
-    do: Sourceror.get_range(clause) |> handle_get_range(replacement)
+    do: Sourceror.get_range(clause) |> patch_for_range(replacement)
 
   defp patch_or_passthrough([], source), do: source
   defp patch_or_passthrough(patches, source), do: Sourceror.patch_string(source, patches)
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_parse_string({:ok, ast}, min_mass, source),
+  defp apply_to_parse_result({:ok, ast}, min_mass, source),
     do: ast |> apply_to_ast(source, min_mass)
 
-  defp handle_parse_string({:error, _}, _min_mass, source), do: source
+  defp apply_to_parse_result({:error, _}, _min_mass, source), do: source
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_strip_when({name, _, _}) when is_atom(name) do
-    name
-  end
+  defp name_atom_or_nil({name, _, _}) when is_atom(name), do: name
+  defp name_atom_or_nil(_), do: nil
 
-  defp handle_strip_when(_), do: nil
+  defp arity_of_head({_, _, args}) when is_list(args), do: length(args)
+  defp arity_of_head({_, _, nil}), do: 0
+  defp arity_of_head(_), do: -1
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_strip_when_2({_, _, args}) when is_list(args) do
-    length(args)
-  end
-
-  defp handle_strip_when_2({_, _, nil}), do: 0
-
-  defp handle_strip_when_2(_), do: -1
-
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_get_range(%{end: end_pos, start: start_pos}, replacement),
+  defp patch_for_range(%{end: end_pos, start: start_pos}, replacement),
     do: [%{change: replacement, range: %{end: end_pos, start: start_pos}}]
 
-  defp handle_get_range(_, _replacement), do: []
+  defp patch_for_range(_, _replacement), do: []
 end

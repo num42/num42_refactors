@@ -2141,7 +2141,7 @@ defmodule Num42.Refactors.Refactors.ExtractParametricClone do
     parts_lists = entries |> Enum.map(&Module.split(&1.module))
     prefix = longest_common_prefix(parts_lists)
 
-    if length(prefix) >= 1 do
+    if prefix != [] do
       {:ok, Module.concat(prefix ++ ["Shared"])}
     else
       :skip

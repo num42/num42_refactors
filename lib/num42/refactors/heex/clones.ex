@@ -133,7 +133,7 @@ defmodule Num42.Refactors.Heex.Clones do
   end
 
   defp fragments_for_source(source, path, min_mass, modes),
-    do: Tree.from_source(source) |> handle_from_source(min_mass, modes, path)
+    do: Tree.from_source(source) |> fragments_from_tree_result(min_mass, modes, path)
 
   defp offset_line(frag, 0), do: frag
 
@@ -173,9 +173,7 @@ defmodule Num42.Refactors.Heex.Clones do
     |> Enum.map(&Map.delete(&1, :sub_hashes))
   end
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_from_source({:ok, sigils}, min_mass, modes, path) do
+  defp fragments_from_tree_result({:ok, sigils}, min_mass, modes, path) do
     sigils
     |> Enum.flat_map(fn sigil ->
       # Tree lines are relative to the sigil body; offset them to
@@ -192,5 +190,5 @@ defmodule Num42.Refactors.Heex.Clones do
     end)
   end
 
-  defp handle_from_source(:error, _min_mass, _modes, _path), do: []
+  defp fragments_from_tree_result(:error, _min_mass, _modes, _path), do: []
 end

@@ -98,7 +98,7 @@ defmodule Num42.Refactors.Refactors.ExtractHeexExactClone do
   defp replace_occurrence(source, plan, occurrence),
     do:
       locate_sigil_for_line(source, occurrence.line)
-      |> handle_locate_sigil_for_line(occurrence, plan, source)
+      |> splice_call_at_sigil(occurrence, plan, source)
 
   defp render_call(plan) do
     attrs =
@@ -114,7 +114,7 @@ defmodule Num42.Refactors.Refactors.ExtractHeexExactClone do
   # Returns `{sigil_body, sigil_body_start_byte_in_source}` for the
   # sigil whose body covers `file_line`, or nil.
   defp locate_sigil_for_line(source, file_line),
-    do: Tree.from_source(source) |> handle_from_source(file_line, source)
+    do: Tree.from_source(source) |> locate_sigil_containing(file_line, source)
 
   defp count_lines(s), do: s |> :binary.matches("\n") |> length()
 
@@ -252,7 +252,7 @@ defmodule Num42.Refactors.Refactors.ExtractHeexExactClone do
   end
 
   defp scan([{:eex_block, header, children, _meta} | rest], a, l, b),
-    do: parse_for_pattern(header) |> handle_parse_for_pattern(a, b, children, header, l, rest)
+    do: parse_for_pattern(header) |> scan_eex_block_branch(a, b, children, header, l, rest)
 
   defp scan([{:eex_expr, code, _meta} | rest], a, l, b) do
     {a, l} = scan_eex_code(code, a, l, b)
@@ -272,7 +272,7 @@ defmodule Num42.Refactors.Refactors.ExtractHeexExactClone do
   end
 
   defp scan_eex_code(code, a, l, b),
-    do: Code.string_to_quoted(code) |> handle_string_to_quoted(a, b, l)
+    do: Code.string_to_quoted(code) |> walk_eex_ast_branch(a, b, l)
 
   defp walk_ast(ast, a, l, b) do
     {_, {a, l}} =
@@ -466,11 +466,9 @@ defmodule Num42.Refactors.Refactors.ExtractHeexExactClone do
   defp root_tag({:eex_expr, _, _}), do: "eex_expr"
   defp root_tag({:text, _, _}), do: "text"
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_locate_sigil_for_line(nil, _occurrence, _plan, source), do: source
+  defp splice_call_at_sigil(nil, _occurrence, _plan, source), do: source
 
-  defp handle_locate_sigil_for_line({sigil_body, sigil_body_start_byte}, occurrence, plan, source) do
+  defp splice_call_at_sigil({sigil_body, sigil_body_start_byte}, occurrence, plan, source) do
     {body_start, body_end} = Tree.node_byte_range(occurrence.node, sigil_body)
     abs_start = sigil_body_start_byte + body_start
     abs_end = sigil_body_start_byte + body_end
@@ -480,9 +478,7 @@ defmodule Num42.Refactors.Refactors.ExtractHeexExactClone do
       call <> binary_part(source, abs_end, byte_size(source) - abs_end)
   end
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_from_source({:ok, sigils}, file_line, source) do
+  defp locate_sigil_containing({:ok, sigils}, file_line, source) do
     sigils
     |> Enum.find(fn s ->
       body_lines = count_lines(s.body)
@@ -498,11 +494,9 @@ defmodule Num42.Refactors.Refactors.ExtractHeexExactClone do
     end
   end
 
-  defp handle_from_source(:error, _file_line, _source), do: nil
+  defp locate_sigil_containing(:error, _file_line, _source), do: nil
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_parse_for_pattern(
+  defp scan_eex_block_branch(
          {:ok, pattern_vars, coll_assigns},
          a,
          b,
@@ -518,15 +512,13 @@ defmodule Num42.Refactors.Refactors.ExtractHeexExactClone do
     scan(rest, a, l, b)
   end
 
-  defp handle_parse_for_pattern(:error, a, b, children, header, l, rest) do
+  defp scan_eex_block_branch(:error, a, b, children, header, l, rest) do
     {a, l} = scan_eex_code(header, a, l, b)
     {a, l} = scan(children, a, l, b)
     scan(rest, a, l, b)
   end
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_string_to_quoted({:ok, ast}, a, b, l), do: ast |> walk_ast(a, l, b)
+  defp walk_eex_ast_branch({:ok, ast}, a, b, l), do: ast |> walk_ast(a, l, b)
 
-  defp handle_string_to_quoted({:error, _}, a, _b, l), do: {a, l}
+  defp walk_eex_ast_branch({:error, _}, a, _b, l), do: {a, l}
 end

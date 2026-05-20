@@ -81,7 +81,7 @@ defmodule Num42.Refactors.Refactors.ExtractLambdaBlock do
   def transform(source, opts) do
     min_mass = Keyword.get(opts, :min_mass, @default_min_mass)
 
-    Sourceror.parse_string(source) |> handle_parse_string(min_mass, source)
+    Sourceror.parse_string(source) |> apply_to_parse_result(min_mass, source)
   end
 
   defp apply_to_ast(ast, source, min_mass) do
@@ -306,7 +306,7 @@ defmodule Num42.Refactors.Refactors.ExtractLambdaBlock do
   end
 
   defp capture_replacement_patch(%{arity: arity, ast: lambda}, arity),
-    do: Sourceror.get_range(lambda) |> handle_get_range(arity)
+    do: Sourceror.get_range(lambda) |> replacement_patch(arity)
 
   defp capture_replacement_patch(_lambda, _arity), do: nil
 
@@ -352,19 +352,15 @@ defmodule Num42.Refactors.Refactors.ExtractLambdaBlock do
   defp patch_or_passthrough(source, []), do: source
   defp patch_or_passthrough(source, patches), do: Sourceror.patch_string(source, patches)
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_parse_string({:ok, ast}, min_mass, source),
+  defp apply_to_parse_result({:ok, ast}, min_mass, source),
     do: ast |> apply_to_ast(source, min_mass)
 
-  defp handle_parse_string({:error, _}, _min_mass, source), do: source
+  defp apply_to_parse_result({:error, _}, _min_mass, source), do: source
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_get_range(%{end: end_pos, start: start_pos}, arity) do
+  defp replacement_patch(%{end: end_pos, start: start_pos}, arity) do
     replacement = "&#{Atom.to_string(@helper_name)}/#{arity}"
     %{change: replacement, range: %{end: end_pos, start: start_pos}}
   end
 
-  defp handle_get_range(_, _arity), do: nil
+  defp replacement_patch(_, _arity), do: nil
 end

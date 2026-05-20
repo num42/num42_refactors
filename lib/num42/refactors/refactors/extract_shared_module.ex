@@ -940,7 +940,7 @@ defmodule Num42.Refactors.Refactors.ExtractSharedModule do
     parts_lists = entries |> Enum.map(&Module.split(&1.module))
     prefix = longest_common_prefix(parts_lists)
 
-    if length(prefix) >= 1 do
+    if prefix != [] do
       target = Module.concat(prefix ++ ["Shared"])
       {:ok, target}
     else

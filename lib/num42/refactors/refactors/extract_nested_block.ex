@@ -88,7 +88,7 @@ defmodule Num42.Refactors.Refactors.ExtractNestedBlock do
   # all clause bodies under that name. Used to detect when the lambda
   # we'd extract is already represented by an existing extracted_*
   # helper — in which case we skip rather than emit `_2`.
-  defp build_extracted_index(ast), do: module_body_exprs(ast) |> handle_module_body_exprs()
+  defp build_extracted_index(ast), do: module_body_exprs(ast) |> index_defps_by_name()
 
   defp fetch_do_body_keyword(keyword) do
     keyword
@@ -148,7 +148,7 @@ defmodule Num42.Refactors.Refactors.ExtractNestedBlock do
     %{fn_args: fn_args} = target
 
     generate_helper_name(host_fn_name, fn_body, extracted_index)
-    |> handle_generate_helper_name(
+    |> patches_for_helper(
       append_at_line,
       arg_names,
       fn_args,
@@ -407,11 +407,9 @@ defmodule Num42.Refactors.Refactors.ExtractNestedBlock do
 
   defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_module_body_exprs(nil), do: %{}
+  defp index_defps_by_name(nil), do: %{}
 
-  defp handle_module_body_exprs(exprs) do
+  defp index_defps_by_name(exprs) do
     exprs
     |> Enum.flat_map(fn
       {kind, _, [head, kw]} when kind in [:defp, :defmacrop] and is_list(kw) ->
@@ -432,9 +430,7 @@ defmodule Num42.Refactors.Refactors.ExtractNestedBlock do
     |> Enum.group_by(fn {name, _} -> name end, fn {_, body} -> body end)
   end
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_generate_helper_name(
+  defp patches_for_helper(
          :skip,
          _append_at_line,
          _arg_names,
@@ -445,7 +441,7 @@ defmodule Num42.Refactors.Refactors.ExtractNestedBlock do
        ),
        do: []
 
-  defp handle_generate_helper_name(
+  defp patches_for_helper(
          {:ok, helper_name},
          append_at_line,
          arg_names,

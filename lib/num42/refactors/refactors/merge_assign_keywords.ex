@@ -133,7 +133,7 @@ defmodule Num42.Refactors.Refactors.MergeAssignKeywords do
   defp local_assign_patch?(_), do: false
 
   defp import_widen_patch({:import, _, [_mod_ast, kw]} = node, source) when is_list(kw) do
-    fetch_only_list(kw) |> handle_fetch_only_list(node, source)
+    fetch_only_list(kw) |> widen_patches_for_only_list(node, source)
   end
 
   defp import_widen_patch(_, _), do: []
@@ -480,9 +480,7 @@ defmodule Num42.Refactors.Refactors.MergeAssignKeywords do
 
   defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_fetch_only_list({:ok, only_list_ast}, node, source) do
+  defp widen_patches_for_only_list({:ok, only_list_ast}, node, source) do
     names = only_list_atoms(only_list_ast)
 
     if {:assign, 3} in names and {:assign, 2} not in names do
@@ -492,5 +490,5 @@ defmodule Num42.Refactors.Refactors.MergeAssignKeywords do
     end
   end
 
-  defp handle_fetch_only_list(:error, _node, _source), do: []
+  defp widen_patches_for_only_list(:error, _node, _source), do: []
 end
