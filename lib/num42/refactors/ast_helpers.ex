@@ -188,7 +188,7 @@ defmodule Num42.Refactors.AstHelpers do
   end
 
   def humanize_module(mod) when is_atom(mod) and not is_nil(mod) do
-    Atom.to_string(mod) |> handle_to_string()
+    Atom.to_string(mod) |> module_name_underscored()
   end
 
   def humanize_module(_), do: nil
@@ -222,7 +222,7 @@ defmodule Num42.Refactors.AstHelpers do
   def name_from_value({:%, _, [aliases, _]}), do: humanize_module(aliases)
 
   def name_from_value({:__block__, _, [v]}) when is_atom(v) and not is_nil(v) do
-    Atom.to_string(v) |> handle_to_string_2(v)
+    Atom.to_string(v) |> name_from_atom_string(v)
   end
 
   def name_from_value({:__block__, _, [v]}) when is_binary(v) do
@@ -788,7 +788,8 @@ defmodule Num42.Refactors.AstHelpers do
   # slots; anything else stays as a one-grapheme slot.
   defp phoneme_slots(""), do: []
 
-  defp phoneme_slots(stem), do: String.split_at(stem, 2) |> handle_split_at(stem)
+  defp phoneme_slots(stem),
+    do: String.split_at(stem, 2) |> slots_with_leading_digraph_or_char(stem)
 
   defp vowel_slot?(slot), do: slot in ~w(a e i o u y)
 
@@ -1024,7 +1025,7 @@ defmodule Num42.Refactors.AstHelpers do
   end
 
   defp consonant_before_trailing_y?(verb),
-    do: String.slice(verb, -2..-2//1) |> handle_consonant_before_trailing_y_slice()
+    do: String.slice(verb, -2..-2//1) |> consonant?()
 
   @doc """
   Latch-match a short string against a snake_case compound's subtokens.
@@ -1265,7 +1266,7 @@ defmodule Num42.Refactors.AstHelpers do
   defp walk_collision(candidate, base_name, attempt, existing_index, same?, on_collision),
     do:
       Map.fetch(existing_index, candidate)
-      |> handle_walk_collision_fetch(
+      |> resolve_collision_step(
         attempt,
         base_name,
         candidate,
@@ -1357,10 +1358,10 @@ defmodule Num42.Refactors.AstHelpers do
   end
 
   defp head_args_and_guard({:when, _, [inner, guard]}),
-    do: extract_fn_signature(inner) |> handle_extract_fn_signature(guard)
+    do: extract_fn_signature(inner) |> args_or_empty_with_guard(guard)
 
   defp head_args_and_guard(head),
-    do: extract_fn_signature(head) |> handle_extract_fn_signature_2()
+    do: extract_fn_signature(head) |> args_or_empty()
 
   defp fetch_do_body(keyword) do
     keyword
@@ -1540,26 +1541,20 @@ defmodule Num42.Refactors.AstHelpers do
     result
   end
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_to_string("Elixir." <> rest),
+  defp module_name_underscored("Elixir." <> rest),
     do:
       rest
       |> String.split(".")
       |> List.last()
       |> Macro.underscore()
 
-  defp handle_to_string(_), do: nil
+  defp module_name_underscored(_), do: nil
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_to_string_2("Elixir." <> _, v), do: v |> humanize_module()
+  defp name_from_atom_string("Elixir." <> _, v), do: v |> humanize_module()
 
-  defp handle_to_string_2(str, _v), do: str |> sanitize_identifier()
+  defp name_from_atom_string(str, _v), do: str |> sanitize_identifier()
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_walk_collision_fetch(
+  defp resolve_collision_step(
          :error,
          _attempt,
          _base_name,
@@ -1570,7 +1565,7 @@ defmodule Num42.Refactors.AstHelpers do
        ),
        do: {:ok, candidate}
 
-  defp handle_walk_collision_fetch(
+  defp resolve_collision_step(
          {:ok, payload},
          attempt,
          base_name,
@@ -1594,31 +1589,21 @@ defmodule Num42.Refactors.AstHelpers do
     end
   end
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_extract_fn_signature({_name, args}, guard), do: {args, guard}
+  defp args_or_empty_with_guard({_name, args}, guard), do: {args, guard}
+  defp args_or_empty_with_guard(:error, guard), do: {[], guard}
 
-  defp handle_extract_fn_signature(:error, guard), do: {[], guard}
+  defp args_or_empty({_name, args}), do: {args, nil}
+  defp args_or_empty(:error), do: {[], nil}
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_extract_fn_signature_2({_name, args}), do: {args, nil}
+  defp consonant?(""), do: false
+  defp consonant?(ch), do: ch not in ~w(a e i o u y)
 
-  defp handle_extract_fn_signature_2(:error), do: {[], nil}
-
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_consonant_before_trailing_y_slice(""), do: false
-
-  defp handle_consonant_before_trailing_y_slice(ch), do: ch not in ~w(a e i o u y)
-
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_split_at({digraph, rest}, _stem) when digraph in @consonant_digraphs do
+  defp slots_with_leading_digraph_or_char({digraph, rest}, _stem)
+       when digraph in @consonant_digraphs do
     [digraph | phoneme_slots(rest)]
   end
 
-  defp handle_split_at(_, stem) do
+  defp slots_with_leading_digraph_or_char(_, stem) do
     {head, rest} = String.split_at(stem, 1)
     [head | phoneme_slots(rest)]
   end

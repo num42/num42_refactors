@@ -225,10 +225,10 @@ defmodule Num42.Refactors.Refactors.IfLiftToClauses do
   #   - {:is_guard, {pred_name, param_name, extra?}, neg?}
   #   - {:eq_pin, {bind_side, pin_side}, neg?}
   #         where each side is {:param, name} | {:field, root, [atoms]}
-  defp atomize(cond_ast), do: split_conjunction(cond_ast) |> handle_split_conjunction()
+  defp atomize(cond_ast), do: split_conjunction(cond_ast) |> reduce_atoms_or_error()
 
   defp reduce_atom({negated?, leaf}, {:ok, acc}),
-    do: classify_atom(leaf, negated?) |> handle_classify_atom(acc)
+    do: classify_atom(leaf, negated?) |> accumulate_or_halt(acc)
 
   # Flatten an AST into a list of `{negated?, leaf}` pairs combined by
   # AND. Returns `:error` if the AST contains any OR-like combinator.
@@ -312,7 +312,7 @@ defmodule Num42.Refactors.Refactors.IfLiftToClauses do
   # param in [literal, literal, ...]
   defp match_param_in_list({:in, _, [{pname, _, pctx}, list_ast]})
        when is_atom(pname) and is_atom(pctx) do
-    literal_list(list_ast) |> handle_literal_list(pname)
+    literal_list(list_ast) |> param_in_list_or_nil(pname)
   end
 
   defp match_param_in_list(_), do: nil
@@ -388,15 +388,15 @@ defmodule Num42.Refactors.Refactors.IfLiftToClauses do
 
   defp side_for_eq({pname, _, pctx}) when is_atom(pname) and is_atom(pctx), do: {:param, pname}
 
-  defp side_for_eq(other), do: field_chain(other) |> handle_field_chain()
+  defp side_for_eq(other), do: field_chain(other) |> field_tag_or_nil()
 
   # param.f.g.h  (truthy)
-  defp match_field_truthy(node), do: field_chain(node) |> handle_field_chain_2()
+  defp match_field_truthy(node), do: field_chain(node) |> field_truthy_or_nil()
 
   # Walk dot-access and bracket-access chains, ending at a bare var.
   # Bracket-access (`p[:foo]`) is treated identically to `p.foo`.
   defp field_chain({{:., _, [parent, field]}, _, []}) when is_atom(field) do
-    field_chain(parent) |> handle_field_chain_3(field)
+    field_chain(parent) |> append_field_to_chain(field)
   end
 
   defp field_chain({{:., _, [Access, :get]}, _, [parent, key_ast]}) do
@@ -714,7 +714,7 @@ defmodule Num42.Refactors.Refactors.IfLiftToClauses do
   end
 
   defp put_leaf_bind({:fields, kw}, [field], var),
-    do: Keyword.fetch(kw, field) |> handle_put_leaf_bind_fetch(field, kw, var)
+    do: Keyword.fetch(kw, field) |> merge_bind_into_kw(field, kw, var)
 
   defp put_leaf_bind({:fields, kw}, [field | rest], var) do
     sub = Keyword.get(kw, field, {:fields, []})
@@ -902,64 +902,48 @@ defmodule Num42.Refactors.Refactors.IfLiftToClauses do
     end)
   end
 
-  defp render_body_text(body, source), do: slice_node(source, body) |> handle_slice_node(body)
+  defp render_body_text(body, source), do: slice_node(source, body) |> slice_text_or_inspect(body)
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_split_conjunction(:error), do: :error
+  defp reduce_atoms_or_error(:error), do: :error
 
-  defp handle_split_conjunction(atoms) do
+  defp reduce_atoms_or_error(atoms) do
     case atoms |> Enum.reduce_while({:ok, []}, &reduce_atom/2) do
       {:ok, acc} -> {:ok, acc |> Enum.reverse()}
       :error -> :error
     end
   end
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_classify_atom({:ok, atom}, acc), do: {:cont, {:ok, [atom | acc]}}
+  defp accumulate_or_halt({:ok, atom}, acc), do: {:cont, {:ok, [atom | acc]}}
 
-  defp handle_classify_atom(:error, _acc), do: {:halt, :error}
+  defp accumulate_or_halt(:error, _acc), do: {:halt, :error}
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_literal_list({:ok, lits}, pname), do: {:param_in_list, {pname, lits}}
+  defp param_in_list_or_nil({:ok, lits}, pname), do: {:param_in_list, {pname, lits}}
 
-  defp handle_literal_list(:error, _pname), do: nil
+  defp param_in_list_or_nil(:error, _pname), do: nil
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_field_chain({:ok, {root, fields}}), do: {:field, root, fields}
+  defp field_tag_or_nil({:ok, {root, fields}}), do: {:field, root, fields}
 
-  defp handle_field_chain(:error), do: nil
+  defp field_tag_or_nil(:error), do: nil
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_field_chain_2({:ok, {root, fields}}) when fields != [] do
+  defp field_truthy_or_nil({:ok, {root, fields}}) when fields != [] do
     {:field_truthy, {root, fields}}
   end
 
-  defp handle_field_chain_2(_), do: nil
+  defp field_truthy_or_nil(_), do: nil
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_field_chain_3({:ok, {root, fields}}, field), do: {:ok, {root, fields ++ [field]}}
+  defp append_field_to_chain({:ok, {root, fields}}, field), do: {:ok, {root, fields ++ [field]}}
 
-  defp handle_field_chain_3(:error, _field), do: :error
+  defp append_field_to_chain(:error, _field), do: :error
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_put_leaf_bind_fetch(:error, field, kw, var),
+  defp merge_bind_into_kw(:error, field, kw, var),
     do: {:fields, kw ++ [{field, {:bind, var}}]}
 
-  defp handle_put_leaf_bind_fetch({:ok, {:bind, existing}}, field, kw, _var),
+  defp merge_bind_into_kw({:ok, {:bind, existing}}, field, kw, _var),
     do: {:fields, Keyword.put(kw, field, {:bind, existing})}
 
-  defp handle_put_leaf_bind_fetch({:ok, _}, _field, _kw, _var), do: :skip |> throw()
+  defp merge_bind_into_kw({:ok, _}, _field, _kw, _var), do: :skip |> throw()
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_slice_node({:ok, text}, _body), do: text |> String.trim()
+  defp slice_text_or_inspect({:ok, text}, _body), do: text |> String.trim()
 
-  defp handle_slice_node(:error, body), do: body |> Sourceror.to_string()
+  defp slice_text_or_inspect(:error, body), do: body |> Sourceror.to_string()
 end

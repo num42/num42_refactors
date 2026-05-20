@@ -530,7 +530,7 @@ defmodule Num42.Refactors.Refactors.LengthInGuard do
 
   defp replace_pair_value({key_ast, {var_name, _, ctx}} = pair, target_atom, shape)
        when is_atom(var_name) and is_atom(ctx) do
-    map_key_atom(key_ast) |> handle_map_key_atom(key_ast, pair, shape, target_atom)
+    map_key_atom(key_ast) |> pair_with_shape_if_match(key_ast, pair, shape, target_atom)
   end
 
   defp replace_pair_value(other, _, _), do: other
@@ -541,7 +541,8 @@ defmodule Num42.Refactors.Refactors.LengthInGuard do
          shape
        )
        when is_atom(ctx) do
-    map_key_atom(key_ast) |> handle_map_key_atom_2(key_ast, pair, shape, target_atom, var_node)
+    map_key_atom(key_ast)
+    |> pair_with_shape_keeping_binding(key_ast, pair, shape, target_atom, var_node)
   end
 
   defp replace_pair_value_keep_binding(other, _, _), do: other
@@ -585,7 +586,7 @@ defmodule Num42.Refactors.Refactors.LengthInGuard do
     do: Atom.to_string(name)
 
   defp apply_patches({:ok, ast}, source),
-    do: build_patches(ast, source) |> handle_build_patches(source)
+    do: build_patches(ast, source) |> apply_patches_to_source(source)
 
   defp apply_patches({:error, _}, source), do: source
 
@@ -628,7 +629,7 @@ defmodule Num42.Refactors.Refactors.LengthInGuard do
   defp combine_lhs_extract({:ok, var, op, n, lhs_rest}, _lhs, rhs),
     do: {:ok, var, op, n, {:and, [], [lhs_rest, rhs]}}
 
-  defp combine_lhs_extract(:skip, lhs, rhs), do: do_extract(rhs) |> handle_do_extract(lhs)
+  defp combine_lhs_extract(:skip, lhs, rhs), do: do_extract(rhs) |> combine_with_lhs(lhs)
 
   defp wrap_extract_with_int({:ok, n}, op, var), do: {:ok, var, op, n, nil}
 
@@ -711,36 +712,36 @@ defmodule Num42.Refactors.Refactors.LengthInGuard do
 
   defp arg_text_or_fallback(:error, arg), do: arg |> Sourceror.to_string()
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_map_key_atom({:ok, atom}, key_ast, _pair, shape, target_atom)
+  defp pair_with_shape_if_match({:ok, atom}, key_ast, _pair, shape, target_atom)
        when atom == target_atom do
     {key_ast, shape}
   end
 
-  defp handle_map_key_atom(_, _key_ast, pair, _shape, _target_atom), do: pair
+  defp pair_with_shape_if_match(_, _key_ast, pair, _shape, _target_atom), do: pair
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_map_key_atom_2({:ok, atom}, key_ast, _pair, shape, target_atom, var_node)
+  defp pair_with_shape_keeping_binding(
+         {:ok, atom},
+         key_ast,
+         _pair,
+         shape,
+         target_atom,
+         var_node
+       )
        when atom == target_atom do
     {key_ast, {:=, [], [shape, var_node]}}
   end
 
-  defp handle_map_key_atom_2(_, _key_ast, pair, _shape, _target_atom, _var_node), do: pair
+  defp pair_with_shape_keeping_binding(_, _key_ast, pair, _shape, _target_atom, _var_node),
+    do: pair
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_build_patches([], source), do: source
+  defp apply_patches_to_source([], source), do: source
 
-  defp handle_build_patches(patches, source), do: source |> Sourceror.patch_string(patches)
+  defp apply_patches_to_source(patches, source), do: source |> Sourceror.patch_string(patches)
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_do_extract({:ok, var, op, n, nil}, lhs), do: {:ok, var, op, n, lhs}
+  defp combine_with_lhs({:ok, var, op, n, nil}, lhs), do: {:ok, var, op, n, lhs}
 
-  defp handle_do_extract({:ok, var, op, n, rhs_rest}, lhs),
+  defp combine_with_lhs({:ok, var, op, n, rhs_rest}, lhs),
     do: {:ok, var, op, n, {:and, [], [lhs, rhs_rest]}}
 
-  defp handle_do_extract(:skip, _lhs), do: :skip
+  defp combine_with_lhs(:skip, _lhs), do: :skip
 end

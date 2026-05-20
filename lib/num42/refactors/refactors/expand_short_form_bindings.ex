@@ -83,13 +83,13 @@ defmodule Num42.Refactors.Refactors.ExpandShortFormBindings do
 
   # Universal short names: Elixir keywords, Phoenix/Ecto idioms,
   # math/loop conventions, single letters. Project-specific shorts
-  # (domain acronyms like `oz`, `ip`) belong in `.refactoring.exs`
+  # (domain acronyms like `oz`, `ip`) belong in `.refactor.exs`
   # under `whitelist:` and are merged in at runtime.
-  # Whitelist and known mapping live in `.refactoring.exs` — single
+  # Whitelist and known mapping live in `.refactor.exs` — single
   # source of truth shared by all ExpandShortForm refactors.
   @default_whitelist MapSet.new()
 
-  # Project-specific abbreviations live in `.refactoring.exs` under
+  # Project-specific abbreviations live in `.refactor.exs` under
   # `configured_modules` for this refactor — keeps domain knowledge
   # out of the engine module. The empty default here means: with no
   # config, only the smart matchers (RHS / compound context) fire.

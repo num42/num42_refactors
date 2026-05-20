@@ -57,7 +57,7 @@ defmodule Num42.Refactors.Heex.Tree do
   """
   @spec from_source(String.t()) :: {:ok, [sigil]} | :error
   def from_source(source) when is_binary(source) do
-    Sourceror.parse_string(source) |> handle_parse_string()
+    Sourceror.parse_string(source) |> collect_sigils_or_error()
   end
 
   @doc """
@@ -149,7 +149,7 @@ defmodule Num42.Refactors.Heex.Tree do
   defp find_tag_end(body, from), do: body |> do_find_tag_end(from, false, 0)
 
   defp do_find_tag_end(body, pos, in_quote, depth),
-    do: binary_part_safe(body, pos, 1) |> handle_binary_part_safe(body, depth, in_quote, pos)
+    do: binary_part_safe(body, pos, 1) |> tokenize_char(body, depth, in_quote, pos)
 
   defp find_matching_close(body, pos, tag, depth) do
     case :binary.match(body, "<", scope: {pos, byte_size(body) - pos}) do
@@ -188,15 +188,15 @@ defmodule Num42.Refactors.Heex.Tree do
   end
 
   defp tag_close_boundary?(body, pos),
-    do: binary_part_safe(body, pos, 1) |> handle_binary_part_safe_2()
+    do: binary_part_safe(body, pos, 1) |> tag_close_lookahead?()
 
   defp tag_open_boundary?(body, pos),
-    do: binary_part_safe(body, pos, 1) |> handle_binary_part_safe_3()
+    do: binary_part_safe(body, pos, 1) |> tag_open_lookahead?()
 
   defp skip_until_gt(body, pos), do: find_eex_close_shared(body, ">", pos, 1)
 
   defp balance_curlies(body, pos, depth),
-    do: binary_part_safe(body, pos, 1) |> handle_binary_part_safe_4(body, depth, pos)
+    do: binary_part_safe(body, pos, 1) |> balance_curlies_step(body, depth, pos)
 
   # Walk forward looking for nested `<%[=]?...do %>` opens vs. matching
   # `<% end %>` closes. The start position is at the leading `<%` of
@@ -333,7 +333,7 @@ defmodule Num42.Refactors.Heex.Tree do
   defp extract_def_name(_), do: nil
 
   defp parse_sigil_or_skip(%{body: body} = sigil),
-    do: parse_body(body) |> handle_parse_body(sigil)
+    do: parse_body(body) |> attach_tree_or_skip(sigil)
 
   # --- Body parsing ---
 
@@ -344,7 +344,7 @@ defmodule Num42.Refactors.Heex.Tree do
   @spec parse_body(String.t()) :: {:ok, [node_t]} | :error
   def parse_body(body) when is_binary(body) do
     EEx.tokenize(body, line: 1, column: 1, trim: false, indentation: 0)
-    |> handle_parse_body_tokenize()
+    |> parse_tokens_or_error()
   end
 
   defp tokens_to_html(tokens) do
@@ -726,105 +726,89 @@ defmodule Num42.Refactors.Heex.Tree do
     end
   end
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_parse_string({:ok, ast}), do: {:ok, collect_h_sigils(ast)}
+  defp collect_sigils_or_error({:ok, ast}), do: {:ok, collect_h_sigils(ast)}
 
-  defp handle_parse_string({:error, _}), do: :error
+  defp collect_sigils_or_error({:error, _}), do: :error
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_binary_part_safe("", _body, _depth, _in_quote, pos), do: {:open, pos}
+  defp tokenize_char("", _body, _depth, _in_quote, pos), do: {:open, pos}
 
-  defp handle_binary_part_safe("\"", body, depth, in_quote, pos) when not in_quote do
+  defp tokenize_char("\"", body, depth, in_quote, pos) when not in_quote do
     do_find_tag_end(body, pos + 1, :double, depth)
   end
 
-  defp handle_binary_part_safe("\"", body, depth, in_quote, pos) when in_quote == :double do
+  defp tokenize_char("\"", body, depth, in_quote, pos) when in_quote == :double do
     do_find_tag_end(body, pos + 1, false, depth)
   end
 
-  defp handle_binary_part_safe("'", body, depth, in_quote, pos) when not in_quote do
+  defp tokenize_char("'", body, depth, in_quote, pos) when not in_quote do
     do_find_tag_end(body, pos + 1, :single, depth)
   end
 
-  defp handle_binary_part_safe("'", body, depth, in_quote, pos) when in_quote == :single do
+  defp tokenize_char("'", body, depth, in_quote, pos) when in_quote == :single do
     do_find_tag_end(body, pos + 1, false, depth)
   end
 
-  defp handle_binary_part_safe("{", body, depth, in_quote, pos) when in_quote == false do
+  defp tokenize_char("{", body, depth, in_quote, pos) when in_quote == false do
     do_find_tag_end(body, pos + 1, false, depth + 1)
   end
 
-  defp handle_binary_part_safe("}", body, depth, in_quote, pos)
+  defp tokenize_char("}", body, depth, in_quote, pos)
        when in_quote == false and depth > 0 do
     do_find_tag_end(body, pos + 1, false, depth - 1)
   end
 
-  defp handle_binary_part_safe("/", body, depth, in_quote, pos)
+  defp tokenize_char("/", body, depth, in_quote, pos)
        when in_quote == false and depth == 0 do
-    binary_part_safe(body, pos + 1, 1) |> handle_binary_part_safe_5(body, depth, in_quote, pos)
+    binary_part_safe(body, pos + 1, 1) |> slash_close_step(body, depth, in_quote, pos)
   end
 
-  defp handle_binary_part_safe(">", _body, depth, in_quote, pos)
+  defp tokenize_char(">", _body, depth, in_quote, pos)
        when in_quote == false and depth == 0 do
     {:open, pos + 1}
   end
 
-  defp handle_binary_part_safe(_, body, depth, in_quote, pos),
+  defp tokenize_char(_, body, depth, in_quote, pos),
     do: body |> do_find_tag_end(pos + 1, in_quote, depth)
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_binary_part_safe_2(">"), do: true
+  defp tag_close_lookahead?(">"), do: true
 
-  defp handle_binary_part_safe_2(""), do: false
+  defp tag_close_lookahead?(""), do: false
 
-  defp handle_binary_part_safe_2(c), do: c in [" ", "\t", "\n", "\r"]
+  defp tag_close_lookahead?(c), do: c in [" ", "\t", "\n", "\r"]
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_binary_part_safe_3(">"), do: true
+  defp tag_open_lookahead?(">"), do: true
 
-  defp handle_binary_part_safe_3("/"), do: true
+  defp tag_open_lookahead?("/"), do: true
 
-  defp handle_binary_part_safe_3(""), do: false
+  defp tag_open_lookahead?(""), do: false
 
-  defp handle_binary_part_safe_3(c), do: c in [" ", "\t", "\n", "\r"]
+  defp tag_open_lookahead?(c), do: c in [" ", "\t", "\n", "\r"]
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_binary_part_safe_4("", _body, _depth, pos), do: pos
+  defp balance_curlies_step("", _body, _depth, pos), do: pos
 
-  defp handle_binary_part_safe_4("{", body, depth, pos),
+  defp balance_curlies_step("{", body, depth, pos),
     do: body |> balance_curlies(pos + 1, depth + 1)
 
-  defp handle_binary_part_safe_4("}", _body, depth, pos) when depth == 1 do
+  defp balance_curlies_step("}", _body, depth, pos) when depth == 1 do
     pos + 1
   end
 
-  defp handle_binary_part_safe_4("}", body, depth, pos),
+  defp balance_curlies_step("}", body, depth, pos),
     do: body |> balance_curlies(pos + 1, depth - 1)
 
-  defp handle_binary_part_safe_4(_, body, depth, pos), do: body |> balance_curlies(pos + 1, depth)
+  defp balance_curlies_step(_, body, depth, pos), do: body |> balance_curlies(pos + 1, depth)
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_parse_body({:ok, tree}, sigil), do: [Map.put(sigil, :tree, tree)]
+  defp attach_tree_or_skip({:ok, tree}, sigil), do: [Map.put(sigil, :tree, tree)]
 
-  defp handle_parse_body(:error, _sigil), do: []
+  defp attach_tree_or_skip(:error, _sigil), do: []
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_parse_body_tokenize({:ok, tokens}),
+  defp parse_tokens_or_error({:ok, tokens}),
     do: tokens_to_html(tokens) |> parse_html_or_error()
 
-  defp handle_parse_body_tokenize(_), do: :error
+  defp parse_tokens_or_error(_), do: :error
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_binary_part_safe_5(">", _body, _depth, _in_quote, pos), do: {:self, pos + 2}
+  defp slash_close_step(">", _body, _depth, _in_quote, pos), do: {:self, pos + 2}
 
-  defp handle_binary_part_safe_5(_, body, depth, in_quote, pos),
+  defp slash_close_step(_, body, depth, in_quote, pos),
     do: body |> do_find_tag_end(pos + 1, in_quote, depth)
 end

@@ -133,10 +133,11 @@ defmodule Num42.Refactors.Refactors.ExtractSharedModule do
   def reformat_after?, do: true
 
   @impl Num42.Refactors.Refactor
-  def prepare(opts), do: Keyword.get(opts, :source_files) |> handle_prepare_get(opts)
+  def prepare(opts), do: Keyword.get(opts, :source_files) |> prepared_for_paths(opts)
 
   @impl Num42.Refactors.Refactor
-  def transform(source, opts), do: Keyword.get(opts, :prepared) |> handle_transform_get(source)
+  def transform(source, opts),
+    do: Keyword.get(opts, :prepared) |> rewrite_with_plan_or_passthrough(source)
 
   @doc """
   Build a rewrite plan from `[{path, source_string}]` tuples.
@@ -257,7 +258,7 @@ defmodule Num42.Refactors.Refactors.ExtractSharedModule do
   # ---- Source extraction ----------------------------------------------
 
   defp extract_module_info({_path, source}, min_mass),
-    do: Sourceror.parse_string(source) |> handle_parse_string(min_mass, source)
+    do: Sourceror.parse_string(source) |> extract_from_parse_result(min_mass, source)
 
   defp extract_from_ast(ast, source, min_mass) do
     ast
@@ -342,7 +343,7 @@ defmodule Num42.Refactors.Refactors.ExtractSharedModule do
   defp def_clause?(_), do: false
 
   defp def_name_arity_or_skip({kind, _, [head | _]}) when kind in [:def, :defp] do
-    strip_when(head) |> handle_strip_when(kind)
+    strip_when(head) |> kind_name_arity_or_skip(kind)
   end
 
   defp strip_when({:when, _, [inner | _]}), do: inner
@@ -460,7 +461,7 @@ defmodule Num42.Refactors.Refactors.ExtractSharedModule do
   end
 
   defp attr_migratable?(name, module_attrs),
-    do: Map.fetch(module_attrs, name) |> handle_attr_migratable_fetch()
+    do: Map.fetch(module_attrs, name) |> attr_value_literal?()
 
   defp value_literal?(ast) do
     {_, ok?} =
@@ -865,7 +866,7 @@ defmodule Num42.Refactors.Refactors.ExtractSharedModule do
   defp plan_for_group({_key, [_only]}, _write_root), do: {[], %{}}
 
   defp plan_for_group({{name, arity, _hash}, entries}, write_root),
-    do: decide_target(entries) |> handle_decide_target(arity, entries, name, write_root)
+    do: decide_target(entries) |> patches_for_target_or_empty(arity, entries, name, write_root)
 
   defp check_and_emit(entries, name, arity, target_module, _write_root) do
     cond do
@@ -1352,7 +1353,7 @@ defmodule Num42.Refactors.Refactors.ExtractSharedModule do
     end
   end
 
-  defp clause_name_arity({_kind, _, [head | _]}), do: strip_when(head) |> handle_strip_when_2()
+  defp clause_name_arity({_kind, _, [head | _]}), do: strip_when(head) |> name_arity_or_sentinel()
 
   # Render a def/defp clause back to source, with all aliases in the
   # body fully qualified.
@@ -1392,7 +1393,7 @@ defmodule Num42.Refactors.Refactors.ExtractSharedModule do
   # ---- Per-file rewrite (delegates + helper deletion) ----------------
 
   defp rewrite(source, plan),
-    do: Sourceror.parse_string(source) |> handle_parse_string_2(plan, source)
+    do: Sourceror.parse_string(source) |> apply_plan_to_parse_result(plan, source)
 
   defp apply_plan_to_ast(ast, source, plan) do
     ast
@@ -1422,10 +1423,10 @@ defmodule Num42.Refactors.Refactors.ExtractSharedModule do
   end
 
   defp patches_for_module(module, body_exprs, plan),
-    do: Map.get(plan, module) |> handle_patches_for_module_get(body_exprs)
+    do: Map.get(plan, module) |> module_patches(body_exprs)
 
   defp entry_still_applicable?(body_exprs, entry),
-    do: Map.get(entry, :hash) |> handle_entry_still_applicable_get(body_exprs, entry)
+    do: Map.get(entry, :hash) |> entry_still_applicable?(body_exprs, entry)
 
   defp normalize_entry(%{kind: _} = m), do: m
 
@@ -1723,7 +1724,7 @@ defmodule Num42.Refactors.Refactors.ExtractSharedModule do
   # ---- Default source loading -----------------------------------------
 
   defp load_default_sources,
-    do: File.read(".refactoring.exs") |> handle_load_default_sources_read()
+    do: File.read(".refactor.exs") |> parse_inputs_from_config()
 
   defp excluded_path?(path?) do
     # CLI shell expansion (`mix refactor ./dev/**/*.ex`) leaves `./`
@@ -1734,52 +1735,40 @@ defmodule Num42.Refactors.Refactors.ExtractSharedModule do
     @excluded_path_prefixes |> Enum.any?(&String.starts_with?(normalized, &1))
   end
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_prepare_get(nil, opts),
-    do: load_default_sources() |> handle_load_default_sources(opts)
+  defp prepared_for_paths(nil, opts),
+    do: load_default_sources() |> plan_from_sources(opts)
 
-  defp handle_prepare_get(paths, opts) when is_list(paths) do
+  defp prepared_for_paths(paths, opts) when is_list(paths) do
     sources = paths |> Enum.map(fn p -> {p, File.read!(p)} end)
     {:ok, build_plan(sources, opts)}
   end
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_transform_get(nil, source), do: source
+  defp rewrite_with_plan_or_passthrough(nil, source), do: source
 
-  defp handle_transform_get(plan, source), do: source |> rewrite(plan)
+  defp rewrite_with_plan_or_passthrough(plan, source), do: source |> rewrite(plan)
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_parse_string({:ok, ast}, min_mass, source),
+  defp extract_from_parse_result({:ok, ast}, min_mass, source),
     do: ast |> extract_from_ast(source, min_mass)
 
-  defp handle_parse_string({:error, _}, _min_mass, _source), do: []
+  defp extract_from_parse_result({:error, _}, _min_mass, _source), do: []
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_strip_when({name, _, args}, kind) when is_atom(name) and is_list(args) do
+  defp kind_name_arity_or_skip({name, _, args}, kind) when is_atom(name) and is_list(args) do
     {kind, name, length(args)}
   end
 
-  defp handle_strip_when({name, _, nil}, kind) when is_atom(name) do
+  defp kind_name_arity_or_skip({name, _, nil}, kind) when is_atom(name) do
     {kind, name, 0}
   end
 
-  defp handle_strip_when(_, _kind), do: :skip
+  defp kind_name_arity_or_skip(_, _kind), do: :skip
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_attr_migratable_fetch({:ok, value}), do: value |> value_literal?()
+  defp attr_value_literal?({:ok, value}), do: value |> value_literal?()
 
-  defp handle_attr_migratable_fetch(:error), do: false
+  defp attr_value_literal?(:error), do: false
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_decide_target(:skip, _arity, _entries, _name, _write_root), do: {[], %{}}
+  defp patches_for_target_or_empty(:skip, _arity, _entries, _name, _write_root), do: {[], %{}}
 
-  defp handle_decide_target({:ok, target_module}, arity, entries, name, write_root) do
+  defp patches_for_target_or_empty({:ok, target_module}, arity, entries, name, write_root) do
     case entries |> Enum.find(&(&1.module == target_module)) do
       nil ->
         check_and_emit(entries, name, arity, target_module, write_root)
@@ -1789,27 +1778,22 @@ defmodule Num42.Refactors.Refactors.ExtractSharedModule do
     end
   end
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_strip_when_2({name, _, args}) when is_list(args) do
+  defp name_arity_or_sentinel({name, _, args}) when is_list(args) do
     {name, length(args)}
   end
 
-  defp handle_strip_when_2({name, _, nil}), do: {name, 0}
+  defp name_arity_or_sentinel({name, _, nil}), do: {name, 0}
 
-  defp handle_strip_when_2(_), do: {nil, -1}
+  defp name_arity_or_sentinel(_), do: {nil, -1}
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_parse_string_2({:ok, ast}, plan, source), do: ast |> apply_plan_to_ast(source, plan)
+  defp apply_plan_to_parse_result({:ok, ast}, plan, source),
+    do: ast |> apply_plan_to_ast(source, plan)
 
-  defp handle_parse_string_2({:error, _}, _plan, source), do: source
+  defp apply_plan_to_parse_result({:error, _}, _plan, source), do: source
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_patches_for_module_get(nil, _body_exprs), do: []
+  defp module_patches(nil, _body_exprs), do: []
 
-  defp handle_patches_for_module_get(entries, body_exprs) do
+  defp module_patches(entries, body_exprs) do
     normalized_entries = entries |> Enum.map(&normalize_entry/1)
 
     # Drop entries whose target clause has already been rewritten
@@ -1838,18 +1822,14 @@ defmodule Num42.Refactors.Refactors.ExtractSharedModule do
     rewrite_patches ++ import_patches ++ cleanup_patches
   end
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_entry_still_applicable_get(nil, _body_exprs, _entry), do: true
+  defp entry_still_applicable?(nil, _body_exprs, _entry), do: true
 
-  defp handle_entry_still_applicable_get(expected_hash, body_exprs, entry) do
+  defp entry_still_applicable?(expected_hash, body_exprs, entry) do
     clauses = body_exprs |> Enum.filter(&clause_matches?(&1, entry.name, entry.arity))
     clauses != [] and hash_clauses(clauses) == expected_hash
   end
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_load_default_sources_read({:ok, contents}) do
+  defp parse_inputs_from_config({:ok, contents}) do
     {config, _} = Code.eval_string(contents)
     inputs = Keyword.get(config, :inputs, [])
 
@@ -1861,11 +1841,9 @@ defmodule Num42.Refactors.Refactors.ExtractSharedModule do
     |> Enum.map(fn p -> {p, File.read!(p)} end)
   end
 
-  defp handle_load_default_sources_read(_), do: []
+  defp parse_inputs_from_config(_), do: []
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_load_default_sources([], _opts), do: :no_cache
+  defp plan_from_sources([], _opts), do: :no_cache
 
-  defp handle_load_default_sources(sources, opts), do: {:ok, build_plan(sources, opts)}
+  defp plan_from_sources(sources, opts), do: {:ok, build_plan(sources, opts)}
 end

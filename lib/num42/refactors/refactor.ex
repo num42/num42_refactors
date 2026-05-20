@@ -71,7 +71,7 @@ defmodule Num42.Refactors.Refactor do
   cleanup steps that must come after body-simplifying passes
   (e.g. `InlineSingleExpressionDef`, `UnusedVariable`).
 
-  Can be overridden per refactor in `.refactoring.exs` via
+  Can be overridden per refactor in `.refactor.exs` via
   `configured_modules: [{Mod, priority: 200}]` — the config value wins
   over the module default.
 

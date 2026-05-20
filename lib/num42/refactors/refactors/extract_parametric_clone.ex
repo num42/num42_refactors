@@ -75,10 +75,11 @@ defmodule Num42.Refactors.Refactors.ExtractParametricClone do
   def priority, do: 110
 
   @impl Num42.Refactors.Refactor
-  def prepare(opts), do: Keyword.get(opts, :source_files) |> handle_prepare_get(opts)
+  def prepare(opts), do: Keyword.get(opts, :source_files) |> prepared_for_paths(opts)
 
   @impl Num42.Refactors.Refactor
-  def transform(source, opts), do: Keyword.get(opts, :prepared) |> handle_transform_get(source)
+  def transform(source, opts),
+    do: Keyword.get(opts, :prepared) |> rewrite_with_plan_or_passthrough(source)
 
   # ---------------------------------------------------------------------
   # Plan building
@@ -340,7 +341,7 @@ defmodule Num42.Refactors.Refactors.ExtractParametricClone do
   # declared, import statements already present, helper functions
   # already defined.
   defp render_target_body_for_append(source, infos),
-    do: Sourceror.parse_string(source) |> handle_parse_string(infos)
+    do: Sourceror.parse_string(source) |> render_target_or_apply(infos)
 
   defp scan_existing_target_body(ast) do
     body_exprs =
@@ -1240,7 +1241,7 @@ defmodule Num42.Refactors.Refactors.ExtractParametricClone do
     # inner-bound holes get unified into canonical local names inside
     # the helper body without showing up at the call-site.
     classify_holes(skeleton, holes, entries)
-    |> handle_classify_holes(
+    |> classify_holes_step(
       entries,
       first,
       helper_name,
@@ -1380,7 +1381,7 @@ defmodule Num42.Refactors.Refactors.ExtractParametricClone do
     rest |> Enum.all?(&(keys.(&1) == first_keys))
   end
 
-  defp clause_name_arity({_kind, _, [head | _]}), do: strip_when(head) |> handle_strip_when()
+  defp clause_name_arity({_kind, _, [head | _]}), do: strip_when(head) |> name_arity_or_sentinel()
 
   # Walk the AST, replace every {:__aliases__, meta, [Single]} that
   # matches a known alias with the fully-qualified module path.
@@ -1467,7 +1468,7 @@ defmodule Num42.Refactors.Refactors.ExtractParametricClone do
   # ---------------------------------------------------------------------
 
   defp extract_module_info({path, source}, min_mass),
-    do: Sourceror.parse_string(source) |> handle_parse_string_2(min_mass, path)
+    do: Sourceror.parse_string(source) |> extract_from_parse_result_for_path(min_mass, path)
 
   defp extract_from_ast(ast, path, min_mass) do
     ast
@@ -1541,7 +1542,7 @@ defmodule Num42.Refactors.Refactors.ExtractParametricClone do
   end
 
   defp clause_signature({kind, _, [head | _]}),
-    do: extract_fn_signature(head) |> handle_extract_fn_signature(kind)
+    do: extract_fn_signature(head) |> signature_or_skip(kind)
 
   defp clause_in_multi_clause_set?(clause, set),
     do: set |> MapSet.member?(clause_signature(clause))
@@ -1918,7 +1919,7 @@ defmodule Num42.Refactors.Refactors.ExtractParametricClone do
   end
 
   defp attr_migratable?(name, module_attrs),
-    do: Map.fetch(module_attrs, name) |> handle_attr_migratable_fetch()
+    do: Map.fetch(module_attrs, name) |> attr_value_or_false()
 
   defp attr_value_literal?(ast) do
     {_, ok?} =
@@ -1993,7 +1994,7 @@ defmodule Num42.Refactors.Refactors.ExtractParametricClone do
 
   # bare_var/1 from AstHelpers already returns {:ok, name_atom} |
   # :skip — adapt :skip → :error for our convention.
-  defp bare_var_name(node), do: bare_var(node) |> handle_bare_var()
+  defp bare_var_name(node), do: bare_var(node) |> var_name_or_error()
 
   defp clause_mass({_kind, _, [_head, body_kw]}),
     do: body_kw |> Keyword.values() |> Enum.map(&node_count/1) |> Enum.sum()
@@ -2090,7 +2091,7 @@ defmodule Num42.Refactors.Refactors.ExtractParametricClone do
   def pick_target(entries) do
     by_module = entries |> Enum.group_by(& &1.module)
 
-    best_intra_concentration(by_module) |> handle_best_intra_concentration(by_module, entries)
+    best_intra_concentration(by_module) |> target_from_concentration_or_suffix(by_module, entries)
   end
 
   defp best_intra_concentration(by_module) do
@@ -2197,7 +2198,7 @@ defmodule Num42.Refactors.Refactors.ExtractParametricClone do
   # ---------------------------------------------------------------------
 
   defp rewrite(source, plan),
-    do: Sourceror.parse_string(source) |> handle_parse_string_3(plan, source)
+    do: Sourceror.parse_string(source) |> apply_plan_to_parse_result(plan, source)
 
   defp apply_plan_to_ast(ast, source, plan) do
     ast
@@ -2350,10 +2351,10 @@ defmodule Num42.Refactors.Refactors.ExtractParametricClone do
   defp clause_matches?(_, _, _), do: false
 
   defp clause_replacement_patch(clause, replacement),
-    do: Sourceror.get_range(clause) |> handle_get_range(replacement)
+    do: Sourceror.get_range(clause) |> patch_for_range(replacement)
 
   defp insert_helpers_patch(mod_node, helpers),
-    do: Sourceror.get_range(mod_node) |> handle_get_range_2(helpers)
+    do: Sourceror.get_range(mod_node) |> helper_append_patches(helpers)
 
   # Whether `body_ast` survives `Sourceror.to_string`. Some hole
   # positions (Ecto.from `bind in Schema` LHS, alias segments,
@@ -2498,34 +2499,28 @@ defmodule Num42.Refactors.Refactors.ExtractParametricClone do
   # ---------------------------------------------------------------------
 
   defp load_default_sources,
-    do: File.read(".refactoring.exs") |> handle_load_default_sources_read()
+    do: File.read(".refactor.exs") |> parse_inputs_from_config()
 
   defp excluded_path?(path?) do
     normalized = String.trim_leading(path?, "./")
     @excluded_path_prefixes |> Enum.any?(&String.starts_with?(normalized, &1))
   end
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_prepare_get(nil, opts),
-    do: load_default_sources() |> handle_load_default_sources(opts)
+  defp prepared_for_paths(nil, opts),
+    do: load_default_sources() |> plan_from_sources(opts)
 
-  defp handle_prepare_get(paths, opts) when is_list(paths) do
+  defp prepared_for_paths(paths, opts) when is_list(paths) do
     sources = paths |> Enum.map(fn p -> {p, File.read!(p)} end)
     {:ok, build_plan(sources, opts)}
   end
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_transform_get(nil, source), do: source
+  defp rewrite_with_plan_or_passthrough(nil, source), do: source
 
-  defp handle_transform_get(plan, source), do: source |> rewrite(plan)
+  defp rewrite_with_plan_or_passthrough(plan, source), do: source |> rewrite(plan)
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_parse_string({:error, _}, infos), do: infos |> render_target_body()
+  defp render_target_or_apply({:error, _}, infos), do: infos |> render_target_body()
 
-  defp handle_parse_string({:ok, ast}, infos) do
+  defp render_target_or_apply({:ok, ast}, infos) do
     existing = scan_existing_target_body(ast)
 
     attrs =
@@ -2562,9 +2557,7 @@ defmodule Num42.Refactors.Refactors.ExtractParametricClone do
     |> Enum.join("\n\n")
   end
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_classify_holes(
+  defp classify_holes_step(
          :skip_group,
          _entries,
          _first,
@@ -2576,7 +2569,7 @@ defmodule Num42.Refactors.Refactors.ExtractParametricClone do
        ),
        do: {[], state}
 
-  defp handle_classify_holes(
+  defp classify_holes_step(
          {outer_holes, local_groups, all_bound},
          entries,
          first,
@@ -2600,66 +2593,49 @@ defmodule Num42.Refactors.Refactors.ExtractParametricClone do
            state
          )
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_strip_when({name, _, args}) when is_list(args) do
+  defp name_arity_or_sentinel({name, _, args}) when is_list(args) do
     {name, length(args)}
   end
 
-  defp handle_strip_when({name, _, nil}), do: {name, 0}
+  defp name_arity_or_sentinel({name, _, nil}), do: {name, 0}
 
-  defp handle_strip_when(_), do: {nil, -1}
+  defp name_arity_or_sentinel(_), do: {nil, -1}
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_parse_string_2({:ok, ast}, min_mass, path),
+  defp extract_from_parse_result_for_path({:ok, ast}, min_mass, path),
     do: ast |> extract_from_ast(path, min_mass)
 
-  defp handle_parse_string_2({:error, _}, _min_mass, _path), do: []
+  defp extract_from_parse_result_for_path({:error, _}, _min_mass, _path), do: []
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_extract_fn_signature({name, args}, kind) when is_list(args) do
+  defp signature_or_skip({name, args}, kind) when is_list(args) do
     {kind, name, length(args)}
   end
 
-  defp handle_extract_fn_signature(_, _kind), do: :__skip__
+  defp signature_or_skip(_, _kind), do: :__skip__
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_attr_migratable_fetch({:ok, value}), do: value |> attr_value_literal?()
+  defp attr_value_or_false({:ok, value}), do: value |> attr_value_literal?()
 
-  defp handle_attr_migratable_fetch(:error), do: false
+  defp attr_value_or_false(:error), do: false
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_bare_var({:ok, name}), do: {:ok, name}
+  defp var_name_or_error({:ok, name}), do: {:ok, name}
 
-  defp handle_bare_var(:skip), do: :error
+  defp var_name_or_error(:skip), do: :error
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_best_intra_concentration({:ok, mod}, _by_module, _entries), do: {:intra, mod}
+  defp target_from_concentration_or_suffix({:ok, mod}, _by_module, _entries), do: {:intra, mod}
 
-  defp handle_best_intra_concentration(:none, by_module, entries),
-    do: first_suffix_match(by_module) |> handle_first_suffix_match(entries)
+  defp target_from_concentration_or_suffix(:none, by_module, entries),
+    do: first_suffix_match(by_module) |> target_from_suffix_or_lcp(entries)
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_parse_string_3({:ok, ast}, plan, source), do: ast |> apply_plan_to_ast(source, plan)
+  defp apply_plan_to_parse_result({:ok, ast}, plan, source),
+    do: ast |> apply_plan_to_ast(source, plan)
 
-  defp handle_parse_string_3({:error, _}, _plan, source), do: source
+  defp apply_plan_to_parse_result({:error, _}, _plan, source), do: source
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_get_range(%{end: end_pos, start: start_pos}, replacement),
+  defp patch_for_range(%{end: end_pos, start: start_pos}, replacement),
     do: [%{change: replacement, range: %{end: end_pos, start: start_pos}}]
 
-  defp handle_get_range(_, _replacement), do: []
+  defp patch_for_range(_, _replacement), do: []
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_get_range_2(%{end: end_pos}, helpers) do
+  defp helper_append_patches(%{end: end_pos}, helpers) do
     rendered =
       helpers
       |> Enum.map(&render_helper/1)
@@ -2677,11 +2653,9 @@ defmodule Num42.Refactors.Refactors.ExtractParametricClone do
     [%{change: rendered <> "\n", range: %{end: insert_pos, start: insert_pos}}]
   end
 
-  defp handle_get_range_2(_, _helpers), do: []
+  defp helper_append_patches(_, _helpers), do: []
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_load_default_sources_read({:ok, contents}) do
+  defp parse_inputs_from_config({:ok, contents}) do
     {config, _} = Code.eval_string(contents)
     inputs = Keyword.get(config, :inputs, [])
 
@@ -2693,24 +2667,18 @@ defmodule Num42.Refactors.Refactors.ExtractParametricClone do
     |> Enum.map(fn p -> {p, File.read!(p)} end)
   end
 
-  defp handle_load_default_sources_read(_), do: []
+  defp parse_inputs_from_config(_), do: []
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_load_default_sources([], _opts), do: :no_cache
+  defp plan_from_sources([], _opts), do: :no_cache
 
-  defp handle_load_default_sources(sources, opts), do: {:ok, build_plan(sources, opts)}
+  defp plan_from_sources(sources, opts), do: {:ok, build_plan(sources, opts)}
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_first_suffix_match({:ok, mod}, _entries), do: {:suffix, mod}
+  defp target_from_suffix_or_lcp({:ok, mod}, _entries), do: {:suffix, mod}
 
-  defp handle_first_suffix_match(:none, entries),
-    do: lcp_shared_module(entries) |> handle_lcp_shared_module()
+  defp target_from_suffix_or_lcp(:none, entries),
+    do: lcp_shared_module(entries) |> target_from_lcp_or_skip()
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_lcp_shared_module({:ok, mod}), do: {:lcp_shared, mod}
+  defp target_from_lcp_or_skip({:ok, mod}), do: {:lcp_shared, mod}
 
-  defp handle_lcp_shared_module(:skip), do: :skip
+  defp target_from_lcp_or_skip(:skip), do: :skip
 end

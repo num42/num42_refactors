@@ -15,7 +15,7 @@ defmodule Num42.Refactors.Engine do
   input for `AliasOrder`.
 
   A refactor's priority comes from its `priority/0` callback (default
-  `100` when not implemented). The `.refactoring.exs` config can
+  `100` when not implemented). The `.refactor.exs` config can
   override it per module via `configured_modules: [{Mod, priority: N}]`
   — config wins over the module default.
 

@@ -49,7 +49,7 @@ defmodule Num42.Refactors.Refactors.UnusedVariable do
 
   ## Configuring the whitelist
 
-  Add an entry under `configured_modules` in `.refactoring.exs`:
+  Add an entry under `configured_modules` in `.refactor.exs`:
 
       configured_modules: [
         {Num42.Refactors.Refactors.UnusedVariable,
@@ -92,7 +92,7 @@ defmodule Num42.Refactors.Refactors.UnusedVariable do
   # Default whitelist: names we never rename even if they look unused.
   # `assigns` is the canonical Phoenix component arg — `~H` sigils
   # reference it implicitly via `@field` expansion, which our AST walk
-  # can't see. Override via `:whitelist` in `.refactoring.exs`:
+  # can't see. Override via `:whitelist` in `.refactor.exs`:
   #
   #     configured_modules: [
   #       {Num42.Refactors.Refactors.UnusedVariable,

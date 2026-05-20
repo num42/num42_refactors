@@ -37,7 +37,7 @@ defmodule Num42.Refactors.Refactors.ExtractNestedBlock do
 
   Auto-discovered. The nesting threshold mirrors
   `Credo.Check.Refactor.Nesting`: extract any `fn` whose body sits at
-  effective depth `> max_nesting`. Configure via `.refactoring.exs`:
+  effective depth `> max_nesting`. Configure via `.refactor.exs`:
 
       configured_modules: [
         {Num42.Refactors.Refactors.ExtractNestedBlock, max_nesting: 2}

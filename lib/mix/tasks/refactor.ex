@@ -5,7 +5,7 @@ defmodule Mix.Tasks.Refactor do
   Runs every `Num42.Refactors.Refactor` against the project's
   source files.
 
-  Configuration lives in `.refactoring.exs` at the project root:
+  Configuration lives in `.refactor.exs` at the project root:
 
       [
         inputs: ["{config,dev,lib,test}/**/*.{ex,exs}"],
@@ -345,7 +345,7 @@ defmodule Mix.Tasks.Refactor do
   ]
 
   # Cross-file refactors that historically read `:source_files` and
-  # fall back to scanning the full `.refactoring.exs` inputs when
+  # fall back to scanning the full `.refactor.exs` inputs when
   # absent — which silently ignores the CLI path selection. Thread
   # the resolved file list through so explicit `mix refactor ./test/...`
   # actually constrains these refactors.

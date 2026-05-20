@@ -85,7 +85,7 @@ defmodule Num42.Refactors.Refactors.ExpandShortFormFunctions do
   @impl Num42.Refactors.Refactor
   def reformat_after?, do: true
 
-  # Whitelist and known mapping live in `.refactoring.exs` — single
+  # Whitelist and known mapping live in `.refactor.exs` — single
   # source of truth shared by all ExpandShortForm refactors. The
   # defaults here are empty so config drives everything.
   @default_whitelist MapSet.new()

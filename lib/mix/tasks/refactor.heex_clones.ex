@@ -19,7 +19,7 @@ defmodule Mix.Tasks.Refactor.HeexClones do
 
   ## Usage
 
-      mix refactor.heex_clones                  # all modes, all inputs from .refactoring.exs
+      mix refactor.heex_clones                  # all modes, all inputs from .refactor.exs
       mix refactor.heex_clones lib/foo.ex       # restrict to specific paths
       mix refactor.heex_clones --mode exact     # one mode only
       mix refactor.heex_clones --mode class_stripped --mode attrs_stripped
@@ -28,7 +28,7 @@ defmodule Mix.Tasks.Refactor.HeexClones do
       mix refactor.heex_clones --code           # inline source snippet for each occurrence
       mix refactor.heex_clones --code --context 2  # add 2 lines of context before each snippet
 
-  Inputs default to the `:inputs` glob from `.refactoring.exs`. A
+  Inputs default to the `:inputs` glob from `.refactor.exs`. A
   manual list of paths overrides that.
 
   ## Output
@@ -50,7 +50,7 @@ defmodule Mix.Tasks.Refactor.HeexClones do
   alias Num42.Refactors.Heex.Clones
   import Mix.Tasks.Refactor.Shared, only: [expand_inputs_shared: 1]
 
-  @config_path ".refactoring.exs"
+  @config_path ".refactor.exs"
   @switches [
     mode: :keep,
     min_mass: :integer,

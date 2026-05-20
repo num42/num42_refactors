@@ -98,10 +98,10 @@ defmodule Num42.Refactors.Refactors.ExtractRenamedClone do
   def reformat_after?, do: true
 
   @impl Num42.Refactors.Refactor
-  def prepare(opts), do: Keyword.get(opts, :source_files) |> handle_prepare_get(opts)
+  def prepare(opts), do: Keyword.get(opts, :source_files) |> prepared_for_paths(opts)
 
   @impl Num42.Refactors.Refactor
-  def transform(source, opts), do: Keyword.get(opts, :prepared) |> handle_transform_get(source)
+  def transform(source, opts), do: Keyword.get(opts, :prepared) |> rewrite_with_plan_or_passthrough(source)
 
   @doc """
   Build a rewrite plan from `[{path, source_string}]` tuples.
@@ -142,7 +142,7 @@ defmodule Num42.Refactors.Refactors.ExtractRenamedClone do
   # ---- Source extraction ----------------------------------------------
 
   defp extract_module_info({_path, source}, min_mass),
-    do: Sourceror.parse_string(source) |> handle_parse_string(min_mass, source)
+    do: Sourceror.parse_string(source) |> extract_from_parse_result(min_mass, source)
 
   defp extract_from_ast(ast, _source, min_mass) do
     ast
@@ -179,7 +179,7 @@ defmodule Num42.Refactors.Refactors.ExtractRenamedClone do
   defp def_clause?(_), do: false
 
   defp def_name_arity_or_skip({kind, _, [head | _]}) when kind in [:def, :defp] do
-    strip_when(head) |> handle_strip_when(kind)
+    strip_when(head) |> kind_name_arity_or_skip(kind)
   end
 
   defp build_function_entry(module, kind, name, arity, clauses, min_mass) do
@@ -222,7 +222,7 @@ defmodule Num42.Refactors.Refactors.ExtractRenamedClone do
     end
   end
 
-  defp clause_arg_names({_kind, _, [head | _]}), do: strip_when(head) |> handle_strip_when_2()
+  defp clause_arg_names({_kind, _, [head | _]}), do: strip_when(head) |> arg_names_or_empty()
 
   defp plain_var_clause?({_kind, _, [head | _]}) do
     case strip_when(head) do
@@ -391,7 +391,7 @@ defmodule Num42.Refactors.Refactors.ExtractRenamedClone do
   # ---- Per-file rewrite -----------------------------------------------
 
   defp rewrite(source, plan),
-    do: Sourceror.parse_string(source) |> handle_parse_string_2(plan, source)
+    do: Sourceror.parse_string(source) |> apply_plan_to_parse_result(plan, source)
 
   defp apply_plan_to_ast(ast, source, plan) do
     ast
@@ -410,7 +410,7 @@ defmodule Num42.Refactors.Refactors.ExtractRenamedClone do
   end
 
   defp patches_for_module(module, body_exprs, plan),
-    do: Map.get(plan, module) |> handle_patches_for_module_get(body_exprs)
+    do: Map.get(plan, module) |> module_patches(body_exprs)
 
   defp patch_for_entry(body_exprs, entry) do
     clauses = body_exprs |> Enum.filter(&clause_matches?(&1, entry.name, entry.arity))
@@ -445,7 +445,7 @@ defmodule Num42.Refactors.Refactors.ExtractRenamedClone do
   end
 
   defp clause_replacement_patch(clause, replacement),
-    do: Sourceror.get_range(clause) |> handle_get_range(replacement)
+    do: Sourceror.get_range(clause) |> patch_for_range(replacement)
 
   defp patch_or_passthrough([], source), do: source
   defp patch_or_passthrough(patches, source), do: Sourceror.patch_string(source, patches)
@@ -502,7 +502,7 @@ defmodule Num42.Refactors.Refactors.ExtractRenamedClone do
   defp append_if_missing(path, target_module, group) do
     source = File.read!(path)
 
-    Sourceror.parse_string(source) |> handle_parse_string_3(group, path, source, target_module)
+    Sourceror.parse_string(source) |> splice_new_shared_items(group, path, source, target_module)
   end
 
   defp collect_existing_function_keys(ast, target_module) do
@@ -580,73 +580,55 @@ defmodule Num42.Refactors.Refactors.ExtractRenamedClone do
     end)
   end
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_prepare_get(nil, _opts), do: {:ok, %{}}
+  defp prepared_for_paths(nil, _opts), do: {:ok, %{}}
 
-  defp handle_prepare_get(paths, opts) when is_list(paths) do
+  defp prepared_for_paths(paths, opts) when is_list(paths) do
     sources = paths |> Enum.map(fn p -> {p, File.read!(p)} end)
     {:ok, build_plan(sources, opts)}
   end
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_transform_get(nil, source), do: source
+  defp rewrite_with_plan_or_passthrough(nil, source), do: source
 
-  defp handle_transform_get(plan, source), do: source |> rewrite(plan)
+  defp rewrite_with_plan_or_passthrough(plan, source), do: source |> rewrite(plan)
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_parse_string({:ok, ast}, min_mass, source),
+  defp extract_from_parse_result({:ok, ast}, min_mass, source),
     do: ast |> extract_from_ast(source, min_mass)
 
-  defp handle_parse_string({:error, _}, _min_mass, _source), do: []
+  defp extract_from_parse_result({:error, _}, _min_mass, _source), do: []
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_strip_when({name, _, args}, kind) when is_atom(name) and is_list(args) do
+  defp kind_name_arity_or_skip({name, _, args}, kind) when is_atom(name) and is_list(args) do
     {kind, name, length(args)}
   end
 
-  defp handle_strip_when({name, _, nil}, kind) when is_atom(name) do
+  defp kind_name_arity_or_skip({name, _, nil}, kind) when is_atom(name) do
     {kind, name, 0}
   end
 
-  defp handle_strip_when(_, _kind), do: :skip
+  defp kind_name_arity_or_skip(_, _kind), do: :skip
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_strip_when_2({_name, _, args}) when is_list(args) do
+  defp arg_names_or_empty({_name, _, args}) when is_list(args) do
     args |> Enum.map(fn {n, _, _} -> n end)
   end
 
-  defp handle_strip_when_2({_name, _, nil}), do: []
+  defp arg_names_or_empty({_name, _, nil}), do: []
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_parse_string_2({:ok, ast}, plan, source), do: ast |> apply_plan_to_ast(source, plan)
+  defp apply_plan_to_parse_result({:ok, ast}, plan, source), do: ast |> apply_plan_to_ast(source, plan)
 
-  defp handle_parse_string_2({:error, _}, _plan, source), do: source
+  defp apply_plan_to_parse_result({:error, _}, _plan, source), do: source
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_patches_for_module_get(nil, _body_exprs), do: []
+  defp module_patches(nil, _body_exprs), do: []
 
-  defp handle_patches_for_module_get(entries, body_exprs),
+  defp module_patches(entries, body_exprs),
     do:
       entries
       |> Enum.flat_map(&patch_for_entry(body_exprs, &1))
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_get_range(%{end: end_pos, start: start_pos}, replacement),
+  defp patch_for_range(%{end: end_pos, start: start_pos}, replacement),
     do: [%{change: replacement, range: %{end: end_pos, start: start_pos}}]
 
-  defp handle_get_range(_, _replacement), do: []
+  defp patch_for_range(_, _replacement), do: []
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_parse_string_3({:ok, ast}, group, path, source, target_module) do
+  defp splice_new_shared_items({:ok, ast}, group, path, source, target_module) do
     existing_keys = collect_existing_function_keys(ast, target_module)
 
     new_items =
@@ -663,5 +645,5 @@ defmodule Num42.Refactors.Refactors.ExtractRenamedClone do
     end
   end
 
-  defp handle_parse_string_3(_, _group, _path, _source, _target_module), do: :ok
+  defp splice_new_shared_items(_, _group, _path, _source, _target_module), do: :ok
 end

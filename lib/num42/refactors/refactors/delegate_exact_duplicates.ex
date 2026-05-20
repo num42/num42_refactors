@@ -42,7 +42,7 @@ defmodule Num42.Refactors.Refactors.DelegateExactDuplicates do
   Detecting duplicates requires seeing every input file, not just the
   one being rewritten. The engine calls `prepare/1` once per pipeline
   run; we read every source listed in `opts[:source_files]` (defaults
-  to the project's `.refactoring.exs` `:inputs` glob), parse each,
+  to the project's `.refactor.exs` `:inputs` glob), parse each,
   hash every public function body, and emit a per-module rewrite plan.
   `transform/2` then just looks up the plan for the current module.
 
@@ -119,10 +119,11 @@ defmodule Num42.Refactors.Refactors.DelegateExactDuplicates do
   def reformat_after?, do: true
 
   @impl Num42.Refactors.Refactor
-  def prepare(opts), do: Keyword.get(opts, :source_files) |> handle_prepare_get()
+  def prepare(opts), do: Keyword.get(opts, :source_files) |> prepared_for_paths()
 
   @impl Num42.Refactors.Refactor
-  def transform(source, opts), do: Keyword.get(opts, :prepared) |> handle_transform_get(source)
+  def transform(source, opts),
+    do: Keyword.get(opts, :prepared) |> rewrite_with_plan_or_passthrough(source)
 
   @doc """
   Build a rewrite plan from a list of `{path, source_string}` pairs.
@@ -177,7 +178,7 @@ defmodule Num42.Refactors.Refactors.DelegateExactDuplicates do
   # functions are collapsed into a single entry whose hash combines all
   # clauses; that way `def foo(0)` + `def foo(n)` is treated atomically.
   defp extract_functions({_path, source}, min_mass),
-    do: Sourceror.parse_string(source) |> handle_parse_string(min_mass)
+    do: Sourceror.parse_string(source) |> extract_functions_or_empty(min_mass)
 
   defp extract_functions_from_ast(ast, min_mass) do
     ast
@@ -207,7 +208,7 @@ defmodule Num42.Refactors.Refactors.DelegateExactDuplicates do
   defp def_clause?({:def, _, [_head | _]}), do: true
   defp def_clause?(_), do: false
 
-  defp def_name_arity_or_skip({:def, _, [head | _]}), do: strip_when(head) |> handle_strip_when()
+  defp def_name_arity_or_skip({:def, _, [head | _]}), do: strip_when(head) |> name_arity_or_skip()
 
   defp strip_when({:when, _, [inner | _]}), do: inner
   defp strip_when(other), do: other
@@ -372,7 +373,7 @@ defmodule Num42.Refactors.Refactors.DelegateExactDuplicates do
   # ---- Per-file rewrite -----------------------------------------------
 
   defp rewrite(source, plan),
-    do: Sourceror.parse_string(source) |> handle_parse_string_2(plan, source)
+    do: Sourceror.parse_string(source) |> apply_plan_to_parse_result(plan, source)
 
   defp apply_plan_to_ast(ast, source, plan) do
     ast
@@ -391,7 +392,7 @@ defmodule Num42.Refactors.Refactors.DelegateExactDuplicates do
   end
 
   defp patches_for_module(module, body_exprs, plan),
-    do: Map.get(plan, module) |> handle_patches_for_module_get(body_exprs)
+    do: Map.get(plan, module) |> module_patches(body_exprs)
 
   # Find defps that, after delegation, are only reachable from the
   # functions we just delegated away. They become unused — emit delete
@@ -629,57 +630,47 @@ defmodule Num42.Refactors.Refactors.DelegateExactDuplicates do
   # ---- Default source loading -----------------------------------------
 
   defp load_default_sources,
-    do: File.read(".refactoring.exs") |> handle_load_default_sources_read()
+    do: File.read(".refactor.exs") |> parse_inputs_from_config()
 
   defp excluded_path?(path?) do
     normalized = String.trim_leading(path?, "./")
     @excluded_path_prefixes |> Enum.any?(&String.starts_with?(normalized, &1))
   end
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_prepare_get(nil), do: load_default_sources() |> handle_load_default_sources()
+  defp prepared_for_paths(nil), do: load_default_sources() |> plan_from_sources()
 
-  defp handle_prepare_get(paths) when is_list(paths) do
+  defp prepared_for_paths(paths) when is_list(paths) do
     sources = paths |> Enum.map(fn p -> {p, File.read!(p)} end)
     {:ok, build_plan(sources)}
   end
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_transform_get(nil, source), do: source
+  defp rewrite_with_plan_or_passthrough(nil, source), do: source
 
-  defp handle_transform_get(plan, source), do: source |> rewrite(plan)
+  defp rewrite_with_plan_or_passthrough(plan, source), do: source |> rewrite(plan)
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_parse_string({:ok, ast}, min_mass), do: ast |> extract_functions_from_ast(min_mass)
+  defp extract_functions_or_empty({:ok, ast}, min_mass),
+    do: ast |> extract_functions_from_ast(min_mass)
 
-  defp handle_parse_string({:error, _}, _min_mass), do: []
+  defp extract_functions_or_empty({:error, _}, _min_mass), do: []
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_strip_when({name, _, args}) when is_atom(name) and is_list(args) do
+  defp name_arity_or_skip({name, _, args}) when is_atom(name) and is_list(args) do
     {name, length(args)}
   end
 
-  defp handle_strip_when({name, _, nil}) when is_atom(name) do
+  defp name_arity_or_skip({name, _, nil}) when is_atom(name) do
     {name, 0}
   end
 
-  defp handle_strip_when(_), do: :skip
+  defp name_arity_or_skip(_), do: :skip
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_parse_string_2({:ok, ast}, plan, source), do: ast |> apply_plan_to_ast(source, plan)
+  defp apply_plan_to_parse_result({:ok, ast}, plan, source),
+    do: ast |> apply_plan_to_ast(source, plan)
 
-  defp handle_parse_string_2({:error, _}, _plan, source), do: source
+  defp apply_plan_to_parse_result({:error, _}, _plan, source), do: source
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_patches_for_module_get(nil, _body_exprs), do: []
+  defp module_patches(nil, _body_exprs), do: []
 
-  defp handle_patches_for_module_get(entries, body_exprs) do
+  defp module_patches(entries, body_exprs) do
     delegate_patches =
       entries
       |> Enum.flat_map(fn {name, arity, args, winner} ->
@@ -690,9 +681,7 @@ defmodule Num42.Refactors.Refactors.DelegateExactDuplicates do
     delegate_patches ++ cleanup_patches
   end
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_load_default_sources_read({:ok, contents}) do
+  defp parse_inputs_from_config({:ok, contents}) do
     {config, _} = Code.eval_string(contents)
     inputs = Keyword.get(config, :inputs, [])
 
@@ -704,11 +693,9 @@ defmodule Num42.Refactors.Refactors.DelegateExactDuplicates do
     |> Enum.map(fn path -> {path, File.read!(path)} end)
   end
 
-  defp handle_load_default_sources_read(_), do: []
+  defp parse_inputs_from_config(_), do: []
 
-  # FIXME: extracted automatically by ExtractCaseToHelper — review
-  # the parameter list and consider a better name.
-  defp handle_load_default_sources([]), do: :no_cache
+  defp plan_from_sources([]), do: :no_cache
 
-  defp handle_load_default_sources(sources), do: {:ok, build_plan(sources)}
+  defp plan_from_sources(sources), do: {:ok, build_plan(sources)}
 end
