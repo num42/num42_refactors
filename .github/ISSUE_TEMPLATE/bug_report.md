@@ -6,14 +6,57 @@ labels: bug
 assignees: ''
 ---
 
-> **Status:** STUB template — flesh out as we collect real reports.
+## Affected refactor
 
-## TODO checklist for reporter
+<!-- e.g. Number42.Refactors.Ex.AliasOrder -->
 
-- [ ] Affected refactor module (e.g. `Number42.Refactors.Ex.AliasOrder`).
-- [ ] `number42_refactors` version, Elixir version, OTP version.
-- [ ] Minimal input source (10–30 lines, complete `defmodule`).
-- [ ] Expected output.
-- [ ] Actual output (or stack trace).
-- [ ] `mix refactor --log` output for that file, if non-empty.
-- [ ] Steps to reproduce (`mix refactor path/to/file.ex`).
+## Versions
+
+- `number42_refactors`:
+- Elixir:
+- OTP:
+- Operating system:
+
+## Minimal input
+
+<!-- 10-30 lines, a complete defmodule that triggers the bug. -->
+
+```elixir
+```
+
+## Expected output
+
+```elixir
+```
+
+## Actual output
+
+<!-- Paste the resulting source, or the full stack trace if the
+     refactor crashed. -->
+
+```elixir
+```
+
+## Reproduction
+
+<!-- The exact command you ran, e.g.:
+     mix refactor --only AliasOrder lib/path/to/file.ex
+-->
+
+```sh
+```
+
+## `mix refactor --log` output
+
+<details>
+<summary>Click to expand</summary>
+
+```
+```
+
+</details>
+
+## Additional context
+
+<!-- Anything else worth knowing: how often it happens, related issues,
+     workarounds you tried. -->

@@ -81,7 +81,8 @@ defmodule Number42.Refactors.MixProject do
         "guides/safety-and-limitations.md",
         "guides/performance.md",
         "guides/refactor-catalog.md",
-        "CONTRIBUTING.md"
+        "CONTRIBUTING.md",
+        "CODE_OF_CONDUCT.md"
       ],
       groups_for_extras: [
         Guides: Path.wildcard("guides/*.md")
@@ -99,8 +100,7 @@ defmodule Number42.Refactors.MixProject do
         ],
         "Mix Tasks": [
           Mix.Tasks.Refactor,
-          Mix.Tasks.Refactor.HeexClones,
-          Mix.Tasks.Refactor.Shared
+          Mix.Tasks.Refactor.HeexClones
         ],
         "HEEx Internals": [
           Number42.Refactors.Heex.Clones,

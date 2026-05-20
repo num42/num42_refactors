@@ -215,7 +215,7 @@ becomes deterministic and obvious.
 
 ## Validation
 
-The loader (`Mix.Tasks.Refactor.Shared`) validates:
+The loader (in `lib/mix/tasks/refactor/shared.ex`) validates:
 
 - the file exists at the project root
 - it evaluates to a map

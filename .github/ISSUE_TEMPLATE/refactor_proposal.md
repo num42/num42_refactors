@@ -6,18 +6,49 @@ labels: enhancement, refactor-proposal
 assignees: ''
 ---
 
-> **Status:** STUB template — refine after first real proposals.
+## Working name
 
-## TODO checklist for proposer
+<!-- e.g. Number42.Refactors.Ex.FooBar -->
 
-- [ ] Working name of the refactor (e.g. `Number42.Refactors.Ex.FooBar`).
-- [ ] One-line description.
-- [ ] **Before** snippet (≤ 15 lines).
-- [ ] **After** snippet (≤ 15 lines).
-- [ ] Why this rewrite is **semantics-preserving** — explicitly call out
-  edge cases you've considered (macros, sigils, side effects).
-- [ ] Why this rewrite is **idempotent** — re-running the refactor on
-  the After snippet must produce the same output.
-- [ ] Suggested priority (default 100).
-- [ ] Any `prepare/1` need (project-wide data) — yes/no.
-- [ ] Existing prior art (Credo check, Sourceror example, blog post).
+## One-line description
+
+<!-- The `description/0` callback you'd write. Keep it short. -->
+
+## Before
+
+```elixir
+```
+
+## After
+
+```elixir
+```
+
+## Why is this rewrite semantics-preserving?
+
+<!-- Walk through the edge cases you considered: macros, sigils,
+     side effects, exceptions, type signatures. -->
+
+## Why is this rewrite idempotent?
+
+<!-- Running the refactor on the After snippet must produce the
+     same output. Explain why. -->
+
+## Suggested priority
+
+<!-- Default is 100. Higher runs earlier. Use a non-default value
+     only if order matters relative to another refactor. -->
+
+## Does it need `prepare/1`?
+
+<!-- yes / no, with a short note on what project-wide data the
+     refactor would precompute. -->
+
+## Prior art
+
+<!-- Credo check, Sourceror example, blog post, similar refactor in
+     another tool (Styler/Quokka/Refactorex). Optional but useful. -->
+
+## Additional context
+
+<!-- Anything else worth knowing. -->

@@ -6,13 +6,37 @@ labels: enhancement
 assignees: ''
 ---
 
-> **Status:** STUB template.
+## Surface affected
 
-## TODO checklist for reporter
+<!-- Pick one or more:
+     - engine
+     - Mix task
+     - Refactor behaviour
+     - .refactor.exs schema
+     - docs / guides
+     - CI / packaging
+-->
 
-- [ ] Which surface is affected — engine / Mix task / behaviour / docs / CI / packaging.
-- [ ] Problem statement (what's painful today, with a concrete example).
-- [ ] Proposed solution.
-- [ ] Alternatives considered.
-- [ ] Compatibility implications (does this break existing `.refactor.exs`
-  configs, the `Refactor` behaviour, or callers?).
+## Problem
+
+<!-- What's painful or impossible today? A concrete example or
+     failure mode is more useful than an abstract description. -->
+
+## Proposed solution
+
+<!-- The shape of the API / behaviour / config you'd like.
+     Code sketch welcome. -->
+
+## Alternatives considered
+
+<!-- What other shapes did you weigh? Why did you discard them? -->
+
+## Compatibility implications
+
+<!-- Does this break existing `.refactor.exs` configs?
+     Existing Refactor implementations? Existing callers of
+     Number42.Refactors.Engine? -->
+
+## Additional context
+
+<!-- Anything else worth knowing. -->
