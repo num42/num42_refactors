@@ -8,7 +8,7 @@ defmodule Num42.Refactors.MixProject do
     [
       app: :num42_refactors,
       version: @version,
-      elixir: "~> 1.17",
+      elixir: "~> 1.18",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       deps: deps(),
