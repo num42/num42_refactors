@@ -1613,13 +1613,13 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
   end
 
   describe "regression — excluded path prefixes are filtered from sources" do
-    # When the CLI runs `mix refactor ./test/**/*.ex`, Test-Quellen
-    # landen in build_plan/2. Ein Test-Modul wie `MyApp.Shared`
-    # in `test/support/shared.ex` würde sonst ein `lib/my_app/shared.ex`
-    # aus Test-Code ableiten — Test-Module gehören nicht in den
-    # Lib-Tree. `build_plan/2` muss `test/`- und
-    # `dev/refactors/refactors/`-Pfade aus den Quellen droppen, bevor
-    # es nach Klonen sucht.
+    # When the CLI runs `mix refactor ./test/**/*.ex`, test sources land
+    # in `build_plan/2`. A test module like `MyApp.Shared` in
+    # `test/support/shared.ex` would otherwise derive a
+    # `lib/my_app/shared.ex` from test code — but test modules don't
+    # belong in the lib tree. `build_plan/2` has to drop `test/` and
+    # `dev/refactors/refactors/` paths from the sources before looking
+    # for clones.
     test "test/ paths are dropped from sources", %{tmp: tmp} do
       a = """
       defmodule MyApp.Foo do
@@ -1756,8 +1756,8 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
       end
       """
 
-      # Test-Quelle definiert eine dritte Kopie; die darf NICHT in den
-      # Plan und nicht in die Origin-Liste einfließen.
+      # Test source defines a third copy; it must NOT enter the plan
+      # and must NOT show up in the origin list.
       test_c = """
       defmodule MyApp.Test.C do
         def shared_op(scope, attrs) do

@@ -131,9 +131,8 @@ defmodule Number42.Refactors.Ex.ExtractToPipelineTest do
 
   describe "rewrites — inside larger expressions" do
     # Function-call argument position is pipe-safe — `f(a |> g())`
-    # parses cleanly. The user's "schon innerhalb pipe" rule was
-    # about the call ITSELF being a pipe stage, not about being
-    # nested under one.
+    # parses cleanly. The "already inside a pipe" rule was about the
+    # call ITSELF being a pipe stage, not about being nested under one.
     test "Enum call as function argument is rewritten" do
       assert_rewrites(
         @subject,

@@ -27,6 +27,22 @@ defmodule Number42.Refactors.Ex.ExtractHeexExactClone do
     do: "Extract `:exact` HEEx clones into the configured CoreComponents module"
 
   @impl Number42.Refactors.Refactor
+  def explanation do
+    """
+    Duplicated HEEx markup is one of the most expensive forms of clone:
+    every copy has to be kept visually identical by humans, and any drift
+    silently becomes a UX inconsistency. We detect byte-for-byte identical
+    HEEx subtrees that appear in two or more templates, lift them into a
+    single function component in the configured CoreComponents module, and
+    replace every occurrence with a call to that component. Free `@assigns`
+    and outer `for`-loop bindings referenced inside the clone are forwarded
+    as attrs, so the lifted component is self-contained. The result is
+    fewer lines of HEEx, one source of truth per shared markup block, and
+    a real component boundary where there used to be only copy/paste.
+    """
+  end
+
+  @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
 
   @impl Number42.Refactors.Refactor

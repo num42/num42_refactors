@@ -68,9 +68,10 @@ defmodule Mix.Tasks.Refactor do
   it prints either `[Module]: clear` or one `[Module]: hit <path>` line
   per file followed by the per-file hunk diff — so a human can review
   one refactor's effects across the whole codebase at a time. This mode
-  is single-pass alphabetical; no fixpoint loop. Folge-Effekte (Refactor
-  A's output feeding Refactor B that runs *before* it alphabetically)
-  aren't captured — run `mix refactor` again afterwards if needed.
+  is single-pass alphabetical; no fixpoint loop. Knock-on effects
+  (refactor A's output feeding refactor B that runs *before* it
+  alphabetically) aren't captured — run `mix refactor` again
+  afterwards if needed.
   Combines with `--stop` (halt after the first refactor that has any
   hits), `--dry-run` (don't write), `--only`, `--log`, and `--test`.
 
@@ -100,14 +101,14 @@ defmodule Mix.Tasks.Refactor do
 
   ## Examples
 
-      mix refactor                                    # alles, in-place schreiben
-      mix refactor lib/foo.ex                         # nur ein File
-      mix refactor --dry-run                          # diff-preview, kein Write
-      mix refactor --check                            # CI-Gate, exit non-zero wenn unsauber
+      mix refactor                                    # everything, write in place
+      mix refactor lib/foo.ex                         # one file only
+      mix refactor --dry-run                          # diff preview, no write
+      mix refactor --check                            # CI gate, exit non-zero when dirty
       mix refactor --only RejectIsNil --only EnumCapture
-      mix refactor -syl                               # stop, dry? nein → write, log
-      mix refactor -y --dry-run --stop                # step-mode, halt nach erstem Refactor mit Hits
-      mix refactor -ytl                               # step-mode + tests + log nach jedem Refactor
+      mix refactor -syl                               # stop, write (not dry), log
+      mix refactor -y --dry-run --stop                # step mode, halt after first refactor with hits
+      mix refactor -ytl                               # step mode + tests + log after each refactor
 
   ## Pipeline
 

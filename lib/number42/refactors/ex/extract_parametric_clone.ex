@@ -2109,9 +2109,9 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
           candidates
           |> Enum.max_by(fn {mod, count} ->
             # Tie-break order on equal count:
-            #   1. Mehr Modul-Tiefe (Punkte) gewinnt → Module.split-Länge
-            #   2. Längerer Modulname (String-Länge) gewinnt
-            #   3. Alphabetisch erstes (= grösste invertierte Codepoints)
+            #   1. Deeper module path wins → Module.split length
+            #   2. Longer module name (string length) wins
+            #   3. Alphabetically first (= largest inverted codepoints)
             {count, length(Module.split(mod)), String.length(inspect(mod)), invert_alpha(mod)}
           end)
           |> elem(0)

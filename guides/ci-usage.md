@@ -1,22 +1,223 @@
 # Using `number42_refactors` in CI
 
-> **Status:** STUB — to be filled.
+How to wire the refactor engine into continuous integration — as a
+quality gate, as a bot that opens PRs, or as a pre-commit hook.
 
-How to wire the refactor engine into continuous integration.
+## The three CI modes
 
-## TODO outline
+| Mode               | Command                            | Behaviour                                          |
+|--------------------|------------------------------------|----------------------------------------------------|
+| Gate               | `mix refactor --check`             | Exit non-zero if anything would change. No writes. |
+| Suggest            | `mix refactor --dry-run --log`     | Print the diff and per-refactor rationale.         |
+| Apply              | `mix refactor --auto`              | Apply, commit one-per-refactor in a bot branch.    |
 
-- [ ] **`--check` mode** — exit code semantics, what counts as „would
-  change", interaction with `mix format --check-formatted`.
-- [ ] **GitHub Actions example** — full workflow yaml with caching.
-- [ ] **GitLab CI example** — short equivalent.
-- [ ] **Pre-commit hook** — `.pre-commit-config.yaml` snippet, when to use
-  vs. CI-only.
-- [ ] **PR-comment workflow** — running `mix refactor --auto` on a bot
-  branch and opening a PR with the diff.
-- [ ] **Performance in CI** — when to cache `_build`, when not, parallel
-  test sharding considerations.
-- [ ] **Suppressing noisy refactors** — `skipped_modules` for refactors
-  that produce large, opinionated diffs in legacy code.
-- [ ] **Reporting** — using `--log` output as a CI artifact, machine-readable
-  output formats (future work?).
+Pick the mode that matches your team's appetite. A typical evolution
+is gate → suggest (in a PR comment bot) → apply (auto-merge from a
+trusted bot branch).
+
+## Gate mode: `mix refactor --check`
+
+The pure quality-gate use case. The task exits non-zero the moment any
+refactor would produce a diff, prints the offending files, and writes
+nothing. Equivalent in spirit to `mix format --check-formatted`.
+
+### GitHub Actions
+
+```yaml
+# .github/workflows/refactor-check.yml
+name: refactor check
+on: [pull_request, push]
+
+jobs:
+  refactor-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: '1.18'
+          otp-version: '27'
+      - name: Cache deps and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-${{ hashFiles('mix.lock') }}
+          restore-keys: ${{ runner.os }}-mix-
+      - run: mix deps.get
+      - run: mix refactor --check
+```
+
+### GitLab CI
+
+```yaml
+refactor:check:
+  image: hexpm/elixir:1.18.0-erlang-27.0-alpine-3.20.0
+  cache:
+    key: $CI_COMMIT_REF_SLUG
+    paths: [deps/, _build/]
+  script:
+    - mix deps.get
+    - mix refactor --check
+```
+
+### Interaction with `mix format --check-formatted`
+
+Run *both* in CI, but in this order:
+
+1. `mix format --check-formatted` — fails first if formatting drift
+   exists. Cheap.
+2. `mix refactor --check` — fails second if a refactor would fire.
+   More expensive.
+
+Don't reverse the order. A refactor pass that flags formatting
+issues is harder to interpret than a clean formatter check that
+isolated the problem to layout vs. structure.
+
+## Suggest mode: PR-comment bot
+
+Apply the refactors on a side branch, post the diff to the PR as a
+comment, and let humans decide whether to pull it in.
+
+```yaml
+# .github/workflows/refactor-suggest.yml
+name: refactor suggest
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  suggest:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: '1.18'
+          otp-version: '27'
+      - run: mix deps.get
+      - name: Compute suggested diff
+        run: |
+          mix refactor --dry-run --log > refactor-suggestions.txt || true
+      - name: Post comment
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          path: refactor-suggestions.txt
+```
+
+`--log` adds the per-refactor rationale to the diff — invaluable in a
+PR comment because it answers "why would this be a good change?"
+inline.
+
+## Apply mode: auto-PR bot
+
+Run `mix refactor --auto` on `main` on a schedule, push the result to a
+bot branch, open a PR. Reviewers see one commit per refactor and can
+cherry-pick.
+
+```yaml
+# .github/workflows/refactor-apply.yml
+name: refactor apply (weekly)
+on:
+  schedule:
+    - cron: '0 9 * * 1'  # Monday 09:00 UTC
+  workflow_dispatch:
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: '1.18'
+          otp-version: '27'
+      - run: |
+          git config user.name "refactor-bot"
+          git config user.email "refactor-bot@example.invalid"
+          git checkout -b refactor/auto-$(date +%Y-%m-%d)
+      - run: mix deps.get
+      - run: mix refactor --auto
+      - run: |
+          git push origin HEAD
+          gh pr create \
+            --title "refactor: weekly auto-pass" \
+            --body "Generated by \`mix refactor --auto\`." \
+            --label "automated"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+```
+
+`--auto` produces **one commit per refactor**, so the PR is
+review-friendly: a reviewer can read commit-by-commit and drop
+individual commits with `git rebase -i` if needed.
+
+## Pre-commit hook
+
+For teams that prefer catching drift before it reaches CI:
+
+```yaml
+# .pre-commit-config.yaml
+repos:
+  - repo: local
+    hooks:
+      - id: mix-refactor-check
+        name: mix refactor --check
+        entry: mix refactor --check
+        language: system
+        pass_filenames: false
+        types: [elixir]
+```
+
+Trade-off vs. CI: pre-commit catches problems earlier, but it slows
+down every commit by however long the refactor pass takes. For large
+codebases, prefer CI; for small ones, the speed cost is negligible.
+
+## Performance in CI
+
+- **Cache `_build` and `deps`.** Without the cache, every CI run
+  re-compiles the whole project plus the engine. With the cache,
+  incremental builds add seconds rather than minutes.
+- **Don't shard the refactor pass.** `mix refactor` is fast (most
+  refactors are pure AST walks). Sharding adds coordination cost
+  without buying much.
+- **Skip expensive refactors selectively.** Cross-file extractors
+  (`ExtractSharedModule`, HEEx clones) walk every file in `inputs`
+  to build their cluster table. If your repo has tens of thousands
+  of files, consider running these on a separate, slower schedule
+  rather than every PR.
+
+```elixir
+# .refactor.exs — fast CI variant
+%{
+  inputs: ["lib/**/*.ex", "test/**/*.exs"],
+  skipped_modules: [
+    Number42.Refactors.Ex.ExtractSharedModule,
+    Number42.Refactors.Ex.ExtractParametricClone,
+    Number42.Refactors.Ex.ExtractRenamedClone,
+    Number42.Refactors.Ex.ExtractHeexExactClone
+  ]
+}
+```
+
+Run those omitted refactors weekly in a separate workflow.
+
+## Suppressing noisy refactors
+
+In legacy code, some refactors produce large, opinionated diffs that
+aren't worth the churn. Add them to `skipped_modules` in
+`.refactor.exs` — don't pile up `--only` flags in CI commands. The
+config is the single source of truth.
+
+## Reporting
+
+`--log` output is machine-readable enough to be parsed for dashboards
+(grep for `Applied <Module>` lines, count per refactor, plot over
+time). A structured output format is on the roadmap; until then,
+treat `--log` as the contract.
