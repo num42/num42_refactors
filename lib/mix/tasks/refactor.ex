@@ -2,7 +2,7 @@ defmodule Mix.Tasks.Refactor do
   @shortdoc "Run AST refactor pipeline on source files"
 
   @moduledoc """
-  Runs every `Num42.Refactors.Refactor` against the project's
+  Runs every `Number42.Refactors.Refactor` against the project's
   source files.
 
   Configuration lives in `.refactor.exs` at the project root:
@@ -127,7 +127,7 @@ defmodule Mix.Tasks.Refactor do
 
   use Mix.Task
 
-  alias Num42.Refactors.Engine
+  alias Number42.Refactors.Engine
   import Mix.Tasks.Refactor.Shared, only: [expand_inputs_shared: 1]
 
   @config_path ".refactor.exs"
@@ -341,7 +341,7 @@ defmodule Mix.Tasks.Refactor do
   # so each refactor's `prepare/1` receives `paths: <files>` without
   # adding a top-level engine concept.
   @cross_file_refactors [
-    Num42.Refactors.Refactors.ExtractHeexExactClone
+    Number42.Refactors.Ex.ExtractHeexExactClone
   ]
 
   # Cross-file refactors that historically read `:source_files` and
@@ -350,10 +350,10 @@ defmodule Mix.Tasks.Refactor do
   # the resolved file list through so explicit `mix refactor ./test/...`
   # actually constrains these refactors.
   @source_files_refactors [
-    Num42.Refactors.Refactors.DelegateExactDuplicates,
-    Num42.Refactors.Refactors.ExtractParametricClone,
-    Num42.Refactors.Refactors.ExtractRenamedClone,
-    Num42.Refactors.Refactors.ExtractSharedModule
+    Number42.Refactors.Ex.DelegateExactDuplicates,
+    Number42.Refactors.Ex.ExtractParametricClone,
+    Number42.Refactors.Ex.ExtractRenamedClone,
+    Number42.Refactors.Ex.ExtractSharedModule
   ]
 
   defp inject_paths_for_cross_file_refactors(configured, files),

@@ -1,8 +1,8 @@
-defmodule Num42.Refactors.Heex.FingerprintTest do
+defmodule Number42.Refactors.Heex.FingerprintTest do
   use ExUnit.Case, async: true
 
-  alias Num42.Refactors.Heex.Fingerprint
-  alias Num42.Refactors.Heex.Tree
+  alias Number42.Refactors.Heex.Fingerprint
+  alias Number42.Refactors.Heex.Tree
 
   defp parse!(body) do
     {:ok, tree} = Tree.parse_body(body)

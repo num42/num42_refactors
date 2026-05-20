@@ -1,4 +1,4 @@
-defmodule Num42.RefactorCase do
+defmodule Number42.RefactorCase do
   @moduledoc """
   Test helper for refactor module smoke tests.
 
@@ -25,7 +25,7 @@ defmodule Num42.RefactorCase do
 
   using do
     quote do
-      import Num42.RefactorCase
+      import Number42.RefactorCase
     end
   end
 

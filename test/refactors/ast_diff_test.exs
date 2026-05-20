@@ -1,7 +1,7 @@
-defmodule Num42.Refactors.AstDiffTest do
+defmodule Number42.Refactors.AstDiffTest do
   use ExUnit.Case, async: true
 
-  alias Num42.Refactors.AstDiff
+  alias Number42.Refactors.AstDiff
 
   defp parse(src) do
     {:ok, ast} = Sourceror.parse_string(src)

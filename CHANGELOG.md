@@ -16,5 +16,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `mix refactor` task with `--check` (CI), `--log` (per-refactor
   rationale + diff), `--auto` (commit per refactor), `--step-by-step`,
   and `--dry-run` modes.
-- `Num42.Refactors.Refactor` behaviour for authoring custom refactors.
+- `Number42.Refactors.Refactor` behaviour for authoring custom refactors.
 - `.refactor.exs` project-level configuration.

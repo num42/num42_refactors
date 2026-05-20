@@ -1,7 +1,7 @@
-defmodule Num42.Refactors.AstHelpersTest do
+defmodule Number42.Refactors.AstHelpersTest do
   use ExUnit.Case, async: true
 
-  alias Num42.Refactors.AstHelpers
+  alias Number42.Refactors.AstHelpers
 
   describe "slice_node/2 — literal-direct rendering" do
     test "bare atom" do
@@ -852,7 +852,7 @@ defmodule Num42.Refactors.AstHelpersTest do
   end
 
   describe "inline_pipes/1 — rewrite |> chains as nested calls" do
-    alias Num42.Refactors.AstHelpers
+    alias Number42.Refactors.AstHelpers
 
     test "non-pipe AST is returned unchanged" do
       ast = quote do: foo(1, 2)
@@ -905,7 +905,7 @@ defmodule Num42.Refactors.AstHelpersTest do
   end
 
   describe "humanize_module/1 — derive a snake_case name from a module" do
-    alias Num42.Refactors.AstHelpers
+    alias Number42.Refactors.AstHelpers
 
     test "single-segment module" do
       assert AstHelpers.humanize_module(MyApp) == "my_app"
@@ -941,7 +941,7 @@ defmodule Num42.Refactors.AstHelpersTest do
   end
 
   describe "name_from_value/1 — derive a candidate identifier from an AST hole-value" do
-    alias Num42.Refactors.AstHelpers
+    alias Number42.Refactors.AstHelpers
 
     test "bare variable: `{:building, _, nil}` → `building`" do
       assert AstHelpers.name_from_value({:building, [], nil}) == "building"

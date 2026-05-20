@@ -47,7 +47,7 @@ defmodule Mix.Tasks.Refactor.HeexClones do
 
   use Mix.Task
 
-  alias Num42.Refactors.Heex.Clones
+  alias Number42.Refactors.Heex.Clones
   import Mix.Tasks.Refactor.Shared, only: [expand_inputs_shared: 1]
 
   @config_path ".refactor.exs"

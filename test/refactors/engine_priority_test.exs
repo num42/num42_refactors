@@ -1,14 +1,14 @@
-defmodule Num42.Refactors.EnginePriorityTest do
+defmodule Number42.Refactors.EnginePriorityTest do
   use ExUnit.Case, async: true
 
-  alias Num42.Refactors.Engine
+  alias Number42.Refactors.Engine
 
-  alias Num42.Refactors.Refactors.AliasOrder
-  alias Num42.Refactors.Refactors.ExpandShortFormBindings
-  alias Num42.Refactors.Refactors.InlineSingleExpressionDef
-  alias Num42.Refactors.Refactors.MultiAliasExpand
-  alias Num42.Refactors.Refactors.RejectIsNil
-  alias Num42.Refactors.Refactors.SortFunctions
+  alias Number42.Refactors.Ex.AliasOrder
+  alias Number42.Refactors.Ex.ExpandShortFormBindings
+  alias Number42.Refactors.Ex.InlineSingleExpressionDef
+  alias Number42.Refactors.Ex.MultiAliasExpand
+  alias Number42.Refactors.Ex.RejectIsNil
+  alias Number42.Refactors.Ex.SortFunctions
 
   describe "pipeline_modules/1 default ordering" do
     test "high-priority modules run before default ones" do

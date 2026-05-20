@@ -1,7 +1,7 @@
-defmodule Num42.Refactors.Heex.TreeTest do
+defmodule Number42.Refactors.Heex.TreeTest do
   use ExUnit.Case, async: true
 
-  alias Num42.Refactors.Heex.Tree
+  alias Number42.Refactors.Heex.Tree
 
   describe "parse_body/1" do
     test "parses a simple element with literal children" do

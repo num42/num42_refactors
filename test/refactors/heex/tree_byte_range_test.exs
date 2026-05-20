@@ -1,7 +1,7 @@
-defmodule Num42.Refactors.Heex.TreeByteRangeTest do
+defmodule Number42.Refactors.Heex.TreeByteRangeTest do
   use ExUnit.Case, async: true
 
-  alias Num42.Refactors.Heex.Tree
+  alias Number42.Refactors.Heex.Tree
 
   describe "node_byte_range/2 for elements" do
     test "returns the byte range of an element node within its body" do

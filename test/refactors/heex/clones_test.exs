@@ -1,7 +1,7 @@
-defmodule Num42.Refactors.Heex.ClonesTest do
+defmodule Number42.Refactors.Heex.ClonesTest do
   use ExUnit.Case, async: true
 
-  alias Num42.Refactors.Heex.Clones
+  alias Number42.Refactors.Heex.Clones
 
   defp wrap(body),
     do: """
