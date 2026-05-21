@@ -92,6 +92,35 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
 
   @known %{}
 
+  # English function words that carry semantic meaning when they
+  # appear as a subtoken of a function name (`pair_sort_key`,
+  # `patches_for_node`, `length_of_list`). They look like
+  # abbreviations to the ≤ 3-char heuristic but they aren't — they
+  # name a relation, not a thing. Expanding them silently produces
+  # nonsense names (`pair_sort_keywords`, `patches_form_node`) and
+  # — worse — kills compilation when the rename only patches some
+  # call sites. The list is intentionally conservative: only words
+  # that are unambiguous English function words AND short enough
+  # (≤ 3 chars) to fall into the heuristic's expansion window.
+  # Treated as a hard guarantee — even an explicit `known` mapping
+  # for these tokens is refused.
+  @stop_words MapSet.new(~w(
+                add all and any as at
+                be but by
+                do
+                end
+                for
+                get
+                if in is
+                key
+                new not
+                of old on one or out
+                put
+                set
+                the to top two
+                up
+              )a)
+
   @impl Number42.Refactors.Refactor
   def transform(source, opts) do
     ctx = build_ctx(opts)
@@ -252,6 +281,13 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
           MapSet.member?(ctx.whitelist, String.to_atom(part)) ->
             {:cont, [part | acc]}
 
+          # Hard-coded stop list of English function words. Refusing
+          # before the `known` check is intentional — a misconfigured
+          # `known: %{"key" => ...}` must not be able to silently
+          # rewrite identifiers where the token is meaningful.
+          MapSet.member?(@stop_words, String.to_atom(part)) ->
+            {:cont, [part | acc]}
+
           # Project mapping wins.
           Map.has_key?(ctx.known, part) ->
             {:cont, [Map.fetch!(ctx.known, part) | acc]}
@@ -323,6 +359,19 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
         )
       )
       |> Enum.reject(&is_nil/1)
+
+  # Capture `&name/arity`. AST shape:
+  #   {:&, _, [{:/, _, [{name, meta, ctx}, {:__block__, _, [_arity]}]}]}
+  # The inner `{name, meta, ctx}` is a bare-atom reference, not a
+  # call — `ctx` is `nil` or a context atom, never a list — so the
+  # general call-site clause below (which guards on `is_list(args)`)
+  # never fires for it. Matching the whole `&/2` shape here patches
+  # the name token while preserving the surrounding `&…/arity`
+  # syntax untouched.
+  defp patches_for_node({:&, _, [{:/, _, [{name, meta, ctx}, _arity]}]}, resolutions)
+       when is_atom(name) and is_atom(ctx) do
+    Map.fetch(resolutions, name) |> name_patch_or_skip(meta, name)
+  end
 
   defp patches_for_node({name, meta, args}, resolutions)
        when is_atom(name) and is_list(args) do

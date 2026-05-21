@@ -454,6 +454,109 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctionsTest do
     end
   end
 
+  describe "Elixir captures &name/arity" do
+    test "capture in an Enum.sort_by call is renamed alongside the defp" do
+      # `&pair_sort_key/1` is a function capture, not a call. The
+      # AST shape is `{:&, _, [{:/, _, [{name, meta, ctx}, arity]}]}`
+      # — `name` is NOT a call node (no arg list), so the call-site
+      # patcher must learn this separate shape. Without it, the defp
+      # gets renamed but the capture stays stale → compile-error.
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def go(pairs) do
+            Enum.sort_by(pairs, &pair_sort_kw/1)
+          end
+
+          defp pair_sort_kw({k, _v}), do: k
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          def go(pairs) do
+            Enum.sort_by(pairs, &pair_sort_keyword/1)
+          end
+
+          defp pair_sort_keyword({k, _v}), do: k
+        end
+        ''',
+        known: %{"kw" => "keyword"}
+      )
+    end
+
+    test "capture with multi-arity defp group is renamed at every arity site" do
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def go(x) do
+            f1 = &fetch_kw/1
+            f2 = &fetch_kw/2
+            {f1.(x), f2.(x, :default)}
+          end
+
+          defp fetch_kw(arg), do: arg
+          defp fetch_kw(arg, _default), do: arg
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          def go(x) do
+            f1 = &fetch_keyword/1
+            f2 = &fetch_keyword/2
+            {f1.(x), f2.(x, :default)}
+          end
+
+          defp fetch_keyword(arg), do: arg
+          defp fetch_keyword(arg, _default), do: arg
+        end
+        ''',
+        known: %{"kw" => "keyword"}
+      )
+    end
+  end
+
+  describe "stop words" do
+    test "common English short words in function names are never expanded" do
+      # `key`, `for`, `or`, `of` are not abbreviations; they are
+      # English function words that carry meaning inside a function
+      # name (`pair_sort_key`, `patches_for_node`, `group_or_skip`,
+      # `length_of_list`). The heuristic must not expand them even
+      # when a context compound would latch (e.g. the module name
+      # being `SortKeywords`, which would otherwise let `key` →
+      # `keywords`).
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule SortKeywords do
+          defp atom_block_key(x), do: x
+          defp pair_sort_key({k, _}), do: k
+          defp patches_for_node(_), do: []
+          defp group_or_skip(_), do: []
+          defp length_of_list(l), do: length(l)
+        end
+        '''
+      )
+    end
+
+    test "stop words are not expanded even with an explicit known mapping" do
+      # If a user accidentally configured `known: %{"key" => "..."}`
+      # we still refuse — the stop-list is a hard guarantee that
+      # English function words are never silently rewritten in
+      # identifier positions where they carry semantic meaning.
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          defp atom_block_key(x), do: x
+        end
+        ''',
+        known: %{"key" => "keyword"}
+      )
+    end
+  end
+
   describe "idempotent" do
     test "running twice equals running once" do
       assert_idempotent(
