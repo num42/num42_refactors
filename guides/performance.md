@@ -25,21 +25,6 @@ The dominant term varies:
   walk every file in `inputs` to build a project-wide cluster
   table.
 
-## Benchmarks
-
-> **Status:** placeholder — we'll populate this with measured numbers
-> from a known reference codebase. Until then, treat the orders of
-> magnitude below as estimates.
-
-| Codebase                          | Wall time, cold | Wall time, `_build` warm |
-|-----------------------------------|-----------------|--------------------------|
-| 100 files, ~10k LOC               | ~3s             | ~1s                      |
-| 1k files, ~100k LOC               | ~30s            | ~10s                     |
-| 10k files, ~1M LOC                | ~10min          | ~3min                    |
-
-Numbers are sequential, single-core. The engine doesn't parallelise
-across files today (see "Parallelism" below).
-
 ## The `prepare/1` cache
 
 The biggest win available to refactor authors is using `prepare/1`
@@ -181,6 +166,9 @@ The cases where it matters:
 - you're building a tool *on top of* the engine that calls
   `Number42.Refactors.Engine.run/2` in a tight loop
 
-For everyone else: the defaults are tuned for correctness, and
-correctness here means the two hard guarantees (semantics-preserving,
-idempotent). Performance is the next priority.
+For everyone else: the defaults are tuned for correctness first.
+"Correctness" here means **idempotence** (a hard requirement, enforced
+by tests and the engine's fixpoint loop) plus **best-effort behaviour
+preservation** (an aim, not a formal guarantee — see
+[safety-and-limitations.md](safety-and-limitations.md)). Performance
+is the next priority after that.

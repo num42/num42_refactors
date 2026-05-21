@@ -1,7 +1,12 @@
 # Number42.Refactors
 
-AST-based refactor engine for Elixir — pluggable, idempotent,
-semantics-preserving rewrites driven by [Sourceror][sourceror].
+AST-based refactor engine for Elixir — pluggable, idempotent
+rewrites driven by [Sourceror][sourceror].
+
+> ⚠️ **No semantic-equivalence guarantee.** Refactors aim to keep
+> behaviour intact, but this is not formally proven. Treat every run
+> as a code change: review the diff, run your test suite, and rely on
+> CI before merging.
 
 > Status: pre-release. Extracted from an internal project; the public
 > API is settling. Expect cosmetic changes before `v1.0`.
@@ -363,9 +368,13 @@ end
 
 Pflichteigenschaften:
 
-- **Semantik-bewahrend.** Output verhält sich identisch zum Input.
 - **Idempotent.** Zweiter Lauf == erster Lauf.
-- **Skippen statt raten.** Ambivalente Fälle bleiben unverändert.
+- **Skippen statt raten.** Ambivalente Fälle bleiben unverändert —
+  lieber gar nicht umschreiben, als ein Sonderverhalten kaputt machen.
+- **Best-effort statt Garantie.** Refactors *zielen darauf*, das
+  beobachtbare Verhalten zu erhalten, aber das ist keine formale
+  Zusicherung. Jede Anwendung ist eine Code-Änderung — Diff sichten,
+  Tests laufen lassen, CI vertrauen.
 
 Schreibreihenfolge (TDD):
 

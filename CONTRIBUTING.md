@@ -165,10 +165,14 @@ narrowly-scoped refactors, opening a PR directly is also fine.
 
 What we'll ask:
 
-- **Is the rewrite semantics-preserving?** Walk through the edge
-  cases you considered.
+- **What invariant makes the rewrite plausible?** Walk through the
+  edge cases you considered, and the inputs you decided to *skip*
+  rather than rewrite. We do not claim semantic equivalence — we
+  claim a well-argued, well-tested mechanical rewrite — so the
+  reasoning matters.
 - **Is the rewrite idempotent?** Show that running it on the *output*
-  produces the output unchanged.
+  produces the output unchanged. (This one *is* a hard requirement;
+  the engine's fixpoint loop depends on it.)
 - **Is the rewrite worth a module?** Tiny, single-pattern rewrites can
   be wholesome on their own; very narrow ones may be better as a
   per-refactor config option.

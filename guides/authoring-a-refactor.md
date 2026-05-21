@@ -30,21 +30,9 @@ optional with sensible defaults (`explanation/0`, `priority/0`,
 `prepare/1`, `reformat_after?/0`). See `architecture.md` and
 `Number42.Refactors.Refactor` for the full list.
 
-## Two non-negotiable correctness properties
+## Correctness properties
 
-Every refactor *must* satisfy both:
-
-### 1. Semantics-preserving
-
-The rewritten code must behave identically to the input on every
-observable axis: return values, side effects, raised exceptions, type
-signatures, message-passing behaviour. If the rewrite changes any of
-these on *any* input the user might plausibly write, it's a bug.
-
-A useful test: run the rewritten code against a property-based test
-harness that the original passes. Same outputs? Good. Different? Bug.
-
-### 2. Idempotent
+### Idempotent (hard requirement)
 
 Applying the refactor twice must produce the same source as applying it
 once. The engine's fixpoint loop will re-invoke your refactor until the
@@ -56,6 +44,33 @@ Most idempotence bugs are pattern-match shapes: the rewrite produces
 code that re-matches the *input* pattern. The fix is usually a check
 in `transform/2` that detects the post-rewrite shape and returns the
 source untouched.
+
+### Behaviour preservation (best effort, not a guarantee)
+
+A refactor *aims* to leave observable behaviour unchanged: return
+values, side effects, raised exceptions, dispatch order, message
+passing. In practice this is a best-effort property — the engine has
+no way to formally verify it, and there is no mechanism in this
+project that proves a given rewrite is sound.
+
+What this means in practice:
+
+- Treat every rewrite as a code change, not a free pass. Review the
+  diff, run the consumer's test suite, rely on CI.
+- When the rewrite shape is ambiguous (multiple plausible semantics,
+  macro-touched call sites, generated code), **skip rather than
+  rewrite**. A skipped case is a non-event; a wrong rewrite is a bug
+  in production.
+- If a refactor's correctness depends on a non-obvious invariant
+  (a guard context, a specific call shape, the absence of side
+  effects in a sub-expression), say so in the moduledoc's
+  `explanation/0` and the test file. Reviewers and future-you need to
+  see the reasoning.
+
+A useful sanity check while developing: run the rewritten code against
+the project's existing test suite (or a property-based harness, if
+available). Differences are bugs; identical output is evidence, not
+proof.
 
 ## A worked example: `LengthZeroToEmpty`
 
@@ -257,10 +272,10 @@ grammar.
 ### Generated code
 
 Some macros generate code via `unquote_splicing/1` that looks
-structurally identical to handwritten code but is semantically a
-template. Refactors that rewrite call sites can break templates by
-making them no longer reduce correctly. When in doubt: skip rather
-than rewrite.
+structurally identical to handwritten code but is part of a template
+that gets expanded later. Refactors that rewrite call sites can break
+templates by making them no longer reduce the way the macro author
+intended. When in doubt: skip rather than rewrite.
 
 ## Performance hints
 

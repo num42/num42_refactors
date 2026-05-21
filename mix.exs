@@ -35,7 +35,7 @@ defmodule Number42.Refactors.MixProject do
   end
 
   defp description do
-    "AST-based refactor engine for Elixir — pluggable, idempotent, semantics-preserving rewrites driven by Sourceror."
+    "AST-based refactor engine for Elixir — pluggable, idempotent rewrites driven by Sourceror."
   end
 
   defp elixirc_paths(:test), do: ["lib", "test/support"]

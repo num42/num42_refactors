@@ -1,61 +1,71 @@
 # Safety & Limitations
 
-What this library guarantees, what it doesn't, and where the rough
+What this library does and does not promise, and where the rough
 edges are. Read this before running `mix refactor --auto` on code you
 care about.
 
-## The two hard guarantees
+## What we promise
 
-Every refactor in this library must satisfy both. Bug reports against
-either are taken seriously.
+### Idempotence (hard requirement)
 
-### Semantics-preserving
-
-The rewritten code behaves identically to the input on every
-observable axis:
-
-- return values
-- side effects (writes, prints, message sends)
-- raised exceptions and their types
-- process-linking and supervision behaviour
-
-This means: if a unit test passes against the input, it must pass
-against the output. If you write a property-based test that the input
-satisfies, it must hold for the output.
-
-### Idempotent
-
-Applying the refactor twice equals applying it once. The engine's
+Applying a refactor twice equals applying it once. The engine's
 fixpoint loop relies on this: a non-idempotent refactor either hits
 the `@max_passes = 5` cap (and the engine raises) or, worse, produces
 oscillating output between two stable states.
 
 Every refactor's test file has an `idempotent` section that asserts
-this property on its representative inputs.
+this property on its representative inputs. A failing idempotence
+test is a bug we take seriously.
 
-## What we explicitly do *not* guarantee
+### Best-effort behaviour preservation (no guarantee)
+
+Every bundled refactor *aims* to keep the rewritten code behaving the
+same as the input — same return values, same side effects, same
+exceptions, same dispatch order. But this is an aim, not a formal
+guarantee:
+
+- There is **no automated proof** that a given rewrite is sound. The
+  engine doesn't (and can't, in general) verify semantic equivalence.
+- A rewrite is only as correct as the patterns the refactor author
+  wrote, the test cases they covered, and the edge cases they
+  anticipated. Real-world code routinely exposes gaps.
+- Macros, dynamic dispatch, `apply/3`, generated code, and side
+  effects inside sub-expressions are all places where a "structurally
+  identical" rewrite can still change behaviour.
+
+**Practical consequence:** treat every `mix refactor` run as a code
+change. Commit before running, review the diff, run your test suite,
+and let CI gate it. Do not run `--auto` against code you cannot
+revert.
+
+If a rewrite changes runtime behaviour, that's a bug — file it (see
+[Reporting safety issues](#reporting-safety-issues)). But the
+absence of a bug report is not the same as a proof of correctness.
+
+## What we explicitly do *not* claim
 
 ### Performance equivalence
 
 Most refactors are performance wins (`length(x) == 0` → `Enum.empty?/1`
-turns O(n) into O(1)), but we don't guarantee that *every* refactor
-produces faster code. A refactor that reshapes a `case` into a `with`
-may, on a hot path, perform measurably differently.
+turns O(n) into O(1)), but no refactor *guarantees* faster code. A
+refactor that reshapes a `case` into a `with` may, on a hot path,
+perform measurably differently.
 
 If your code lives on a microbenchmarked hot path, profile before and
 after.
 
 ### Type-signature stability
 
-The rewritten code must be type-compatible with the input — same
-arities, same return types, same opaque types — but a refactor may
-*tighten* a return type if the analysis can prove it. Dialyzer
-warnings that fire after a refactor pass are usually pre-existing type
-issues that the laxer original code masked.
+A refactor may tighten or loosen the inferred type of an expression
+without breaking the surface contract (same arity, same call shape).
+Dialyzer warnings that fire after a refactor pass are usually
+pre-existing type issues that the laxer original code masked — but
+the refactor engine does no type analysis and makes no formal claim
+about type compatibility.
 
 ### Source-level structural stability
 
-Anything not protected by the two hard guarantees is fair game to
+Anything not protected by the idempotence requirement is fair game to
 rewrite: function order, alias grouping, branch shape, expression
 nesting. If your team has stylistic conventions that conflict with a
 bundled refactor, use `skipped_modules` to opt out.
@@ -183,7 +193,8 @@ and safe to run anywhere.
 If a refactor produces code that:
 
 - fails to compile
-- changes runtime behaviour (semantics violation)
+- changes runtime behaviour in a way that the moduledoc didn't warn
+  about
 - oscillates between two states (idempotence violation)
 
 …that's a bug we want to know about. File an issue with:

@@ -161,8 +161,10 @@ that.
 - **Linting.** That's [Credo](https://github.com/rrrene/credo). Linters
   *report*; refactors *rewrite*. The two are complementary and the
   rule sets only partially overlap.
-- **Type checking.** That's Dialyzer. Refactors preserve semantics,
-  including type signatures, but they do not infer or verify types.
+- **Type checking.** That's Dialyzer. Refactors do not infer or
+  verify types, and they make no formal claim about preserving type
+  signatures across a rewrite — they just don't deliberately change
+  them.
 - **Cross-project rewrites.** Each `mix refactor` run is scoped to one
   project's `inputs`. There is no awareness of dependencies' source
   trees.

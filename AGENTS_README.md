@@ -156,9 +156,11 @@ Diese gelten ohne Ausnahmen.
    und Konsorten sind schon da — und automatisch importiert durch
    `use Number42.Refactors.Refactor`. Lokale Funktionen mit dem
    gleichen Namen schlagen die Kompilation tot.
-4. **Refactors sind semantik-bewahrend.** Wenn ein Rewrite das Verhalten
-   ändern könnte, lieber skippen statt raten. Ambivalent → Input
-   unverändert zurückgeben.
+4. **Refactors zielen darauf ab, Verhalten zu erhalten — formal
+   garantiert ist es nicht.** Wenn ein Rewrite das Verhalten ändern
+   könnte, lieber skippen statt raten. Ambivalent → Input unverändert
+   zurückgeben. Skippen ist das Sicherheitsnetz, kein Beweis. Jeder
+   Lauf ist eine Code-Änderung: Diff sichten, Tests laufen lassen.
 5. **Nur Refactor + Test committen.** Smoke-Tests, die die Library
    gegen sich selbst laufen lassen, werden mit
    `git checkout -- lib/ test/` verworfen, bevor du `git add` machst.
@@ -512,7 +514,7 @@ darfst du ihn bypassen — aber:
 
 | Callback | Pflicht? | Default | Zweck |
 | --- | --- | --- | --- |
-| `transform(source, opts)` | Ja | — | Rewrite. Idempotent, semantik-bewahrend. |
+| `transform(source, opts)` | Ja | — | Rewrite. Idempotent (Pflicht); zielt auf Verhaltenserhalt (best effort, keine Garantie). |
 | `description/0` | Ja | — | Einzeiler für Hilfe und Logs. |
 | `explanation/0` | Optional | `description/0` | Langform-Rationale für `--log`. |
 | `priority/0` | Optional | `100` | Reihenfolge. Höher läuft früher. |

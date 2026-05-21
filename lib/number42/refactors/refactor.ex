@@ -15,9 +15,15 @@ defmodule Number42.Refactors.Refactor do
 
   ## Required correctness properties
 
-  All refactors must be **semantics-preserving** and **idempotent**:
-  applying the formatter twice on the same source must yield the same
-  result, and code that already conforms must not change.
+  Refactors must be **idempotent**: applying the rewrite twice on the
+  same source must yield the same result, and code that already
+  conforms must not change. The engine's fixpoint loop relies on this.
+
+  Refactors should also *aim* to preserve observable behaviour, but
+  this is a best-effort property, not a formal guarantee — the engine
+  has no way to verify semantic equivalence. See
+  `guides/safety-and-limitations.md` for what that means in practice.
+  When in doubt about a rewrite shape, skip rather than rewrite.
   """
 
   @doc """

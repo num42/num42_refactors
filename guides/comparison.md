@@ -15,9 +15,11 @@ which.
 | Refactorex            |        —         |       ✓       |     ✓     |     —      |   limited  |
 | `number42_refactors`  |        —         |       ✓       |     ✓     |     —      |     ✓      |
 
-The interesting columns are the last two: **semantics-preserving rewrites**
-(not just style) and **cross-file refactoring**. That's where
-`number42_refactors` sits.
+The interesting columns are the last two: **rewrites that go beyond
+style** and **cross-file refactoring**. That's where
+`number42_refactors` sits. None of these tools — this one included —
+*guarantees* that a rewrite leaves observable behaviour intact; they
+all rely on disciplined patterns + your test suite for that.
 
 ## vs. `mix format`
 
@@ -49,9 +51,9 @@ mechanical rewrite (cyclomatic complexity, naming smells, design
 patterns). `number42_refactors` for the mechanical wins.
 
 There is some overlap in scope. We try to keep the overlap on the
-rewrite-able side: if Credo can report something *and* there's a
-semantics-preserving rewrite, we offer the rewrite. If only a human
-can decide, we leave it to Credo.
+rewrite-able side: if Credo can report something *and* a mechanical
+rewrite has a plausible "before/after" pair, we offer the rewrite. If
+the call requires human judgement, we leave it to Credo.
 
 ## vs. Sourceror itself
 
@@ -129,9 +131,11 @@ across-the-codebase "clean up everything that matches pattern X" pass.
 
 Tempting for one-shot rewrites. The reasons not to:
 
-- **Semantics-preserving guarantees.** A regex rewrite has no idea
-  whether it's inside a string literal, a comment, or a sigil. An
-  AST-based refactor does.
+- **Context-awareness.** A regex rewrite has no idea whether it's
+  inside a string literal, a comment, or a sigil. An AST-based
+  refactor does — which keeps it from rewriting strings as if they
+  were code. (This is not a semantic-equivalence guarantee, just a
+  much smaller foot-gun than `sed`.)
 - **Idempotence.** A regex on `length(x) == 0` will happily match
   inside an already-rewritten file again, doubling up annotations,
   or worse.

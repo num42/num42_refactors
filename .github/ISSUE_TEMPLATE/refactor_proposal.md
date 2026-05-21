@@ -24,15 +24,19 @@ assignees: ''
 ```elixir
 ```
 
-## Why is this rewrite semantics-preserving?
+## What invariant makes the rewrite plausible?
 
-<!-- Walk through the edge cases you considered: macros, sigils,
-     side effects, exceptions, type signatures. -->
+<!-- We do not claim semantic equivalence — we claim a well-argued
+     mechanical rewrite. Walk through the edge cases you considered
+     (macros, sigils, side effects, exceptions, type signatures,
+     dispatch order) and call out the inputs you would deliberately
+     SKIP rather than rewrite. -->
 
 ## Why is this rewrite idempotent?
 
-<!-- Running the refactor on the After snippet must produce the
-     same output. Explain why. -->
+<!-- This one IS a hard requirement — the engine's fixpoint loop
+     depends on it. Running the refactor on the After snippet must
+     produce the same output. Explain why. -->
 
 ## Suggested priority
 
