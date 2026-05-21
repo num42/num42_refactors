@@ -49,10 +49,6 @@ defmodule Number42.Refactors.Ex.RejectIsNil do
 
   @impl Number42.Refactors.Refactor
   def description, do: "Manual nil-filtering lambdas -> Enum.reject(&is_nil/1)"
-
-  @impl Number42.Refactors.Refactor
-  def priority, do: 150
-
   @impl Number42.Refactors.Refactor
   def explanation do
     """
@@ -66,9 +62,13 @@ defmodule Number42.Refactors.Ex.RejectIsNil do
   end
 
   @impl Number42.Refactors.Refactor
+  def priority, do: 150
+  @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
   @impl Number42.Refactors.Refactor
   def transform(source, _opts), do: Sourceror.parse_string(source) |> apply_patches(source)
+  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
+  defp apply_patches({:error, _}, source), do: source
 
   defp body_matches_polarity?(:filter, body, predicate) do
     case body do
@@ -102,6 +102,18 @@ defmodule Number42.Refactors.Ex.RejectIsNil do
     end)
   end
 
+  defp capture_kind_or_skip({:ok, projection}) do
+    cond do
+      not capture_arg_ref?(projection, 1) -> :skip
+      uses_other_capture_args?(projection) -> :skip
+      # Identity case: `&(&1 != nil)` or `&(&1 == nil)`. Bare `&1`
+      # reference equals an identity check — collapse to `&is_nil/1`.
+      match?({:&, _, [1]}, projection) -> {:ok, :identity}
+      true -> {:ok, {:projection, projection}}
+    end
+  end
+
+  defp capture_kind_or_skip(:skip), do: :skip
   defp capture_text(:identity), do: "&is_nil/1"
 
   defp capture_text({:projection, projection}) do
@@ -171,31 +183,13 @@ defmodule Number42.Refactors.Ex.RejectIsNil do
     end
   end
 
-  defp uses_other_capture_args?(ast) do
-    ast
-    |> Macro.prewalker()
-    |> Enum.any?(fn
-      {:&, _, [n]} when is_integer(n) and n != 1 -> true
-      _ -> false
-    end)
-  end
+  defp patch_or_passthrough([], source), do: source
+  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
 
-  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
+  defp reject_patch_or_skip({:ok, kind}, node),
+    do: [Patch.replace(node, "Enum.reject(#{capture_text(kind)})")]
 
-  defp apply_patches({:error, _}, source), do: source
-
-  defp capture_kind_or_skip({:ok, projection}) do
-    cond do
-      not capture_arg_ref?(projection, 1) -> :skip
-      uses_other_capture_args?(projection) -> :skip
-      # Identity case: `&(&1 != nil)` or `&(&1 == nil)`. Bare `&1`
-      # reference equals an identity check — collapse to `&is_nil/1`.
-      match?({:&, _, [1]}, projection) -> {:ok, :identity}
-      true -> {:ok, {:projection, projection}}
-    end
-  end
-
-  defp capture_kind_or_skip(:skip), do: :skip
+  defp reject_patch_or_skip(:skip, _node), do: []
 
   defp reject_patch_or_skip({:ok, kind}, coll, node) do
     coll_text = Sourceror.to_string(coll)
@@ -204,12 +198,12 @@ defmodule Number42.Refactors.Ex.RejectIsNil do
 
   defp reject_patch_or_skip(:skip, _coll, _node), do: []
 
-  defp reject_patch_or_skip({:ok, kind}, node),
-    do: [Patch.replace(node, "Enum.reject(#{capture_text(kind)})")]
-
-  defp reject_patch_or_skip(:skip, _node), do: []
-
-  defp patch_or_passthrough([], source), do: source
-
-  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
+  defp uses_other_capture_args?(ast) do
+    ast
+    |> Macro.prewalker()
+    |> Enum.any?(fn
+      {:&, _, [n]} when is_integer(n) and n != 1 -> true
+      _ -> false
+    end)
+  end
 end

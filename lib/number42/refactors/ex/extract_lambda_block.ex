@@ -62,7 +62,6 @@ defmodule Number42.Refactors.Ex.ExtractLambdaBlock do
 
   @impl Number42.Refactors.Refactor
   def description, do: "Extract duplicated anonymous-function bodies into a shared private helper"
-
   @impl Number42.Refactors.Refactor
   def explanation do
     """
@@ -76,7 +75,6 @@ defmodule Number42.Refactors.Ex.ExtractLambdaBlock do
 
   @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
-
   @impl Number42.Refactors.Refactor
   def transform(source, opts) do
     min_mass = Keyword.get(opts, :min_mass, @default_min_mass)
@@ -112,25 +110,42 @@ defmodule Number42.Refactors.Ex.ExtractLambdaBlock do
     end
   end
 
-  defp plans_for_module(body_exprs, min_mass) do
-    helper_taken? = helper_name_taken?(body_exprs)
+  defp apply_to_parse_result({:ok, ast}, min_mass, source),
+    do: ast |> apply_to_ast(source, min_mass)
 
-    if helper_taken? do
-      []
-    else
-      lambda = collect_lambdas(body_exprs)
+  defp apply_to_parse_result({:error, _}, _min_mass, source), do: source
 
-      lambda
-      |> Enum.filter(&(&1.mass >= min_mass))
-      |> Enum.reject(& &1.has_closure?)
-      |> Enum.group_by(& &1.hash)
-      |> Enum.flat_map(fn {_hash, group} ->
-        case group do
-          [_only] -> []
-          group -> plan_for_group(group)
-        end
-      end)
-    end
+  defp capture_replacement_patch(%{arity: arity, ast: lambda}, arity),
+    do: Sourceror.get_range(lambda) |> replacement_patch(arity)
+
+  defp capture_replacement_patch(_lambda, _arity), do: nil
+
+  defp collect_lambdas(body_exprs),
+    do:
+      body_exprs
+      |> Enum.filter(&def_clause?/1)
+      |> Enum.flat_map(&lambdas_in_clause/1)
+
+  defp def_clause?({kind, _, [_head, body_kw]}) when kind in [:def, :defp] and is_list(body_kw),
+    do: true
+
+  defp def_clause?(_), do: false
+
+  defp has_outer_free_vars?(body, lambda_args) do
+    bound = bound_in(body)
+
+    body
+    |> Macro.prewalker()
+    |> Enum.any?(fn
+      {name, _, ctx} when is_atom(name) and is_atom(ctx) ->
+        not underscore?(name) and
+          name not in [:__MODULE__, :__CALLER__, :__ENV__] and
+          not MapSet.member?(bound, name) and
+          not MapSet.member?(lambda_args, name)
+
+      _ ->
+        false
+    end)
   end
 
   defp helper_name_taken?(body_exprs) do
@@ -147,18 +162,31 @@ defmodule Number42.Refactors.Ex.ExtractLambdaBlock do
     end)
   end
 
-  # Collect every single-clause lambda inside the module's def/defp
-  # bodies, with enough metadata to hash and rewrite.
-  defp collect_lambdas(body_exprs),
+  defp indent_body(text) do
+    text
+    |> String.split("\n")
+    |> Enum.map_join("\n", fn line -> "    " <> line end)
+  end
+
+  defp lambda_arg_names(arg_names) do
+    arg_names
+    |> Enum.reduce_while([], fn
+      {n, _, ctx}, acc when is_atom(n) and is_atom(ctx) ->
+        if underscore?(n), do: {:halt, :error}, else: {:cont, [n | acc]}
+
+      _, _ ->
+        {:halt, :error}
+    end)
+    |> case do
+      :error -> :error
+      list -> list |> Enum.reverse()
+    end
+  end
+
+  defp lambda_hash(args, body),
     do:
-      body_exprs
-      |> Enum.filter(&def_clause?/1)
-      |> Enum.flat_map(&lambdas_in_clause/1)
-
-  defp def_clause?({kind, _, [_head, body_kw]}) when kind in [:def, :defp] and is_list(body_kw),
-    do: true
-
-  defp def_clause?(_), do: false
+      {strip_meta({args, body}) |> rename_vars()}
+      |> :erlang.phash2()
 
   defp lambdas_in_clause({_kind, _, [_head, body_kw]}) do
     body_kw
@@ -207,40 +235,44 @@ defmodule Number42.Refactors.Ex.ExtractLambdaBlock do
 
   defp maybe_extract_lambda(_), do: []
 
-  defp lambda_arg_names(arg_names) do
-    arg_names
-    |> Enum.reduce_while([], fn
-      {n, _, ctx}, acc when is_atom(n) and is_atom(ctx) ->
-        if underscore?(n), do: {:halt, :error}, else: {:cont, [n | acc]}
-
-      _, _ ->
-        {:halt, :error}
-    end)
-    |> case do
-      :error -> :error
-      list -> list |> Enum.reverse()
-    end
+  defp node_count(ast) do
+    {_, count} = Macro.prewalk(ast, 0, fn node, acc -> {node, acc + 1} end)
+    count
   end
 
-  # Detect references to names that are bare variables (not call
-  # heads): `{name, _, ctx}` where `ctx` is an atom (variable
-  # context). Function calls have `ctx` as a list (the args), so this
-  # cleanly excludes them.
-  defp has_outer_free_vars?(body, lambda_args) do
-    bound = bound_in(body)
+  defp patch_or_passthrough(source, []), do: source
+  defp patch_or_passthrough(source, patches), do: Sourceror.patch_string(source, patches)
 
-    body
-    |> Macro.prewalker()
-    |> Enum.any?(fn
-      {name, _, ctx} when is_atom(name) and is_atom(ctx) ->
-        not underscore?(name) and
-          name not in [:__MODULE__, :__CALLER__, :__ENV__] and
-          not MapSet.member?(bound, name) and
-          not MapSet.member?(lambda_args, name)
+  defp plan_for_group([first | _] = group) do
+    callsite_patches =
+      group
+      |> Enum.map(&capture_replacement_patch(&1, first.arity))
+      |> Enum.reject(&is_nil/1)
 
-      _ ->
-        false
-    end)
+    helper_text = render_helper_text(first.args, first.body)
+
+    [%{callsite_patches: callsite_patches, helper_text: helper_text}]
+  end
+
+  defp plans_for_module(body_exprs, min_mass) do
+    helper_taken? = helper_name_taken?(body_exprs)
+
+    if helper_taken? do
+      []
+    else
+      lambda = collect_lambdas(body_exprs)
+
+      lambda
+      |> Enum.filter(&(&1.mass >= min_mass))
+      |> Enum.reject(& &1.has_closure?)
+      |> Enum.group_by(& &1.hash)
+      |> Enum.flat_map(fn {_hash, group} ->
+        case group do
+          [_only] -> []
+          group -> plan_for_group(group)
+        end
+      end)
+    end
   end
 
   defp references_attribute?(ast) do
@@ -250,28 +282,6 @@ defmodule Number42.Refactors.Ex.ExtractLambdaBlock do
       {:@, _, [{name, _, ctx}]} when is_atom(name) and is_atom(ctx) -> true
       _ -> false
     end)
-  end
-
-  defp lambda_hash(args, body),
-    do:
-      {strip_meta({args, body}) |> rename_vars()}
-      |> :erlang.phash2()
-
-  defp node_count(ast) do
-    {_, count} = Macro.prewalk(ast, 0, fn node, acc -> {node, acc + 1} end)
-    count
-  end
-
-  defp strip_meta(ast) do
-    Macro.prewalk(ast, fn
-      {form, _meta, args} -> {form, [], args}
-      other -> other
-    end)
-  end
-
-  defp rename_vars(ast) do
-    {result, _} = Macro.prewalk(ast, %{}, &rename_var_node/2)
-    result
   end
 
   defp rename_var_node({name, [], ctx} = node, acc)
@@ -291,24 +301,10 @@ defmodule Number42.Refactors.Ex.ExtractLambdaBlock do
 
   defp rename_var_node(node, acc), do: {node, acc}
 
-  defp strip_when({:when, _, [inner | _]}), do: inner
-  defp strip_when(other), do: other
-
-  defp plan_for_group([first | _] = group) do
-    callsite_patches =
-      group
-      |> Enum.map(&capture_replacement_patch(&1, first.arity))
-      |> Enum.reject(&is_nil/1)
-
-    helper_text = render_helper_text(first.args, first.body)
-
-    [%{callsite_patches: callsite_patches, helper_text: helper_text}]
+  defp rename_vars(ast) do
+    {result, _} = Macro.prewalk(ast, %{}, &rename_var_node/2)
+    result
   end
-
-  defp capture_replacement_patch(%{arity: arity, ast: lambda}, arity),
-    do: Sourceror.get_range(lambda) |> replacement_patch(arity)
-
-  defp capture_replacement_patch(_lambda, _arity), do: nil
 
   defp render_helper_text(helper_args, helper_body) do
     body_text = Sourceror.to_string(helper_body)
@@ -319,12 +315,12 @@ defmodule Number42.Refactors.Ex.ExtractLambdaBlock do
       "\n  end"
   end
 
-  defp indent_body(text) do
-    text
-    |> String.split("\n")
-    |> Enum.map_join("\n", fn line -> "    " <> line end)
+  defp replacement_patch(%{end: end_pos, start: start_pos}, arity) do
+    replacement = "&#{Atom.to_string(@helper_name)}/#{arity}"
+    %{change: replacement, range: %{end: end_pos, start: start_pos}}
   end
 
+  defp replacement_patch(_, _arity), do: nil
   defp splice_helpers_before_module_end(source, []), do: source
 
   defp splice_helpers_before_module_end(source, helpers) do
@@ -349,18 +345,13 @@ defmodule Number42.Refactors.Ex.ExtractLambdaBlock do
     end
   end
 
-  defp patch_or_passthrough(source, []), do: source
-  defp patch_or_passthrough(source, patches), do: Sourceror.patch_string(source, patches)
-
-  defp apply_to_parse_result({:ok, ast}, min_mass, source),
-    do: ast |> apply_to_ast(source, min_mass)
-
-  defp apply_to_parse_result({:error, _}, _min_mass, source), do: source
-
-  defp replacement_patch(%{end: end_pos, start: start_pos}, arity) do
-    replacement = "&#{Atom.to_string(@helper_name)}/#{arity}"
-    %{change: replacement, range: %{end: end_pos, start: start_pos}}
+  defp strip_meta(ast) do
+    Macro.prewalk(ast, fn
+      {form, _meta, args} -> {form, [], args}
+      other -> other
+    end)
   end
 
-  defp replacement_patch(_, _arity), do: nil
+  defp strip_when({:when, _, [inner | _]}), do: inner
+  defp strip_when(other), do: other
 end

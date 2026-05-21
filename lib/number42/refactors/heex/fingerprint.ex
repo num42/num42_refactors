@@ -60,6 +60,16 @@ defmodule Number42.Refactors.Heex.Fingerprint do
   @all_modes [:exact, :class_stripped, :attrs_stripped]
 
   @doc """
+  Hash a single node under one mode. Convenience for tests and
+  ad-hoc lookups; the bulk path uses `fragments/3`.
+  """
+  @spec compute_hash(Tree.node_t(), Normalizer.mode()) :: binary()
+  def compute_hash(node, mode) do
+    {summary, _frags} = walk_one(node, [mode], "", :infinity, [])
+    summary.hashes[mode]
+  end
+
+  @doc """
   Walk `nodes` (a tree or list of trees) once and return all fragments
   for every requested mode whose mass is at least `min_mass`.
 
@@ -84,24 +94,81 @@ defmodule Number42.Refactors.Heex.Fingerprint do
   def mass({:eex_expr, _, _}), do: 1
   def mass({:text, _, _}), do: 1
 
-  @doc """
-  Hash a single node under one mode. Convenience for tests and
-  ad-hoc lookups; the bulk path uses `fragments/3`.
-  """
-  @spec compute_hash(Tree.node_t(), Normalizer.mode()) :: binary()
-  def compute_hash(node, mode) do
-    {summary, _frags} = walk_one(node, [mode], "", :infinity, [])
-    summary.hashes[mode]
+  defp build_summary(mass, hashes, child_summaries, modes) do
+    %{
+      hashes: hashes,
+      mass: mass,
+      sub_hashes:
+        Map.new(modes, fn mode ->
+          combined =
+            child_summaries
+            |> Enum.reduce(MapSet.new([hashes[mode]]), fn changeset, acc ->
+              MapSet.union(acc, changeset.sub_hashes[mode])
+            end)
+
+          {mode, combined}
+        end)
+    }
   end
 
-  # walk_one returns:
-  #   {summary, frags_acc}
-  # summary = %{
-  #   mass: integer,
-  #   hashes: %{mode => binary},        # this node's own hash per mode
-  #   sub_hashes: %{mode => MapSet}     # union of all descendants' hashes
-  #                                      # plus this node's own hash
-  # }
+  defp hash_term(term) do
+    binary = :erlang.term_to_binary(term)
+    :crypto.hash(:blake2b, binary)
+  end
+
+  defp leaf_summary(hashes, modes) do
+    %{
+      hashes: hashes,
+      mass: 1,
+      sub_hashes:
+        for mode <- modes do
+          {mode, MapSet.new([hashes[mode]])}
+        end
+        |> Map.new()
+    }
+  end
+
+  defp line_of({:element, _, _, _, %{line: l}}), do: l
+  defp line_of({:eex_block, _, _, %{line: l}}), do: l
+  defp line_of({:eex_expr, _, %{line: l}}), do: l
+  defp line_of({:text, _, %{line: l}}), do: l
+
+  defp maybe_emit(summary, _node, _modes, _file, min_mass, frags)
+       when is_integer(min_mass) and summary.mass < min_mass,
+       do: frags
+
+  defp maybe_emit(_summary, _node, _modes, _file, :infinity, frags), do: frags
+
+  defp maybe_emit(summary, node, modes, file, _min_mass, frags) do
+    line = line_of(node)
+
+    modes
+    |> Enum.reduce(frags, fn mode, acc ->
+      [
+        %{
+          file: file,
+          hash: summary.hashes[mode],
+          line: line,
+          mass: summary.mass,
+          mode: mode,
+          node: node,
+          sub_hashes: summary.sub_hashes[mode]
+        }
+        | acc
+      ]
+    end)
+  end
+
+  defp sum_mass(summaries), do: summaries |> Enum.sum_by(fn s -> s.mass end)
+
+  defp walk_many(nodes, modes, file, min_mass, frags) do
+    nodes
+    |> Enum.reduce({[], frags}, fn node, {summaries, acc_frags} ->
+      {summary, new_frags} = walk_one(node, modes, file, min_mass, acc_frags)
+      {[summary | summaries], new_frags}
+    end)
+    |> then(fn {summaries, frags} -> {summaries |> Enum.reverse(), frags} end)
+  end
 
   defp walk_one({:element, tag, attrs, children, _meta} = node, modes, file, min_mass, frags) do
     {child_summaries, frags} = walk_many(children, modes, file, min_mass, frags)
@@ -155,80 +222,4 @@ defmodule Number42.Refactors.Heex.Fingerprint do
 
     {leaf_summary(hashes, modes), frags}
   end
-
-  defp walk_many(nodes, modes, file, min_mass, frags) do
-    nodes
-    |> Enum.reduce({[], frags}, fn node, {summaries, acc_frags} ->
-      {summary, new_frags} = walk_one(node, modes, file, min_mass, acc_frags)
-      {[summary | summaries], new_frags}
-    end)
-    |> then(fn {summaries, frags} -> {summaries |> Enum.reverse(), frags} end)
-  end
-
-  defp leaf_summary(hashes, modes) do
-    %{
-      hashes: hashes,
-      mass: 1,
-      sub_hashes:
-        for mode <- modes do
-          {mode, MapSet.new([hashes[mode]])}
-        end
-        |> Map.new()
-    }
-  end
-
-  defp build_summary(mass, hashes, child_summaries, modes) do
-    %{
-      hashes: hashes,
-      mass: mass,
-      sub_hashes:
-        Map.new(modes, fn mode ->
-          combined =
-            child_summaries
-            |> Enum.reduce(MapSet.new([hashes[mode]]), fn changeset, acc ->
-              MapSet.union(acc, changeset.sub_hashes[mode])
-            end)
-
-          {mode, combined}
-        end)
-    }
-  end
-
-  defp sum_mass(summaries), do: summaries |> Enum.sum_by(fn s -> s.mass end)
-
-  defp maybe_emit(summary, _node, _modes, _file, min_mass, frags)
-       when is_integer(min_mass) and summary.mass < min_mass,
-       do: frags
-
-  defp maybe_emit(_summary, _node, _modes, _file, :infinity, frags), do: frags
-
-  defp maybe_emit(summary, node, modes, file, _min_mass, frags) do
-    line = line_of(node)
-
-    modes
-    |> Enum.reduce(frags, fn mode, acc ->
-      [
-        %{
-          file: file,
-          hash: summary.hashes[mode],
-          line: line,
-          mass: summary.mass,
-          mode: mode,
-          node: node,
-          sub_hashes: summary.sub_hashes[mode]
-        }
-        | acc
-      ]
-    end)
-  end
-
-  defp hash_term(term) do
-    bin = :erlang.term_to_binary(term)
-    :crypto.hash(:blake2b, bin)
-  end
-
-  defp line_of({:element, _, _, _, %{line: l}}), do: l
-  defp line_of({:eex_block, _, _, %{line: l}}), do: l
-  defp line_of({:eex_expr, _, %{line: l}}), do: l
-  defp line_of({:text, _, %{line: l}}), do: l
 end

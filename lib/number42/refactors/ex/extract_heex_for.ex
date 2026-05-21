@@ -111,7 +111,6 @@ defmodule Number42.Refactors.Ex.ExtractHeexFor do
   no `<% binding = ... %>` local assignments.
   """
   def find_blocks(source), do: Sourceror.parse_string(source) |> blocks_or_empty()
-
   @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
   @impl Number42.Refactors.Refactor
@@ -153,7 +152,20 @@ defmodule Number42.Refactors.Ex.ExtractHeexFor do
     {MapSet.to_list(locals) |> Enum.sort(), MapSet.to_list(assigns) |> Enum.sort()}
   end
 
-  # Re-locate the outer `defmodule`'s closing `end` in the rewritten
+  defp append_at_end_or_passthrough(nil, _blocks_with_names, rewritten_source),
+    do: rewritten_source
+
+  defp append_at_end_or_passthrough(
+         end_line,
+         blocks_with_names,
+         rewritten_source
+       ) do
+    components =
+      blocks_with_names |> Enum.map_join("\n", &render_component/1)
+
+    insert_before_line(rewritten_source, end_line, components)
+  end
+
   defp append_components(rewritten_source, _module_node, blocks_with_names),
     # source: the original `end_line` from `Sourceror.get_range` no
     # longer matches because the sigil-rewrite step shrank the body.
@@ -162,6 +174,77 @@ defmodule Number42.Refactors.Ex.ExtractHeexFor do
     do:
       find_module_end_line(rewritten_source)
       |> append_at_end_or_passthrough(blocks_with_names, rewritten_source)
+
+  defp apply_patches({:ok, ast}, source),
+    do: find_module(ast) |> apply_sigil_patches_or_skip(ast, source)
+
+  defp apply_patches({:error, _}, source), do: source
+  defp apply_sigil_patches_or_skip(nil, _ast, source), do: source
+
+  defp apply_sigil_patches_or_skip(
+         {module_node, existing_names},
+         ast,
+         source
+       ) do
+    sigils = collect_h_sigils(ast)
+
+    sigils_with_blocks =
+      sigils
+      |> Enum.map(&extracted_transform_3(&1))
+      |> Enum.reject(fn {_, blocks} -> blocks == [] end)
+
+    all_blocks = sigils_with_blocks |> Enum.flat_map(fn {_, b} -> b end)
+    blocks_with_names = assign_unique_names(all_blocks, existing_names)
+    name_lookup = Map.new(blocks_with_names, &{&1.source_line, &1.name})
+
+    # Drop sigils whose remaining blocks were all filtered out by
+    # collision detection — there's nothing to rewrite for them, and
+    # passing an empty block list to `build_sigil_patch` would still
+    # emit a (no-op) patch and trigger formatting churn.
+    sigils_with_blocks =
+      sigils_with_blocks
+      |> Enum.reject(fn {_sigil, blocks} ->
+        blocks |> Enum.all?(&(not Map.has_key?(name_lookup, &1.source_line)))
+      end)
+
+    case sigils_with_blocks do
+      [] ->
+        source
+
+      _ ->
+        patches =
+          sigils_with_blocks
+          |> Enum.map(fn {sigil, blocks} ->
+            extracted_transform(sigil, blocks, name_lookup)
+          end)
+
+        source
+        |> Sourceror.patch_string(patches)
+        |> append_components(module_node, blocks_with_names)
+    end
+  end
+
+  defp assign_local_scan_or_keep({:ok, ast}, assigns, locals, pattern_vars) do
+    Macro.prewalk(ast, {assigns, locals}, fn node, {a, l} ->
+      case node do
+        {:@, _, [{name, _, ctx}]} when is_atom(name) and is_atom(ctx) ->
+          {node, {MapSet.put(a, name), l}}
+
+        {name, _, ctx} when is_atom(name) and is_atom(ctx) ->
+          cond do
+            String.starts_with?(Atom.to_string(name), "_") -> {node, {a, l}}
+            MapSet.member?(pattern_vars, name) -> {node, {a, MapSet.put(l, name)}}
+            true -> {node, {a, l}}
+          end
+
+        _ ->
+          {node, {a, l}}
+      end
+    end)
+    |> elem(1)
+  end
+
+  defp assign_local_scan_or_keep(_, assigns, locals, _pattern_vars), do: {assigns, locals}
 
   defp assign_unique_names(blocks, existing_names) do
     # Two ways the synthesized component name can collide:
@@ -239,6 +322,14 @@ defmodule Number42.Refactors.Ex.ExtractHeexFor do
        do:
          EEx.tokenize(body, line: 1, column: 1, trim: false, indentation: 0)
          |> for_blocks_in_tokens_or_empty(body, enclosing_fn, file_line, sigil_node)
+
+  defp blocks_or_empty({:ok, ast}),
+    do:
+      ast
+      |> collect_h_sigils()
+      |> Enum.flat_map(&blocks_in_sigil/1)
+
+  defp blocks_or_empty({:error, _}), do: []
 
   defp body_long_enough?(start_meta, end_meta),
     do: end_meta.line - start_meta.line - 1 >= @min_body_lines
@@ -491,9 +582,31 @@ defmodule Number42.Refactors.Ex.ExtractHeexFor do
     end)
   end
 
+  defp for_blocks_in_tokens_or_empty({:ok, tokens}, body, enclosing_fn, file_line, sigil_node),
+    do: tokens |> find_for_blocks(body, sigil_node, file_line, enclosing_fn)
+
+  defp for_blocks_in_tokens_or_empty(_, _body, _enclosing_fn, _file_line, _sigil_node), do: []
+
   defp hash_part(ast) do
     stripped = strip_meta(ast)
     "phash_#{:erlang.phash2(stripped) |> Integer.to_string(16) |> String.downcase()}"
+  end
+
+  defp heex_pattern_var_names(pattern_ast) do
+    pattern_ast
+    |> Macro.prewalker()
+    |> Enum.flat_map(fn
+      {name, _, ctx} when is_atom(name) and is_atom(ctx) ->
+        string = Atom.to_string(name)
+
+        if String.starts_with?(string, "_") or name in [:when, :=, :|, :"::"],
+          do: [],
+          else: [name]
+
+      _ ->
+        []
+    end)
+    |> MapSet.new()
   end
 
   defp indent_lines(text, indent) do
@@ -567,23 +680,6 @@ defmodule Number42.Refactors.Ex.ExtractHeexFor do
       _ ->
         :error
     end
-  end
-
-  defp heex_pattern_var_names(pattern_ast) do
-    pattern_ast
-    |> Macro.prewalker()
-    |> Enum.flat_map(fn
-      {name, _, ctx} when is_atom(name) and is_atom(ctx) ->
-        string = Atom.to_string(name)
-
-        if String.starts_with?(string, "_") or name in [:when, :=, :|, :"::"],
-          do: [],
-          else: [name]
-
-      _ ->
-        []
-    end)
-    |> MapSet.new()
   end
 
   defp preview(_body, start_idx, end_idx, tokens) do
@@ -761,105 +857,6 @@ defmodule Number42.Refactors.Ex.ExtractHeexFor do
       part = single_var_part(block.pattern) -> part
       part = coll_part(block.coll) -> part
       true -> hash_part(block.pattern)
-    end
-  end
-
-  defp blocks_or_empty({:ok, ast}),
-    do:
-      ast
-      |> collect_h_sigils()
-      |> Enum.flat_map(&blocks_in_sigil/1)
-
-  defp blocks_or_empty({:error, _}), do: []
-
-  defp apply_patches({:ok, ast}, source),
-    do: find_module(ast) |> apply_sigil_patches_or_skip(ast, source)
-
-  defp apply_patches({:error, _}, source), do: source
-
-  defp append_at_end_or_passthrough(nil, _blocks_with_names, rewritten_source),
-    do: rewritten_source
-
-  defp append_at_end_or_passthrough(
-         end_line,
-         blocks_with_names,
-         rewritten_source
-       ) do
-    components =
-      blocks_with_names |> Enum.map_join("\n", &render_component/1)
-
-    insert_before_line(rewritten_source, end_line, components)
-  end
-
-  defp for_blocks_in_tokens_or_empty({:ok, tokens}, body, enclosing_fn, file_line, sigil_node),
-    do: tokens |> find_for_blocks(body, sigil_node, file_line, enclosing_fn)
-
-  defp for_blocks_in_tokens_or_empty(_, _body, _enclosing_fn, _file_line, _sigil_node), do: []
-
-  defp assign_local_scan_or_keep({:ok, ast}, assigns, locals, pattern_vars) do
-    Macro.prewalk(ast, {assigns, locals}, fn node, {a, l} ->
-      case node do
-        {:@, _, [{name, _, ctx}]} when is_atom(name) and is_atom(ctx) ->
-          {node, {MapSet.put(a, name), l}}
-
-        {name, _, ctx} when is_atom(name) and is_atom(ctx) ->
-          cond do
-            String.starts_with?(Atom.to_string(name), "_") -> {node, {a, l}}
-            MapSet.member?(pattern_vars, name) -> {node, {a, MapSet.put(l, name)}}
-            true -> {node, {a, l}}
-          end
-
-        _ ->
-          {node, {a, l}}
-      end
-    end)
-    |> elem(1)
-  end
-
-  defp assign_local_scan_or_keep(_, assigns, locals, _pattern_vars), do: {assigns, locals}
-
-  defp apply_sigil_patches_or_skip(nil, _ast, source), do: source
-
-  defp apply_sigil_patches_or_skip(
-         {module_node, existing_names},
-         ast,
-         source
-       ) do
-    sigils = collect_h_sigils(ast)
-
-    sigils_with_blocks =
-      sigils
-      |> Enum.map(&extracted_transform_3(&1))
-      |> Enum.reject(fn {_, blocks} -> blocks == [] end)
-
-    all_blocks = sigils_with_blocks |> Enum.flat_map(fn {_, b} -> b end)
-    blocks_with_names = assign_unique_names(all_blocks, existing_names)
-    name_lookup = Map.new(blocks_with_names, &{&1.source_line, &1.name})
-
-    # Drop sigils whose remaining blocks were all filtered out by
-    # collision detection — there's nothing to rewrite for them, and
-    # passing an empty block list to `build_sigil_patch` would still
-    # emit a (no-op) patch and trigger formatting churn.
-    sigils_with_blocks =
-      sigils_with_blocks
-      |> Enum.reject(fn {_sigil, blocks} ->
-        blocks |> Enum.all?(&(not Map.has_key?(name_lookup, &1.source_line)))
-      end)
-
-    case sigils_with_blocks do
-      [] ->
-        source
-
-      _ ->
-        patches =
-          sigils_with_blocks
-          |> Enum.map(fn {sigil, blocks} ->
-            extracted_transform(sigil, blocks, name_lookup)
-          end)
-
-        source
-        |> Sourceror.patch_string(patches)
-        |> append_components(module_node, blocks_with_names)
     end
   end
 end

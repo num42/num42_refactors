@@ -37,10 +37,6 @@ defmodule Number42.Refactors.Ex.MapNewToPipe do
 
   @impl Number42.Refactors.Refactor
   def description, do: "Map.new(coll) -> coll |> Map.new()"
-
-  @impl Number42.Refactors.Refactor
-  def priority, do: 130
-
   @impl Number42.Refactors.Refactor
   def explanation do
     """
@@ -56,10 +52,13 @@ defmodule Number42.Refactors.Ex.MapNewToPipe do
   end
 
   @impl Number42.Refactors.Refactor
+  def priority, do: 130
+  @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
-
   @impl Number42.Refactors.Refactor
   def transform(source, _opts), do: Sourceror.parse_string(source) |> apply_patches(source)
+  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
+  defp apply_patches({:error, _}, source), do: source
 
   defp build_patches(ast),
     do:
@@ -77,34 +76,18 @@ defmodule Number42.Refactors.Ex.MapNewToPipe do
   end
 
   defp maybe_patch(_), do: []
+  defp patch_or_passthrough([], source), do: source
+  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
+  defp pipe_friendly?({:%{}, _, _}), do: false
+  defp pipe_friendly?({:fn, _, _}), do: false
+  defp pipe_friendly?({:&, _, _}), do: false
+  defp pipe_friendly?(list) when is_list(list), do: false
+  defp pipe_friendly?({:__block__, _, [inner]}) when is_list(inner), do: false
+  defp pipe_friendly?(_), do: true
 
-  # When the collection is a low-precedence operator (`||`, `&&`, `or`,
-  # `++`, `<>`, ...), the bare text would re-associate with the new
-  # `|>`: `a || b |> Map.new()` parses as `a || (b |> Map.new())`.
-  # Wrap to force the intended precedence; the formatter strips redundant
-  # parens afterwards.
   defp wrap_if_low_precedence({op, _, args}, text) when pipe_unsafe_op?(op) and is_list(args) do
     "(#{text})"
   end
 
   defp wrap_if_low_precedence(_node, text), do: text
-
-  # Skip when the argument shape would produce noisy/invalid pipe output.
-  defp pipe_friendly?({:%{}, _, _}), do: false
-  defp pipe_friendly?({:fn, _, _}), do: false
-  defp pipe_friendly?({:&, _, _}), do: false
-  defp pipe_friendly?(list) when is_list(list), do: false
-
-  # Sourceror parses literal lists as `{:__block__, _, [list]}`.
-  defp pipe_friendly?({:__block__, _, [inner]}) when is_list(inner), do: false
-
-  defp pipe_friendly?(_), do: true
-
-  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
-
-  defp apply_patches({:error, _}, source), do: source
-
-  defp patch_or_passthrough([], source), do: source
-
-  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
 end

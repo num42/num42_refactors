@@ -51,10 +51,6 @@ defmodule Number42.Refactors.Ex.AliasUsage do
 
   @impl Number42.Refactors.Refactor
   def description, do: "Alias multi-segment module references at the top of the module"
-
-  @impl Number42.Refactors.Refactor
-  def priority, do: 220
-
   @impl Number42.Refactors.Refactor
   def explanation do
     """
@@ -68,24 +64,44 @@ defmodule Number42.Refactors.Ex.AliasUsage do
   end
 
   @impl Number42.Refactors.Refactor
+  def priority, do: 220
+  @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
   @impl Number42.Refactors.Refactor
   def transform(source, _opts), do: Sourceror.parse_string(source) |> apply_patches(source)
+  defp alias_patches_or_skip(nil), do: []
 
-  # Two FQNs that share the same last segment cannot both be lifted —
-  # the resulting `alias A.X` and `alias B.X` would generate two
-  # `alias … .X` lines, and the second silently shadows the first
-  # (each call site binds to whichever was declared last). Skip the
-  # entire conflict group; let the reviewer decide between renaming
-  # one with `:as` and leaving them all FQN.
-  defp drop_last_segment_collisions(candidates) do
-    grouped = candidates |> Enum.group_by(&List.last/1)
+  defp alias_patches_or_skip({body_exprs, insert_at_line}) do
+    aliases_in_scope = collect_aliases(body_exprs)
+    fqn_call_nodes = collect_fqn_call_nodes(body_exprs)
 
-    grouped
-    |> Enum.flat_map(fn
-      {_last, [single]} -> [single]
-      {_last, _multi} -> []
-    end)
+    candidates =
+      fqn_call_nodes
+      |> Enum.map(fn {segments, _node} -> segments end)
+      |> Enum.uniq()
+      |> Enum.filter(&aliasable?(&1, aliases_in_scope))
+      |> drop_last_segment_collisions()
+
+    case candidates do
+      [] ->
+        []
+
+      _ ->
+        call_patches =
+          fqn_call_nodes
+          |> Enum.filter(fn {segments, _} -> segments in candidates end)
+          |> Enum.map(fn {segments, aliases_node} ->
+            alias_replace_patch(segments, aliases_node)
+          end)
+
+        alias_patch = build_alias_insert_patch(candidates, insert_at_line)
+        [alias_patch | call_patches]
+    end
+  end
+
+  defp alias_replace_patch(segments, aliases_node) do
+    last = segments |> List.last() |> Atom.to_string()
+    Patch.replace(aliases_node, last)
   end
 
   defp aliasable?(segments, aliases_in_scope) do
@@ -106,6 +122,9 @@ defmodule Number42.Refactors.Ex.AliasUsage do
       true -> true
     end
   end
+
+  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
+  defp apply_patches({:error, _}, source), do: source
 
   defp build_alias_insert_patch(candidates, insert_at_line) do
     text =
@@ -164,7 +183,6 @@ defmodule Number42.Refactors.Ex.AliasUsage do
   end
 
   defp collect_fqn_call_nodes(exprs), do: exprs |> Enum.flat_map(&collect_in_expr/1)
-
   defp collect_in_expr({:@, _, _}), do: []
 
   defp collect_in_expr({directive, _, _})
@@ -187,9 +205,14 @@ defmodule Number42.Refactors.Ex.AliasUsage do
     end)
   end
 
-  defp alias_replace_patch(segments, aliases_node) do
-    last = segments |> List.last() |> Atom.to_string()
-    Patch.replace(aliases_node, last)
+  defp drop_last_segment_collisions(candidates) do
+    grouped = candidates |> Enum.group_by(&List.last/1)
+
+    grouped
+    |> Enum.flat_map(fn
+      {_last, [single]} -> [single]
+      {_last, _multi} -> []
+    end)
   end
 
   defp find_module_body(ast) do
@@ -217,48 +240,12 @@ defmodule Number42.Refactors.Ex.AliasUsage do
     end_of_expression_line(last) + 1
   end
 
+  defp patch_or_passthrough([], source), do: source
+  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
   defp prefix_node?({:use, _, _}), do: true
   defp prefix_node?({:require, _, _}), do: true
   defp prefix_node?({:import, _, _}), do: true
   defp prefix_node?({:alias, _, _}), do: true
   defp prefix_node?({:behaviour, _, _}), do: true
   defp prefix_node?(_), do: false
-
-  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
-
-  defp apply_patches({:error, _}, source), do: source
-
-  defp alias_patches_or_skip(nil), do: []
-
-  defp alias_patches_or_skip({body_exprs, insert_at_line}) do
-    aliases_in_scope = collect_aliases(body_exprs)
-    fqn_call_nodes = collect_fqn_call_nodes(body_exprs)
-
-    candidates =
-      fqn_call_nodes
-      |> Enum.map(fn {segments, _node} -> segments end)
-      |> Enum.uniq()
-      |> Enum.filter(&aliasable?(&1, aliases_in_scope))
-      |> drop_last_segment_collisions()
-
-    case candidates do
-      [] ->
-        []
-
-      _ ->
-        call_patches =
-          fqn_call_nodes
-          |> Enum.filter(fn {segments, _} -> segments in candidates end)
-          |> Enum.map(fn {segments, aliases_node} ->
-            alias_replace_patch(segments, aliases_node)
-          end)
-
-        alias_patch = build_alias_insert_patch(candidates, insert_at_line)
-        [alias_patch | call_patches]
-    end
-  end
-
-  defp patch_or_passthrough([], source), do: source
-
-  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
 end

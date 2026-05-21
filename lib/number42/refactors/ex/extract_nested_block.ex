@@ -80,24 +80,17 @@ defmodule Number42.Refactors.Ex.ExtractNestedBlock do
     Sourceror.parse_string(source) |> apply_patches(max_nesting, source)
   end
 
-  defp build_patches(ast, max_nesting),
-    do: module_body(ast) |> extractions_in_body(max_nesting, ast)
+  defp apply_patches({:ok, ast}, max_nesting, source),
+    do:
+      build_patches(ast, max_nesting)
+      |> patch_or_passthrough(source)
 
-  # Index every `defp <name>(...) do <body> end` (and shorthand) in the
-  # module body, keyed by name string with the value being the list of
-  # all clause bodies under that name. Used to detect when the lambda
-  # we'd extract is already represented by an existing extracted_*
-  # helper — in which case we skip rather than emit `_2`.
+  defp apply_patches({:error, _}, _max_nesting, source), do: source
+  defp bodies_equal?(a, b), do: strip_meta(a) == strip_meta(b)
   defp build_extracted_index(ast), do: module_body_exprs(ast) |> index_defps_by_name()
 
-  defp fetch_do_body_keyword(keyword) do
-    keyword
-    |> Enum.find_value(:error, fn
-      {{:__block__, _, [:do]}, value} -> {:ok, value}
-      {:do, value} -> {:ok, value}
-      _ -> nil
-    end)
-  end
+  defp build_patches(ast, max_nesting),
+    do: module_body(ast) |> extractions_in_body(max_nesting, ast)
 
   defp collect_bound_names_before_fn_walk(body) do
     body
@@ -158,193 +151,6 @@ defmodule Number42.Refactors.Ex.ExtractNestedBlock do
     )
   end
 
-  defp find_extraction({def_kind, _meta, [head, [{_do, body}]]} = def_node, max_nesting)
-       when def_kind?(def_kind) do
-    fn_name = function_name(head)
-    # Names in scope at the lambda site: function parameters + any
-    # `=`-bound names anywhere in the body. Conservative — a name
-    # bound *after* the lambda would still appear here, but that's
-    # safe (it just gets passed in as a possibly-redundant arg).
-    head_params =
-      head |> function_param_patterns() |> Enum.flat_map(&pattern_var_names/1) |> MapSet.new()
-
-    body_binds = collect_bound_names_before_fn_walk(body)
-    bound_before = MapSet.union(head_params, body_binds)
-
-    deepest_too_deep_fn(body, max_nesting)
-    |> emit_target_or_skip(body, bound_before, def_node, fn_name)
-  end
-
-  defp find_extraction(_, _max_nesting), do: []
-  defp function_name({:when, _, [{name, _, _} | _]}) when is_atom(name), do: name
-  defp function_name({name, _, _}) when is_atom(name), do: name
-  defp function_name(_), do: :unknown
-  defp function_param_patterns({:when, _, [inner | _]}), do: function_param_patterns(inner)
-  defp function_param_patterns({name, _, args}) when is_atom(name) and is_list(args), do: args
-  defp function_param_patterns(_), do: []
-
-  # Synthesise the helper name and resolve any clash against existing
-  # `defp <name>` clauses in the module. If a same-named helper's body
-  # is structurally equal to `fn_body` (modulo metadata), the
-  # extraction is a no-op → `:skip`. Otherwise walk `_2`/`_3`/… until
-  # a free or matching slot is found.
-  defp generate_helper_name(host_fn_name, fn_body, extracted_index) do
-    base = synth_compound_name("extracted", host_fn_name, "", "")
-
-    same? = fn existing_bodies ->
-      existing_bodies |> Enum.any?(&bodies_equal?(&1, fn_body))
-    end
-
-    resolve_collision(base, extracted_index, same?: same?)
-  end
-
-  defp bodies_equal?(a, b), do: strip_meta(a) == strip_meta(b)
-
-  defp strip_meta(ast) do
-    Macro.prewalk(ast, fn
-      {form, _meta, args} -> {form, [], args}
-      other -> other
-    end)
-  end
-
-  defp indent_body(str), do: String.split(str, "\n") |> Enum.map_join("\n", &("    " <> &1))
-
-  defp liftable_fn?({:fn, _, [{:->, _, [_args, body]}]}),
-    do: multi_statement_body?(body) or wraps_nesting_construct?(body)
-
-  defp liftable_fn?(_), do: false
-
-  defp local_alias_names(body) do
-    body
-    |> Macro.prewalker()
-    |> Enum.flat_map(fn
-      {:alias, _, [{:__aliases__, _, segments}, opts]} when is_list(opts) ->
-        case Keyword.get(opts, :as) do
-          {:__aliases__, _, [renamed]} when is_atom(renamed) -> [renamed]
-          _ -> [List.last(segments)]
-        end
-
-      {:alias, _, [{:__aliases__, _, segments}]} ->
-        [List.last(segments)]
-
-      # Multi-alias `alias Foo.{Bar, Baz}` parses as `{:alias, _, [{{:., _, [_, :{}]}, _, inners}]}`
-      {:alias, _, [{{:., _, [_, :{}]}, _, inners}]} ->
-        inners
-        |> Enum.flat_map(fn
-          {:__aliases__, _, segments} -> [List.last(segments)]
-          _ -> []
-        end)
-
-      _ ->
-        []
-    end)
-    |> MapSet.new()
-  end
-
-  defp module_body({:defmodule, _, [_name, [{_do, body}]]}) do
-    exprs =
-      case body do
-        {:__block__, _, list} -> list
-        single -> [single]
-      end
-
-    last = List.last(exprs)
-    line = end_of_expression_line(last) + 1
-    {exprs, line}
-  end
-
-  defp module_body(_), do: nil
-  defp multi_statement_body?({:__block__, _, exprs}) when length(exprs) >= 2, do: true
-  defp multi_statement_body?(_), do: false
-
-  defp referenced_alias_heads(expr) do
-    expr
-    |> Macro.prewalker()
-    |> Enum.flat_map(fn
-      {:__aliases__, _, [first | _]} when is_atom(first) -> [first]
-      _ -> []
-    end)
-    |> MapSet.new()
-  end
-
-  defp render_helper(helper_name, params, body_ast) do
-    params_str = params |> Enum.map_join(", ", &Atom.to_string/1)
-    body_str = body_ast |> Sourceror.to_string() |> indent_body()
-
-    """
-      # FIXME: extracted automatically by ExtractNestedBlock — review
-      # the parameter list and consider a better name.
-      defp #{helper_name}(#{params_str}) do
-    #{body_str}
-      end
-    """
-  end
-
-  defp render_replacement_fn(fn_args, helper_name, helper_params) do
-    args_str = fn_args |> Enum.map_join(", ", &Sourceror.to_string/1)
-    params_str = helper_params |> Enum.map_join(", ", &Atom.to_string/1)
-    "fn #{args_str} -> #{helper_name}(#{params_str}) end"
-  end
-
-  defp replacement_range(range),
-    do: %{
-      end: [line: range.end[:line], column: range.end[:column]],
-      start: [line: range.start[:line], column: range.start[:column]]
-    }
-
-  defp walk_with_depth({_, _, _} = node, depth) do
-    nested? =
-      match?(
-        {tag, _, _} when tag in [:fn, :case, :cond, :if, :unless, :with, :for, :receive, :try],
-        node
-      )
-
-    next_depth = if nested?, do: depth + 1, else: depth
-
-    children =
-      case node do
-        {_, _, args} when is_list(args) -> args
-        _ -> []
-      end
-
-    [{node, depth}] ++ Enum.flat_map(children, &walk_with_depth(&1, next_depth))
-  end
-
-  defp walk_with_depth(list, depth) when is_list(list) do
-    list |> Enum.flat_map(&walk_with_depth(&1, depth))
-  end
-
-  defp walk_with_depth({left, right}, depth),
-    do: walk_with_depth(left, depth) ++ walk_with_depth(right, depth)
-
-  defp walk_with_depth(_leaf, _depth), do: []
-
-  defp wraps_nesting_construct?({tag, _, _})
-       when tag in [:case, :cond, :if, :unless, :with, :for, :receive, :try],
-       do: true
-
-  defp wraps_nesting_construct?(_), do: false
-
-  defp apply_patches({:ok, ast}, max_nesting, source),
-    do:
-      build_patches(ast, max_nesting)
-      |> patch_or_passthrough(source)
-
-  defp apply_patches({:error, _}, _max_nesting, source), do: source
-
-  defp extractions_in_body(nil, _max_nesting, _ast), do: []
-
-  defp extractions_in_body({body_exprs, append_at_line}, max_nesting, ast) do
-    extracted_index = build_extracted_index(ast)
-
-    body_exprs
-    |> Enum.flat_map(&find_extraction(&1, max_nesting))
-    # Pick the first violation per module per pass — keeps changes
-    # small and easy to review. Rerun the pipeline to mop up more.
-    |> Enum.take(1)
-    |> Enum.flat_map(&emit_patches(&1, append_at_line, extracted_index))
-  end
-
   defp emit_target_or_skip(nil, _body, _bound_before, _def_node, _fn_name), do: []
 
   defp emit_target_or_skip(
@@ -403,10 +209,64 @@ defmodule Number42.Refactors.Ex.ExtractNestedBlock do
     end
   end
 
-  defp patch_or_passthrough([], source), do: source
+  defp extractions_in_body(nil, _max_nesting, _ast), do: []
 
-  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
+  defp extractions_in_body({body_exprs, append_at_line}, max_nesting, ast) do
+    extracted_index = build_extracted_index(ast)
 
+    body_exprs
+    |> Enum.flat_map(&find_extraction(&1, max_nesting))
+    # Pick the first violation per module per pass — keeps changes
+    # small and easy to review. Rerun the pipeline to mop up more.
+    |> Enum.take(1)
+    |> Enum.flat_map(&emit_patches(&1, append_at_line, extracted_index))
+  end
+
+  defp fetch_do_body_keyword(keyword) do
+    keyword
+    |> Enum.find_value(:error, fn
+      {{:__block__, _, [:do]}, value} -> {:ok, value}
+      {:do, value} -> {:ok, value}
+      _ -> nil
+    end)
+  end
+
+  defp find_extraction({def_kind, _meta, [head, [{_do, body}]]} = def_node, max_nesting)
+       when def_kind?(def_kind) do
+    fn_name = function_name(head)
+    # Names in scope at the lambda site: function parameters + any
+    # `=`-bound names anywhere in the body. Conservative — a name
+    # bound *after* the lambda would still appear here, but that's
+    # safe (it just gets passed in as a possibly-redundant arg).
+    head_params =
+      head |> function_param_patterns() |> Enum.flat_map(&pattern_var_names/1) |> MapSet.new()
+
+    body_binds = collect_bound_names_before_fn_walk(body)
+    bound_before = MapSet.union(head_params, body_binds)
+
+    deepest_too_deep_fn(body, max_nesting)
+    |> emit_target_or_skip(body, bound_before, def_node, fn_name)
+  end
+
+  defp find_extraction(_, _max_nesting), do: []
+  defp function_name({:when, _, [{name, _, _} | _]}) when is_atom(name), do: name
+  defp function_name({name, _, _}) when is_atom(name), do: name
+  defp function_name(_), do: :unknown
+  defp function_param_patterns({:when, _, [inner | _]}), do: function_param_patterns(inner)
+  defp function_param_patterns({name, _, args}) when is_atom(name) and is_list(args), do: args
+  defp function_param_patterns(_), do: []
+
+  defp generate_helper_name(host_fn_name, fn_body, extracted_index) do
+    base = synth_compound_name("extracted", host_fn_name, "", "")
+
+    same? = fn existing_bodies ->
+      existing_bodies |> Enum.any?(&bodies_equal?(&1, fn_body))
+    end
+
+    resolve_collision(base, extracted_index, same?: same?)
+  end
+
+  defp indent_body(str), do: String.split(str, "\n") |> Enum.map_join("\n", &("    " <> &1))
   defp index_defps_by_name(nil), do: %{}
 
   defp index_defps_by_name(exprs) do
@@ -429,6 +289,56 @@ defmodule Number42.Refactors.Ex.ExtractNestedBlock do
     end)
     |> Enum.group_by(fn {name, _} -> name end, fn {_, body} -> body end)
   end
+
+  defp liftable_fn?({:fn, _, [{:->, _, [_args, body]}]}),
+    do: multi_statement_body?(body) or wraps_nesting_construct?(body)
+
+  defp liftable_fn?(_), do: false
+
+  defp local_alias_names(body) do
+    body
+    |> Macro.prewalker()
+    |> Enum.flat_map(fn
+      {:alias, _, [{:__aliases__, _, segments}, opts]} when is_list(opts) ->
+        case Keyword.get(opts, :as) do
+          {:__aliases__, _, [renamed]} when is_atom(renamed) -> [renamed]
+          _ -> [List.last(segments)]
+        end
+
+      {:alias, _, [{:__aliases__, _, segments}]} ->
+        [List.last(segments)]
+
+      # Multi-alias `alias Foo.{Bar, Baz}` parses as `{:alias, _, [{{:., _, [_, :{}]}, _, inners}]}`
+      {:alias, _, [{{:., _, [_, :{}]}, _, inners}]} ->
+        inners
+        |> Enum.flat_map(fn
+          {:__aliases__, _, segments} -> [List.last(segments)]
+          _ -> []
+        end)
+
+      _ ->
+        []
+    end)
+    |> MapSet.new()
+  end
+
+  defp module_body({:defmodule, _, [_name, [{_do, body}]]}) do
+    exprs =
+      case body do
+        {:__block__, _, list} -> list
+        single -> [single]
+      end
+
+    last = List.last(exprs)
+    line = end_of_expression_line(last) + 1
+    {exprs, line}
+  end
+
+  defp module_body(_), do: nil
+  defp multi_statement_body?({:__block__, _, exprs}) when length(exprs) >= 2, do: true
+  defp multi_statement_body?(_), do: false
+  defp patch_or_passthrough([], source), do: source
+  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
 
   defp patches_for_helper(
          :skip,
@@ -471,4 +381,79 @@ defmodule Number42.Refactors.Ex.ExtractNestedBlock do
 
     [body_patch, helper_patch]
   end
+
+  defp referenced_alias_heads(expr) do
+    expr
+    |> Macro.prewalker()
+    |> Enum.flat_map(fn
+      {:__aliases__, _, [first | _]} when is_atom(first) -> [first]
+      _ -> []
+    end)
+    |> MapSet.new()
+  end
+
+  defp render_helper(helper_name, params, body_ast) do
+    params_str = params |> Enum.map_join(", ", &Atom.to_string/1)
+    body_str = body_ast |> Sourceror.to_string() |> indent_body()
+
+    """
+      # FIXME: extracted automatically by ExtractNestedBlock — review
+      # the parameter list and consider a better name.
+      defp #{helper_name}(#{params_str}) do
+    #{body_str}
+      end
+    """
+  end
+
+  defp render_replacement_fn(fn_args, helper_name, helper_params) do
+    args_str = fn_args |> Enum.map_join(", ", &Sourceror.to_string/1)
+    params_str = helper_params |> Enum.map_join(", ", &Atom.to_string/1)
+    "fn #{args_str} -> #{helper_name}(#{params_str}) end"
+  end
+
+  defp replacement_range(range),
+    do: %{
+      end: [line: range.end[:line], column: range.end[:column]],
+      start: [line: range.start[:line], column: range.start[:column]]
+    }
+
+  defp strip_meta(ast) do
+    Macro.prewalk(ast, fn
+      {form, _meta, args} -> {form, [], args}
+      other -> other
+    end)
+  end
+
+  defp walk_with_depth({_, _, _} = node, depth) do
+    nested? =
+      match?(
+        {tag, _, _} when tag in [:fn, :case, :cond, :if, :unless, :with, :for, :receive, :try],
+        node
+      )
+
+    next_depth = if nested?, do: depth + 1, else: depth
+
+    children =
+      case node do
+        {_, _, args} when is_list(args) -> args
+        _ -> []
+      end
+
+    [{node, depth}] ++ Enum.flat_map(children, &walk_with_depth(&1, next_depth))
+  end
+
+  defp walk_with_depth(list, depth) when is_list(list) do
+    list |> Enum.flat_map(&walk_with_depth(&1, depth))
+  end
+
+  defp walk_with_depth({left, right}, depth),
+    do: walk_with_depth(left, depth) ++ walk_with_depth(right, depth)
+
+  defp walk_with_depth(_leaf, _depth), do: []
+
+  defp wraps_nesting_construct?({tag, _, _})
+       when tag in [:case, :cond, :if, :unless, :with, :for, :receive, :try],
+       do: true
+
+  defp wraps_nesting_construct?(_), do: false
 end

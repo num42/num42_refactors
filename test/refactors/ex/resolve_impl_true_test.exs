@@ -13,9 +13,9 @@ defmodule Number42.Refactors.Ex.ResolveImplTrueTest do
   defmodule SingleBehaviourFixture do
     use GenServer
     @impl true
-    def init(state), do: {:ok, state}
-    @impl true
     def handle_call(_msg, _from, state), do: {:reply, :ok, state}
+    @impl true
+    def init(state), do: {:ok, state}
   end
 
   defmodule NoBehaviourFixture do
@@ -24,9 +24,9 @@ defmodule Number42.Refactors.Ex.ResolveImplTrueTest do
 
   defmodule UnknownCallbackFixture do
     use GenServer
+    def helper(x), do: x
     @impl true
     def init(state), do: {:ok, state}
-    def helper(x), do: x
   end
 
   describe "rewrites — single behaviour" do

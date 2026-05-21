@@ -54,18 +54,6 @@ defmodule Number42.Refactors.AstDiff do
         }
 
   @doc """
-  Diff two AST trees, returning their shared skeleton and the holes
-  where they diverge.
-
-  Pre-condition: both inputs have the same
-  `replace_literals_with_holes` hash. Without that, this function will
-  likely report a complex hole at the first structural divergence —
-  correct, just wasteful.
-  """
-  @spec tree_diff(term(), term()) :: result()
-  def tree_diff(a, b), do: tree_diff([a, b])
-
-  @doc """
   Diff a list of N (≥ 2) AST clauses.
 
   Same semantics as the 2-arg form, generalised to bucket groups with
@@ -77,49 +65,56 @@ defmodule Number42.Refactors.AstDiff do
     %{holes: holes |> Enum.reverse(), skeleton: skeleton}
   end
 
-  # ---------------------------------------------------------------------
-  # Walker
-  # ---------------------------------------------------------------------
+  @doc """
+  Diff two AST trees, returning their shared skeleton and the holes
+  where they diverge.
 
-  # Walk all N nodes in parallel. `path` is the pre-order position of
-  # the current node, used as a stable identifier for holes. Returns
-  # `{merged_node, holes_acc}` where `merged_node` is the skeleton at
-  # this position (the first AST's node, with sub-holes already in
-  # place) and `holes_acc` is the accumulated hole list (reversed —
-  # caller un-reverses).
-  defp walk(nodes, path, holes_acc) do
-    [first | _] = nodes
+  Pre-condition: both inputs have the same
+  `replace_literals_with_holes` hash. Without that, this function will
+  likely report a complex hole at the first structural divergence —
+  correct, just wasteful.
+  """
+  @spec tree_diff(term(), term()) :: result()
+  def tree_diff(a, b), do: tree_diff([a, b])
+  defp all_literal_nodes?(nodes), do: nodes |> Enum.all?(&literal_node?/1)
 
+  defp all_strip_eq?(nodes) do
+    [first | rest] = nodes
+    stripped_first = strip(first)
+    rest |> Enum.all?(&(strip(&1) == stripped_first))
+  end
+
+  defp build_hole(values, path), do: %{kind: classify(values), path: path, values: values}
+
+  defp classify(values) do
     cond do
-      all_strip_eq?(nodes) ->
-        # Every input has structurally identical AST at this position.
-        # Take the first verbatim — no descent needed, no hole.
-        {first, holes_acc}
-
-      all_literal_nodes?(nodes) ->
-        # All N are Sourceror-wrapped literals (atom/int/float/string/
-        # bool/nil) but their *values* differ. This is exactly a
-        # parametric-clone hole — classify as :literal regardless of
-        # the inner-list-mismatch the walker would otherwise descend
-        # into (`{:__block__, _, [true]}` vs `{:__block__, _, [false]}`
-        # share outer shape but the structural walk would split the
-        # bool atoms incorrectly).
-        hole = build_hole(nodes, path)
-        {placeholder(path), [hole | holes_acc]}
-
-      same_outer_shape?(nodes) ->
-        # Same form/arity at the outer level — descend into children
-        # and recurse position-by-position.
-        descend(nodes, path, holes_acc)
-
-      true ->
-        # Divergent shape. This is a hole. Classify by content.
-        hole = build_hole(nodes, path)
-        {placeholder(path), [hole | holes_acc]}
+      values |> Enum.all?(&literal_node?/1) -> :literal
+      values |> Enum.all?(&data_node?/1) -> :data
+      true -> :expr
     end
   end
 
-  defp all_literal_nodes?(nodes), do: nodes |> Enum.all?(&literal_node?/1)
+  defp data_node?(node) do
+    case node do
+      list when is_list(list) ->
+        list |> Enum.all?(&(literal_node?(&1) or data_node?(&1)))
+
+      {:__block__, _, [list]} when is_list(list) ->
+        list |> Enum.all?(&(literal_node?(&1) or data_node?(&1)))
+
+      {:{}, _, args} when is_list(args) ->
+        args |> Enum.all?(&(literal_node?(&1) or data_node?(&1)))
+
+      {:%{}, _, pairs} when is_list(pairs) ->
+        pairs
+        |> Enum.all?(fn {k, v} ->
+          (literal_node?(k) or data_node?(k)) and (literal_node?(v) or data_node?(v))
+        end)
+
+      _ ->
+        false
+    end
+  end
 
   defp descend([{form, meta, args} | _] = nodes, path, holes_acc) when is_list(args) do
     children_per_node = nodes |> Enum.map(fn {_, _, a} -> a end)
@@ -178,46 +173,24 @@ defmodule Number42.Refactors.AstDiff do
     end
   end
 
-  defp walk_lists(walked_lists, base_path, index, holes_acc) do
-    [first | _] = walked_lists
+  defp literal_node?({:__block__, _, [v]})
+       when is_atom(v) or is_integer(v) or is_float(v) or is_binary(v),
+       do: true
 
-    cond do
-      first == [] and Enum.all?(walked_lists, &(&1 == [])) ->
-        {[], holes_acc}
+  defp literal_node?(_), do: false
+  defp placeholder(path), do: {:"$hole", [], [path]}
 
-      first == [] or Enum.any?(walked_lists, &(&1 == [])) ->
-        # Length mismatch — would have been caught at outer level by
-        # same_outer_shape? Defensive: emit hole.
-        hole = build_hole(walked_lists, base_path ++ [index])
-        {placeholder(base_path ++ [index]), [hole | holes_acc]}
+  defp same_3tuple_shape?({form_a, _, args_a}, {form_b, _, args_b}),
+    do: same_form?(form_a, form_b) and same_args_shape?(args_a, args_b)
 
-      true ->
-        heads = walked_lists |> Enum.map(&hd/1)
-        tails = walked_lists |> Enum.map(&tl/1)
+  defp same_args_shape?(args_a, args_b)
+       when is_list(args_a) and is_list(args_b),
+       do: length(args_a) == length(args_b)
 
-        {new_head, holes_acc} = walk(heads, base_path ++ [index], holes_acc)
-        {new_tail, holes_acc} = walk_lists(tails, base_path, index + 1, holes_acc)
+  defp same_args_shape?(args_a, args_b),
+    do: args_a == args_b or is_atom(args_a) == is_atom(args_b)
 
-        {[new_head | new_tail], holes_acc}
-    end
-  end
-
-  # ---------------------------------------------------------------------
-  # Shape & equality predicates
-  # ---------------------------------------------------------------------
-
-  defp all_strip_eq?(nodes) do
-    [first | rest] = nodes
-    stripped_first = strip(first)
-    rest |> Enum.all?(&(strip(&1) == stripped_first))
-  end
-
-  defp strip(ast) do
-    Macro.prewalk(ast, fn
-      {form, meta, args} when is_list(meta) -> {form, [], args}
-      other -> other
-    end)
-  end
+  defp same_form?(form_a, form_b), do: strip(form_a) == strip(form_b)
 
   defp same_outer_shape?([first | rest]) do
     cond do
@@ -240,70 +213,68 @@ defmodule Number42.Refactors.AstDiff do
     end
   end
 
+  defp strip(ast) do
+    Macro.prewalk(ast, fn
+      {form, meta, args} when is_list(meta) -> {form, [], args}
+      other -> other
+    end)
+  end
+
   defp tuple3?(t), do: is_tuple(t) and tuple_size(t) == 3
 
-  # Two 3-tuple AST nodes share an outer shape when their forms match
-  # (modulo meta) and their args are list-vs-list with the same length,
-  # or non-list args of equal type. Forms are compared meta-stripped so
-  # tuple-forms like `{:., meta, [Module, fn]}` from different source
-  # positions still compare equal.
-  defp same_3tuple_shape?({form_a, _, args_a}, {form_b, _, args_b}),
-    do: same_form?(form_a, form_b) and same_args_shape?(args_a, args_b)
+  defp walk(nodes, path, holes_acc) do
+    [first | _] = nodes
 
-  defp same_form?(form_a, form_b), do: strip(form_a) == strip(form_b)
-
-  defp same_args_shape?(args_a, args_b)
-       when is_list(args_a) and is_list(args_b),
-       do: length(args_a) == length(args_b)
-
-  defp same_args_shape?(args_a, args_b),
-    do: args_a == args_b or is_atom(args_a) == is_atom(args_b)
-
-  # ---------------------------------------------------------------------
-  # Hole construction & classification
-  # ---------------------------------------------------------------------
-
-  defp placeholder(path), do: {:"$hole", [], [path]}
-
-  defp build_hole(values, path), do: %{kind: classify(values), path: path, values: values}
-
-  defp classify(values) do
     cond do
-      values |> Enum.all?(&literal_node?/1) -> :literal
-      values |> Enum.all?(&data_node?/1) -> :data
-      true -> :expr
+      all_strip_eq?(nodes) ->
+        # Every input has structurally identical AST at this position.
+        # Take the first verbatim — no descent needed, no hole.
+        {first, holes_acc}
+
+      all_literal_nodes?(nodes) ->
+        # All N are Sourceror-wrapped literals (atom/int/float/string/
+        # bool/nil) but their *values* differ. This is exactly a
+        # parametric-clone hole — classify as :literal regardless of
+        # the inner-list-mismatch the walker would otherwise descend
+        # into (`{:__block__, _, [true]}` vs `{:__block__, _, [false]}`
+        # share outer shape but the structural walk would split the
+        # bool atoms incorrectly).
+        hole = build_hole(nodes, path)
+        {placeholder(path), [hole | holes_acc]}
+
+      same_outer_shape?(nodes) ->
+        # Same form/arity at the outer level — descend into children
+        # and recurse position-by-position.
+        descend(nodes, path, holes_acc)
+
+      true ->
+        # Divergent shape. This is a hole. Classify by content.
+        hole = build_hole(nodes, path)
+        {placeholder(path), [hole | holes_acc]}
     end
   end
 
-  # Sourceror-wrapped literal: `{:__block__, _, [v]}` where v is a
-  # primitive atom/int/float/string/bool/nil.
-  defp literal_node?({:__block__, _, [v]})
-       when is_atom(v) or is_integer(v) or is_float(v) or is_binary(v),
-       do: true
+  defp walk_lists(walked_lists, base_path, index, holes_acc) do
+    [first | _] = walked_lists
 
-  defp literal_node?(_), do: false
+    cond do
+      first == [] and Enum.all?(walked_lists, &(&1 == [])) ->
+        {[], holes_acc}
 
-  # A "data" node is a list/tuple/map literal whose every leaf is a
-  # literal. Useful for default-value holes like `[1, 2]` vs `[3, 4]`.
-  defp data_node?(node) do
-    case node do
-      list when is_list(list) ->
-        list |> Enum.all?(&(literal_node?(&1) or data_node?(&1)))
+      first == [] or Enum.any?(walked_lists, &(&1 == [])) ->
+        # Length mismatch — would have been caught at outer level by
+        # same_outer_shape? Defensive: emit hole.
+        hole = build_hole(walked_lists, base_path ++ [index])
+        {placeholder(base_path ++ [index]), [hole | holes_acc]}
 
-      {:__block__, _, [list]} when is_list(list) ->
-        list |> Enum.all?(&(literal_node?(&1) or data_node?(&1)))
+      true ->
+        heads = walked_lists |> Enum.map(&hd/1)
+        tails = walked_lists |> Enum.map(&tl/1)
 
-      {:{}, _, args} when is_list(args) ->
-        args |> Enum.all?(&(literal_node?(&1) or data_node?(&1)))
+        {new_head, holes_acc} = walk(heads, base_path ++ [index], holes_acc)
+        {new_tail, holes_acc} = walk_lists(tails, base_path, index + 1, holes_acc)
 
-      {:%{}, _, pairs} when is_list(pairs) ->
-        pairs
-        |> Enum.all?(fn {k, v} ->
-          (literal_node?(k) or data_node?(k)) and (literal_node?(v) or data_node?(v))
-        end)
-
-      _ ->
-        false
+        {[new_head | new_tail], holes_acc}
     end
   end
 end

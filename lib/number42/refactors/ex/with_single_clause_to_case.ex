@@ -53,10 +53,6 @@ defmodule Number42.Refactors.Ex.WithSingleClauseToCase do
 
   @impl Number42.Refactors.Refactor
   def description, do: "Rewrite single-clause `with` into `case`"
-
-  @impl Number42.Refactors.Refactor
-  def priority, do: 120
-
   @impl Number42.Refactors.Refactor
   def explanation do
     """
@@ -69,39 +65,21 @@ defmodule Number42.Refactors.Ex.WithSingleClauseToCase do
   end
 
   @impl Number42.Refactors.Refactor
+  def priority, do: 120
+  @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
-
   @impl Number42.Refactors.Refactor
   def transform(source, _opts), do: Sourceror.parse_string(source) |> apply_patches(source)
+  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
+  defp apply_patches({:error, _}, source), do: source
+  defp arrow?({:<-, _, _}), do: true
+  defp arrow?(_), do: false
 
   defp build_patches(ast),
     do:
       ast
       |> Macro.prewalker()
       |> Enum.flat_map(&maybe_patch/1)
-
-  defp maybe_patch({:with, _meta, clauses} = node) when is_list(clauses) do
-    classify(clauses) |> patch_or_skip(node)
-  end
-
-  defp maybe_patch(_), do: []
-
-  # We synthesize an `other -> other` passthrough arm when there is no
-  # `else`. If the user's RHS, body or else clauses already mention
-  # `other`, the synthesized binding could shadow it — skip rather than
-  # risk a semantic change.
-  defp collision?(rhs, body, else_clauses),
-    do: refs_other?(rhs) or refs_other?(body) or Enum.any?(else_clauses, &refs_other?/1)
-
-  defp refs_other?(ast) do
-    {_, hit} =
-      Macro.prewalk(ast, false, fn
-        {:other, _, ctx} = node, _ when is_atom(ctx) -> {node, true}
-        node, acc -> {node, acc}
-      end)
-
-    hit
-  end
 
   defp classify(clauses) do
     {kw, head_clauses} = split_keyword(clauses)
@@ -119,10 +97,16 @@ defmodule Number42.Refactors.Ex.WithSingleClauseToCase do
     end
   end
 
-  defp split_keyword(clauses), do: List.last(clauses) |> split_off_keyword(clauses)
+  defp collision?(rhs, body, else_clauses),
+    do: refs_other?(rhs) or refs_other?(body) or Enum.any?(else_clauses, &refs_other?/1)
 
-  defp arrow?({:<-, _, _}), do: true
-  defp arrow?(_), do: false
+  defp else_clauses_or_default({:ok, clauses}) when is_list(clauses) do
+    {:ok, clauses}
+  end
+
+  defp else_clauses_or_default(:error), do: {:ok, []}
+  defp else_clauses_or_default(_), do: :error
+  defp fetch_else(keyword), do: fetch_keyword(keyword, :else) |> else_clauses_or_default()
 
   defp fetch_keyword(keyword, key) do
     keyword
@@ -133,7 +117,33 @@ defmodule Number42.Refactors.Ex.WithSingleClauseToCase do
     end)
   end
 
-  defp fetch_else(keyword), do: fetch_keyword(keyword, :else) |> else_clauses_or_default()
+  defp maybe_patch({:with, _meta, clauses} = node) when is_list(clauses) do
+    classify(clauses) |> patch_or_skip(node)
+  end
+
+  defp maybe_patch(_), do: []
+  defp patch_or_passthrough([], source), do: source
+  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
+
+  defp patch_or_skip({:ok, pattern, rhs, body, else_clauses}, node) do
+    if collision?(rhs, body, else_clauses) do
+      []
+    else
+      [Patch.replace(node, render_case(rhs, pattern, body, else_clauses))]
+    end
+  end
+
+  defp patch_or_skip(:skip, _node), do: []
+
+  defp refs_other?(ast) do
+    {_, hit} =
+      Macro.prewalk(ast, false, fn
+        {:other, _, ctx} = node, _ when is_atom(ctx) -> {node, true}
+        node, acc -> {node, acc}
+      end)
+
+    hit
+  end
 
   defp render_case(scrutinee, pattern, body, else_clauses) do
     success_arm = {:->, [], [[pattern], body]}
@@ -153,35 +163,11 @@ defmodule Number42.Refactors.Ex.WithSingleClauseToCase do
     Sourceror.to_string(case_ast)
   end
 
-  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
-
-  defp apply_patches({:error, _}, source), do: source
-
-  defp patch_or_skip({:ok, pattern, rhs, body, else_clauses}, node) do
-    if collision?(rhs, body, else_clauses) do
-      []
-    else
-      [Patch.replace(node, render_case(rhs, pattern, body, else_clauses))]
-    end
-  end
-
-  defp patch_or_skip(:skip, _node), do: []
+  defp split_keyword(clauses), do: List.last(clauses) |> split_off_keyword(clauses)
 
   defp split_off_keyword(kw, clauses) when is_list(kw) do
     {kw, clauses |> Enum.drop(-1)}
   end
 
   defp split_off_keyword(_, clauses), do: {[], clauses}
-
-  defp else_clauses_or_default({:ok, clauses}) when is_list(clauses) do
-    {:ok, clauses}
-  end
-
-  defp else_clauses_or_default(:error), do: {:ok, []}
-
-  defp else_clauses_or_default(_), do: :error
-
-  defp patch_or_passthrough([], source), do: source
-
-  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
 end

@@ -52,7 +52,6 @@ defmodule Number42.Refactors.Ex.ImportAfterAlias do
 
   @impl Number42.Refactors.Refactor
   def description, do: "Move module-top `import` statements after the `alias` block"
-
   @impl Number42.Refactors.Refactor
   def explanation do
     """
@@ -68,59 +67,13 @@ defmodule Number42.Refactors.Ex.ImportAfterAlias do
 
   @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
-
   @impl Number42.Refactors.Refactor
   def transform(source, _opts), do: Sourceror.parse_string(source) |> apply_patches(source)
 
-  defp build_patches(ast, source) do
-    with {:ok, body_exprs} <- module_body(ast),
-         imports when imports != [] <- top_level_imports(body_exprs),
-         last_alias_node when not is_nil(last_alias_node) <- last_top_level_alias(body_exprs),
-         [_ | _] = imports_before <- imports_before_node(imports, last_alias_node) do
-      delete_patches = imports_before |> Enum.map(&delete_line_patch(&1))
-      insert_patch = build_insert_patch(imports_before, last_alias_node, source)
-      [insert_patch | delete_patches]
-    else
-      _ -> []
-    end
-  end
+  defp apply_patches({:ok, ast}, source),
+    do: build_patches(ast, source) |> patch_or_passthrough(source)
 
-  defp module_body({:defmodule, _, [_name, [{_do, body}]]}), do: {:ok, body_to_exprs(body)}
-
-  defp module_body(_), do: :error
-
-  defp top_level_imports(exprs),
-    do: exprs |> Enum.filter(&match?({:import, _, args} when is_list(args), &1))
-
-  defp last_top_level_alias(exprs),
-    do:
-      exprs
-      |> Enum.filter(&match?({:alias, _, args} when is_list(args), &1))
-      |> List.last()
-
-  defp imports_before_node(imports, ref_node) do
-    ref_line = node_line(ref_node)
-
-    imports
-    |> Enum.filter(fn imp ->
-      end_of_expression_line(imp) < ref_line or node_line(imp) < ref_line
-    end)
-  end
-
-  defp node_line({_, meta, _}) when is_list(meta), do: Keyword.get(meta, :line, 1)
-  defp node_line(_), do: 1
-
-  defp delete_line_patch({_, meta, _} = node) when is_list(meta) do
-    start_line = Keyword.get(meta, :line, 1)
-    end_line = end_of_expression_line(node)
-
-    range = %{
-      end: [line: end_line + 1, column: 1],
-      start: [line: start_line, column: 1]
-    }
-
-    Patch.new(range, "", false)
-  end
+  defp apply_patches({:error, _}, source), do: source
 
   defp build_insert_patch(imports, last_alias_node, source) do
     insert_line = end_of_expression_line(last_alias_node) + 1
@@ -135,18 +88,57 @@ defmodule Number42.Refactors.Ex.ImportAfterAlias do
     Patch.new(range, text, false)
   end
 
-  defp render_import(node, source), do: slice_node(source, node) |> import_text_or_render(node)
+  defp build_patches(ast, source) do
+    with {:ok, body_exprs} <- module_body(ast),
+         imports when imports != [] <- top_level_imports(body_exprs),
+         last_alias_node when not is_nil(last_alias_node) <- last_top_level_alias(body_exprs),
+         [_ | _] = imports_before <- imports_before_node(imports, last_alias_node) do
+      delete_patches = imports_before |> Enum.map(&delete_line_patch(&1))
+      insert_patch = build_insert_patch(imports_before, last_alias_node, source)
+      [insert_patch | delete_patches]
+    else
+      _ -> []
+    end
+  end
 
-  defp apply_patches({:ok, ast}, source),
-    do: build_patches(ast, source) |> patch_or_passthrough(source)
+  defp delete_line_patch({_, meta, _} = node) when is_list(meta) do
+    start_line = Keyword.get(meta, :line, 1)
+    end_line = end_of_expression_line(node)
 
-  defp apply_patches({:error, _}, source), do: source
+    range = %{
+      end: [line: end_line + 1, column: 1],
+      start: [line: start_line, column: 1]
+    }
+
+    Patch.new(range, "", false)
+  end
 
   defp import_text_or_render({:ok, text}, _node), do: text |> String.trim_trailing()
-
   defp import_text_or_render(:error, node), do: node |> Sourceror.to_string()
 
-  defp patch_or_passthrough([], source), do: source
+  defp imports_before_node(imports, ref_node) do
+    ref_line = node_line(ref_node)
 
+    imports
+    |> Enum.filter(fn imp ->
+      end_of_expression_line(imp) < ref_line or node_line(imp) < ref_line
+    end)
+  end
+
+  defp last_top_level_alias(exprs),
+    do:
+      exprs
+      |> Enum.filter(&match?({:alias, _, args} when is_list(args), &1))
+      |> List.last()
+
+  defp module_body({:defmodule, _, [_name, [{_do, body}]]}), do: {:ok, body_to_exprs(body)}
+  defp module_body(_), do: :error
+  defp node_line({_, meta, _}) when is_list(meta), do: Keyword.get(meta, :line, 1)
+  defp node_line(_), do: 1
+  defp patch_or_passthrough([], source), do: source
   defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
+  defp render_import(node, source), do: slice_node(source, node) |> import_text_or_render(node)
+
+  defp top_level_imports(exprs),
+    do: exprs |> Enum.filter(&match?({:import, _, args} when is_list(args), &1))
 end

@@ -58,10 +58,6 @@ defmodule Number42.Refactors.Ex.MergeAssignKeywords do
 
   @impl Number42.Refactors.Refactor
   def description, do: "Merge consecutive `x = x |> assign(:k, v)` statements"
-
-  @impl Number42.Refactors.Refactor
-  def priority, do: 120
-
   @impl Number42.Refactors.Refactor
   def explanation do
     """
@@ -77,12 +73,17 @@ defmodule Number42.Refactors.Ex.MergeAssignKeywords do
   end
 
   @impl Number42.Refactors.Refactor
+  def priority, do: 120
+  @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
   @impl Number42.Refactors.Refactor
   def transform(source, _opts), do: Sourceror.parse_string(source) |> apply_patches(source)
 
-  defp ast_range_end(node), do: Sourceror.get_range(node) |> range_end_or_nil()
+  defp apply_patches({:ok, ast}, source),
+    do: build_patches(ast, source) |> patch_or_passthrough(source)
 
+  defp apply_patches({:error, _}, source), do: source
+  defp ast_range_end(node), do: Sourceror.get_range(node) |> range_end_or_nil()
   defp atom_literal({:__block__, _, [atom]}) when is_atom(atom), do: {:ok, atom}
   defp atom_literal(atom) when is_atom(atom), do: {:ok, atom}
   defp atom_literal(_), do: :error
@@ -113,66 +114,6 @@ defmodule Number42.Refactors.Ex.MergeAssignKeywords do
       end
 
     merge_patches ++ import_patches
-  end
-
-  # A merged local `assign` step (`signature == {:local, :assign}`)
-  # rewrites `|> assign(:k, v) |> assign(...)` to `|> assign(k: v, ...)`,
-  # i.e. switches from `assign/3` to `assign/2`. If the surrounding
-  # module imports `Phoenix.Component, only: [assign: 3]`, the merge
-  # leaves `assign/2` un-imported and the file no longer compiles.
-  # The import-widen patch covers that case.
-  defp merges_local_assign?(patches), do: patches |> Enum.any?(&local_assign_patch?/1)
-
-  defp local_assign_patch?(%{change: text}) when is_binary(text) do
-    # Local-assign merges always look like `... |> assign(k: ...)`
-    # or `lhs = lhs |> assign(k: ...)`. A remote-qualified merge
-    # carries the module prefix and won't match this regex.
-    Regex.match?(~r/(?<![A-Za-z0-9_\.])assign\(\w+:\s/, text)
-  end
-
-  defp local_assign_patch?(_), do: false
-
-  defp import_widen_patch({:import, _, [_mod_ast, kw]} = node, source) when is_list(kw) do
-    fetch_only_list(kw) |> widen_patches_for_only_list(node, source)
-  end
-
-  defp import_widen_patch(_, _), do: []
-
-  defp fetch_only_list(keyword) do
-    keyword
-    |> Enum.find_value(fn
-      {{:__block__, _, [:only]}, value} -> {:ok, value}
-      {:only, value} -> {:ok, value}
-      _ -> nil
-    end) || :error
-  end
-
-  defp only_list_atoms({:__block__, _, [list]}) when is_list(list), do: only_list_atoms(list)
-
-  defp only_list_atoms(list) when is_list(list) do
-    list
-    |> Enum.flat_map(fn
-      {{:__block__, _, [name]}, {:__block__, _, [arity]}}
-      when is_atom(name) and is_integer(arity) ->
-        [{name, arity}]
-
-      {name, arity} when is_atom(name) and is_integer(arity) ->
-        [{name, arity}]
-
-      _ ->
-        []
-    end)
-  end
-
-  defp only_list_atoms(_), do: []
-
-  defp widen_only_patch(import_node, only_list_ast, _source) do
-    pairs = only_list_atoms(only_list_ast)
-    widened = [{:assign, 2} | pairs] |> Enum.uniq() |> Enum.sort()
-    rendered = widened |> Enum.map_join(", ", fn {name, arity} -> "#{name}: #{arity}" end)
-
-    range = Sourceror.get_range(only_list_ast) || Sourceror.get_range(import_node)
-    Patch.new(range, "[" <> rendered <> "]", false)
   end
 
   defp callee_signature(:assign), do: {:ok, {:local, :assign}}
@@ -237,7 +178,6 @@ defmodule Number42.Refactors.Ex.MergeAssignKeywords do
   end
 
   defp classify_stmt(_), do: :other
-
   defp classify_stmts(classified_stmts), do: classified_stmts |> Enum.map(&classify_stmt/1)
 
   defp collect_chain_patches({:|>, _, _} = pipe_node, source, acc) do
@@ -261,10 +201,18 @@ defmodule Number42.Refactors.Ex.MergeAssignKeywords do
   end
 
   defp collect_chain_patches(_, _, acc), do: acc
-
   defp do_flatten_pipe({:|>, _, [lhs, step]}, acc), do: lhs |> do_flatten_pipe([step | acc])
-
   defp do_flatten_pipe(head, acc), do: {head, acc}
+
+  defp fetch_only_list(keyword) do
+    keyword
+    |> Enum.find_value(fn
+      {{:__block__, _, [:only]}, value} -> {:ok, value}
+      {:only, value} -> {:ok, value}
+      _ -> nil
+    end) || :error
+  end
+
   defp flatten_pipe(pipe_node), do: do_flatten_pipe(pipe_node, [])
   defp flush_chain_run([], acc), do: acc
   defp flush_chain_run([single], acc), do: [single | acc]
@@ -309,7 +257,21 @@ defmodule Number42.Refactors.Ex.MergeAssignKeywords do
     |> Enum.filter(&(length(&1) >= 2))
   end
 
+  defp import_widen_patch({:import, _, [_mod_ast, kw]} = node, source) when is_list(kw) do
+    fetch_only_list(kw) |> widen_patches_for_only_list(node, source)
+  end
+
+  defp import_widen_patch(_, _), do: []
   defp last_step_end(merged_steps), do: List.last(merged_steps) |> step_end_pos()
+
+  defp local_assign_patch?(%{change: text}) when is_binary(text) do
+    # Local-assign merges always look like `... |> assign(k: ...)`
+    # or `lhs = lhs |> assign(k: ...)`. A remote-qualified merge
+    # carries the module prefix and won't match this regex.
+    Regex.match?(~r/(?<![A-Za-z0-9_\.])assign\(\w+:\s/, text)
+  end
+
+  defp local_assign_patch?(_), do: false
 
   defp merge_runs(classified) do
     {result, current} =
@@ -342,6 +304,52 @@ defmodule Number42.Refactors.Ex.MergeAssignKeywords do
       else: :unchanged
   end
 
+  defp merges_local_assign?(patches), do: patches |> Enum.any?(&local_assign_patch?/1)
+  defp only_list_atoms({:__block__, _, [list]}) when is_list(list), do: only_list_atoms(list)
+
+  defp only_list_atoms(list) when is_list(list) do
+    list
+    |> Enum.flat_map(fn
+      {{:__block__, _, [name]}, {:__block__, _, [arity]}}
+      when is_atom(name) and is_integer(arity) ->
+        [{name, arity}]
+
+      {name, arity} when is_atom(name) and is_integer(arity) ->
+        [{name, arity}]
+
+      _ ->
+        []
+    end)
+  end
+
+  defp only_list_atoms(_), do: []
+  defp patch_or_passthrough([], source), do: source
+  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
+  defp range_end_or_nil(%{end: e}), do: e
+  defp range_end_or_nil(_), do: nil
+
+  defp recurse_or_emit_chain(
+         :unchanged,
+         acc,
+         head_ast,
+         _pipe_node,
+         source,
+         steps
+       ) do
+    acc = collect_chain_patches(head_ast, source, acc)
+    steps |> Enum.reduce(acc, fn step, a -> collect_chain_patches(step, source, a) end)
+  end
+
+  defp recurse_or_emit_chain(
+         {:changed, merged},
+         acc,
+         head_ast,
+         pipe_node,
+         source,
+         _steps
+       ),
+       do: [chain_patch(pipe_node, head_ast, merged, source) | acc]
+
   defp render_callee({:local, name}), do: Atom.to_string(name)
 
   defp render_callee({:remote, mod_ast, fun}),
@@ -354,7 +362,6 @@ defmodule Number42.Refactors.Ex.MergeAssignKeywords do
   end
 
   defp render_module(_), do: ""
-
   defp render_step({:other_step, step}, source), do: slice_node(source, step) |> text_or_nil()
 
   defp render_step({:assign_step, _, _, _, step}, source),
@@ -426,6 +433,11 @@ defmodule Number42.Refactors.Ex.MergeAssignKeywords do
     end
   end
 
+  defp step_end_pos({:other_step, step}), do: step |> step_end()
+  defp step_end_pos({:assign_step, _, _, _, step}), do: step |> step_end()
+  defp step_end_pos({:merged, _, _pairs, last_step}), do: last_step |> step_end()
+  defp step_end_pos(_), do: nil
+
   defp strip_meta(ast) do
     Macro.prewalk(ast, fn
       {form, _meta, args} -> {form, [], args}
@@ -433,52 +445,17 @@ defmodule Number42.Refactors.Ex.MergeAssignKeywords do
     end)
   end
 
-  defp apply_patches({:ok, ast}, source),
-    do: build_patches(ast, source) |> patch_or_passthrough(source)
-
-  defp apply_patches({:error, _}, source), do: source
-
-  defp range_end_or_nil(%{end: e}), do: e
-
-  defp range_end_or_nil(_), do: nil
-
-  defp recurse_or_emit_chain(
-         :unchanged,
-         acc,
-         head_ast,
-         _pipe_node,
-         source,
-         steps
-       ) do
-    acc = collect_chain_patches(head_ast, source, acc)
-    steps |> Enum.reduce(acc, fn step, a -> collect_chain_patches(step, source, a) end)
-  end
-
-  defp recurse_or_emit_chain(
-         {:changed, merged},
-         acc,
-         head_ast,
-         pipe_node,
-         source,
-         _steps
-       ),
-       do: [chain_patch(pipe_node, head_ast, merged, source) | acc]
-
-  defp step_end_pos({:other_step, step}), do: step |> step_end()
-
-  defp step_end_pos({:assign_step, _, _, _, step}), do: step |> step_end()
-
-  defp step_end_pos({:merged, _, _pairs, last_step}), do: last_step |> step_end()
-
-  defp step_end_pos(_), do: nil
-
   defp text_or_nil({:ok, text}), do: text
-
   defp text_or_nil(:error), do: nil
 
-  defp patch_or_passthrough([], source), do: source
+  defp widen_only_patch(import_node, only_list_ast, _source) do
+    pairs = only_list_atoms(only_list_ast)
+    widened = [{:assign, 2} | pairs] |> Enum.uniq() |> Enum.sort()
+    rendered = widened |> Enum.map_join(", ", fn {name, arity} -> "#{name}: #{arity}" end)
 
-  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
+    range = Sourceror.get_range(only_list_ast) || Sourceror.get_range(import_node)
+    Patch.new(range, "[" <> rendered <> "]", false)
+  end
 
   defp widen_patches_for_only_list({:ok, only_list_ast}, node, source) do
     names = only_list_atoms(only_list_ast)

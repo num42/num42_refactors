@@ -47,6 +47,25 @@ defmodule Number42.RefactorCase do
   end
 
   @doc """
+  Assert idempotence: applying the refactor twice yields the same
+  result as applying it once (whitespace-agnostic).
+  """
+  @spec assert_idempotent(module(), String.t(), keyword()) :: :ok
+  def assert_idempotent(module, source, opts \\ []) do
+    once = apply_refactor(module, source, opts)
+    twice = apply_refactor(module, once, opts)
+
+    assert squeeze(once) == squeeze(twice), """
+    Refactor #{inspect(module)} is not idempotent.
+
+    --- after first pass ---
+    #{once}
+    --- after second pass ---
+    #{twice}
+    """
+  end
+
+  @doc """
   Assert that `module` rewrites `before_source` to `expected`.
 
   Comparison is **whitespace-agnostic**: every whitespace run (spaces,
@@ -91,29 +110,6 @@ defmodule Number42.RefactorCase do
     """
   end
 
-  @doc """
-  Assert idempotence: applying the refactor twice yields the same
-  result as applying it once (whitespace-agnostic).
-  """
-  @spec assert_idempotent(module(), String.t(), keyword()) :: :ok
-  def assert_idempotent(module, source, opts \\ []) do
-    once = apply_refactor(module, source, opts)
-    twice = apply_refactor(module, once, opts)
-
-    assert squeeze(once) == squeeze(twice), """
-    Refactor #{inspect(module)} is not idempotent.
-
-    --- after first pass ---
-    #{once}
-    --- after second pass ---
-    #{twice}
-    """
-  end
-
-  # Collapse every whitespace run to a single space and trim. Preserves
-  # token boundaries (`def foo` stays distinct from `deffoo`) while
-  # making the comparison agnostic to indentation, blank lines, and
-  # trailing newlines.
   defp squeeze(source),
     do:
       source

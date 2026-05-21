@@ -109,6 +109,21 @@ defmodule Number42.Refactors.Heex.Clones do
     cluster_fragments(fragments, modes, min_occ)
   end
 
+  defp build_cluster(hash, mode, frags) do
+    [%{mass: mass, sub_hashes: rep_subs} | _] = frags
+
+    %{
+      hash: hash,
+      mass: mass,
+      mode: mode,
+      occurrences:
+        frags
+        |> Enum.map(fn f -> %{file: f.file, line: f.line, mass: f.mass, node: f.node} end)
+        |> Enum.sort_by(&{&1.file, &1.line}),
+      sub_hashes: rep_subs
+    }
+  end
+
   defp cluster_fragments(clustered_fragments, modes, min_occ) do
     by_mode =
       clustered_fragments
@@ -132,32 +147,6 @@ defmodule Number42.Refactors.Heex.Clones do
     end)
   end
 
-  defp fragments_for_source(source, path, min_mass, modes),
-    do: Tree.from_source(source) |> fragments_from_tree_result(min_mass, modes, path)
-
-  defp offset_line(frag, 0), do: frag
-
-  defp offset_line(frag, offset), do: %{frag | line: frag.line + offset}
-
-  defp build_cluster(hash, mode, frags) do
-    [%{mass: mass, sub_hashes: rep_subs} | _] = frags
-
-    %{
-      hash: hash,
-      mass: mass,
-      mode: mode,
-      occurrences:
-        frags
-        |> Enum.map(fn f -> %{file: f.file, line: f.line, mass: f.mass, node: f.node} end)
-        |> Enum.sort_by(&{&1.file, &1.line}),
-      sub_hashes: rep_subs
-    }
-  end
-
-  # Suppress a smaller cluster if its hash already appears among the
-  # sub-hashes of a larger cluster's representative, and the larger
-  # cluster covers at least as many occurrences. Both sub-hash sets
-  # come from the per-file fingerprint walk — no re-hashing here.
   defp drop_subset_clusters(subseted_clusters) do
     sorted = subseted_clusters |> Enum.sort_by(& &1.mass, :desc)
 
@@ -172,6 +161,9 @@ defmodule Number42.Refactors.Heex.Clones do
     end)
     |> Enum.map(&Map.delete(&1, :sub_hashes))
   end
+
+  defp fragments_for_source(source, path, min_mass, modes),
+    do: Tree.from_source(source) |> fragments_from_tree_result(min_mass, modes, path)
 
   defp fragments_from_tree_result({:ok, sigils}, min_mass, modes, path) do
     sigils
@@ -191,4 +183,6 @@ defmodule Number42.Refactors.Heex.Clones do
   end
 
   defp fragments_from_tree_result(:error, _min_mass, _modes, _path), do: []
+  defp offset_line(frag, 0), do: frag
+  defp offset_line(frag, offset), do: %{frag | line: frag.line + offset}
 end

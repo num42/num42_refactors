@@ -15,8 +15,8 @@ defmodule Number42.Refactors.Ex.ReduceAsMap do
       ↓
       Enum.map(items, fn item -> transform(item) end)
 
-  Mirrors `ExSlop.Check.Refactor.ReduceAsMap`. We only fire when the
-  rewrite is provably semantics-preserving:
+  Mirrors `ExSlop.Check.Refactor.ReduceAsMap`. We only fire on the
+  two shapes where the rewrite has a clear before/after argument:
 
   - **Append form (`acc ++ [expr]`)** — always equivalent to `Enum.map`.
     `++` produces a new list with the projection appended in order, so
@@ -64,10 +64,6 @@ defmodule Number42.Refactors.Ex.ReduceAsMap do
 
   @impl Number42.Refactors.Refactor
   def description, do: "Enum.reduce/3 building a list -> Enum.map/2"
-
-  @impl Number42.Refactors.Refactor
-  def priority, do: 150
-
   @impl Number42.Refactors.Refactor
   def explanation do
     """
@@ -80,6 +76,8 @@ defmodule Number42.Refactors.Ex.ReduceAsMap do
     """
   end
 
+  @impl Number42.Refactors.Refactor
+  def priority, do: 150
   @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
   @impl Number42.Refactors.Refactor
@@ -94,6 +92,8 @@ defmodule Number42.Refactors.Ex.ReduceAsMap do
     do: append_projection(single, acc_name)
 
   defp append_projection(_, _), do: :skip
+  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
+  defp apply_patches({:error, _}, source), do: source
 
   defp build_patches(ast),
     do:
@@ -169,6 +169,8 @@ defmodule Number42.Refactors.Ex.ReduceAsMap do
   end
 
   defp maybe_patch(_), do: []
+  defp patch_or_passthrough([], source), do: source
+  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
 
   defp pattern_introduces_referenced_name?(pat, projection),
     do:
@@ -202,16 +204,7 @@ defmodule Number42.Refactors.Ex.ReduceAsMap do
     do: "Enum.map(#{coll_text}, #{lambda_text(arg_pat, projection)})"
 
   defp render_pipe(arg_pat, projection), do: "Enum.map(#{lambda_text(arg_pat, projection)})"
-
   defp singleton_list({:__block__, _, [[expr]]}), do: {:ok, expr}
   defp singleton_list([expr]), do: {:ok, expr}
   defp singleton_list(_), do: :skip
-
-  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
-
-  defp apply_patches({:error, _}, source), do: source
-
-  defp patch_or_passthrough([], source), do: source
-
-  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
 end

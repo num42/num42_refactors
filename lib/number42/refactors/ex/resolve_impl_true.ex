@@ -61,7 +61,6 @@ defmodule Number42.Refactors.Ex.ResolveImplTrue do
 
   @impl Number42.Refactors.Refactor
   def description, do: "@impl true -> @impl <Behaviour> via BEAM lookup"
-
   @impl Number42.Refactors.Refactor
   def explanation do
     """
@@ -78,9 +77,10 @@ defmodule Number42.Refactors.Ex.ResolveImplTrue do
 
   @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
-
   @impl Number42.Refactors.Refactor
   def transform(source, _opts), do: Sourceror.parse_string(source) |> apply_patches(source)
+  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
+  defp apply_patches({:error, _}, source), do: source
 
   defp build_patches(ast),
     do:
@@ -88,29 +88,6 @@ defmodule Number42.Refactors.Ex.ResolveImplTrue do
       |> collect_modules()
       |> Enum.flat_map(&patches_for_module/1)
 
-  # Walk the AST, return a list of `{module_atom, body_exprs}` for every
-  # `defmodule` we can resolve. Nested modules are returned separately
-  # so each gets its own callback table.
-  defp collect_modules(ast) do
-    ast
-    |> Macro.prewalker()
-    |> Enum.flat_map(fn
-      {:defmodule, _, [name_ast, [{_do, body}]]} ->
-        case alias_to_module(name_ast) do
-          {:ok, mod} -> [{mod, body_to_exprs(body)}]
-          :error -> []
-        end
-
-      _ ->
-        []
-    end)
-  end
-
-  defp patches_for_module({mod, exprs}),
-    do: callback_table(mod) |> patches_for_callbacks_or_skip(exprs)
-
-  # Build `{name, arity} -> behaviour` lookup. Skips entries claimed by
-  # ≥2 behaviours: those would be guesses.
   defp callback_table(mod) do
     if Code.ensure_loaded?(mod) do
       behaviours =
@@ -150,33 +127,27 @@ defmodule Number42.Refactors.Ex.ResolveImplTrue do
     _ -> []
   end
 
-  # Walk body expressions in order, pair each `@impl true` with the
-  # immediately-following def-like clause. Returns a list of
-  # `{impl_node, def_node}` tuples for the patch decision step.
-  defp pair_impls_with_defs(exprs), do: pair_impls_with_defs(exprs, [])
+  defp collect_modules(ast) do
+    ast
+    |> Macro.prewalker()
+    |> Enum.flat_map(fn
+      {:defmodule, _, [name_ast, [{_do, body}]]} ->
+        case alias_to_module(name_ast) do
+          {:ok, mod} -> [{mod, body_to_exprs(body)}]
+          :error -> []
+        end
 
-  defp pair_impls_with_defs([], acc), do: acc |> Enum.reverse()
-
-  defp pair_impls_with_defs([impl_node, next | rest], acc) do
-    if impl_true?(impl_node) and def_clause?(next) do
-      pair_impls_with_defs([next | rest], [{impl_node, next} | acc])
-    else
-      pair_impls_with_defs([next | rest], acc)
-    end
+      _ ->
+        []
+    end)
   end
 
-  defp pair_impls_with_defs([_], acc), do: acc |> Enum.reverse()
-
-  # Sourceror wraps literal arguments in `{:__block__, meta, [literal]}`.
-  # `Code.string_to_quoted` does not. Accept both shapes so the refactor
-  # works against either parser.
+  defp def_clause?({kind, _, [_head | _]}) when def_or_macro_kind?(kind), do: true
+  defp def_clause?(_), do: false
+  defp def_name_arity({_kind, _, [head | _]}), do: strip_when(head) |> name_arity_or_error()
   defp impl_true?({:@, _, [{:impl, _, [{:__block__, _, [true]}]}]}), do: true
   defp impl_true?({:@, _, [{:impl, _, [true]}]}), do: true
   defp impl_true?(_), do: false
-
-  defp def_clause?({kind, _, [_head | _]}) when def_or_macro_kind?(kind), do: true
-
-  defp def_clause?(_), do: false
 
   defp maybe_patch({impl_node, def_node}, table) do
     with {:ok, {name, arity}} <- def_name_arity(def_node),
@@ -192,22 +163,6 @@ defmodule Number42.Refactors.Ex.ResolveImplTrue do
     end
   end
 
-  # `def head` is either `{:when, _, [actual_head, _guards]}` or the
-  # head directly. Strip a `when` wrapper, then extract `{name, arity}`.
-  defp def_name_arity({_kind, _, [head | _]}), do: strip_when(head) |> name_arity_or_error()
-
-  defp strip_when({:when, _, [inner | _]}), do: inner
-  defp strip_when(other), do: other
-
-  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
-
-  defp apply_patches({:error, _}, source), do: source
-
-  defp patches_for_callbacks_or_skip(:skip, _exprs), do: []
-
-  defp patches_for_callbacks_or_skip(table, exprs),
-    do: exprs |> pair_impls_with_defs() |> Enum.flat_map(&maybe_patch(&1, table))
-
   defp name_arity_or_error({name, _, args}) when is_atom(name) and is_list(args) do
     {:ok, {name, length(args)}}
   end
@@ -217,8 +172,28 @@ defmodule Number42.Refactors.Ex.ResolveImplTrue do
   end
 
   defp name_arity_or_error(_), do: :error
+  defp pair_impls_with_defs(exprs), do: pair_impls_with_defs(exprs, [])
+  defp pair_impls_with_defs([], acc), do: acc |> Enum.reverse()
 
+  defp pair_impls_with_defs([impl_node, next | rest], acc) do
+    if impl_true?(impl_node) and def_clause?(next) do
+      pair_impls_with_defs([next | rest], [{impl_node, next} | acc])
+    else
+      pair_impls_with_defs([next | rest], acc)
+    end
+  end
+
+  defp pair_impls_with_defs([_], acc), do: acc |> Enum.reverse()
   defp patch_or_passthrough([], source), do: source
-
   defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
+  defp patches_for_callbacks_or_skip(:skip, _exprs), do: []
+
+  defp patches_for_callbacks_or_skip(table, exprs),
+    do: exprs |> pair_impls_with_defs() |> Enum.flat_map(&maybe_patch(&1, table))
+
+  defp patches_for_module({mod, exprs}),
+    do: callback_table(mod) |> patches_for_callbacks_or_skip(exprs)
+
+  defp strip_when({:when, _, [inner | _]}), do: inner
+  defp strip_when(other), do: other
 end

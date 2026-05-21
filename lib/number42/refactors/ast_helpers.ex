@@ -113,25 +113,6 @@ defmodule Number42.Refactors.AstHelpers do
                 ]
 
   @doc """
-  Pull the function/macro name out of a call expression. Looks at the
-  *outermost* call — for a pipe, that's the last stage; for a remote
-  call, that's the function part of the dot:
-
-      build_changeset(x)              → {:ok, :build_changeset}
-      x |> build_changeset()          → {:ok, :build_changeset}
-      Foo.bar(x)                      → {:ok, :bar}
-      x |> Foo.bar()                  → {:ok, :bar}
-
-  Returns `:error` for anything that isn't a call (variables, literals,
-  blocks).
-  """
-  @spec extract_call_name(term()) :: {:ok, atom()} | :error
-  def extract_call_name({:|>, _, [_lhs, rhs]}), do: extract_call_name(rhs)
-  def extract_call_name({{:., _, [_callee, name]}, _, _}) when is_atom(name), do: {:ok, name}
-  def extract_call_name({name, _, args}) when is_atom(name) and is_list(args), do: {:ok, name}
-  def extract_call_name(_), do: :error
-
-  @doc """
   Extract a bare variable name from an AST node.
 
   Returns `{:ok, name}` for `{name, _, ctx}` where both `name` and
@@ -157,15 +138,23 @@ defmodule Number42.Refactors.AstHelpers do
   def body_to_exprs(single), do: [single]
 
   @doc """
-  Unwrap the body of a `defmodule` AST node into a flat list of
-  expressions. Returns `nil` for any other shape.
+  Pull the function/macro name out of a call expression. Looks at the
+  *outermost* call — for a pipe, that's the last stage; for a remote
+  call, that's the function part of the dot:
 
-  Equivalent to `body_to_exprs/1` applied to the body argument of a
-  `defmodule` node — exists as its own function so callers don't have
-  to re-pattern-match the `defmodule` wrapper.
+      build_changeset(x)              → {:ok, :build_changeset}
+      x |> build_changeset()          → {:ok, :build_changeset}
+      Foo.bar(x)                      → {:ok, :bar}
+      x |> Foo.bar()                  → {:ok, :bar}
+
+  Returns `:error` for anything that isn't a call (variables, literals,
+  blocks).
   """
-  def module_body_exprs({:defmodule, _, [_name, [{_do, body}]]}), do: body_to_exprs(body)
-  def module_body_exprs(_), do: nil
+  @spec extract_call_name(term()) :: {:ok, atom()} | :error
+  def extract_call_name({:|>, _, [_lhs, rhs]}), do: extract_call_name(rhs)
+  def extract_call_name({{:., _, [_callee, name]}, _, _}) when is_atom(name), do: {:ok, name}
+  def extract_call_name({name, _, args}) when is_atom(name) and is_list(args), do: {:ok, name}
+  def extract_call_name(_), do: :error
 
   @doc """
   Derive a snake_case name from a module — the last segment, lowercased.
@@ -193,9 +182,177 @@ defmodule Number42.Refactors.AstHelpers do
 
   def humanize_module(_), do: nil
 
+  @doc """
+  Unwrap the body of a `defmodule` AST node into a flat list of
+  expressions. Returns `nil` for any other shape.
+
+  Equivalent to `body_to_exprs/1` applied to the body argument of a
+  `defmodule` node — exists as its own function so callers don't have
+  to re-pattern-match the `defmodule` wrapper.
+  """
+  def module_body_exprs({:defmodule, _, [_name, [{_do, body}]]}), do: body_to_exprs(body)
+  def module_body_exprs(_), do: nil
+
   # Elixir reserved words that cannot be used as parameter names.
   @reserved_words ~w(true false nil when and or not in fn do end after else
                      catch rescue case cond if unless quote unquote receive try with for)
+
+  @doc """
+  Collect every bare variable name introduced as a binding by the
+  given AST: LHS of `=` assignments, lambda parameters, comprehension
+  generators, and `case`/`with`/`fn` clause patterns. Underscored and
+  reserved names (`__MODULE__`, `__CALLER__`, `__ENV__`) are skipped.
+
+  Conservative: a name appearing in *any* binding shape inside `ast`
+  is reported, even if the binding is on a branch that wouldn't
+  execute. That's safe — over-reporting only suppresses helper
+  parameters that turn out to be unneeded, never the other way
+  around.
+  """
+  @spec bound_in(term()) :: MapSet.t()
+  def bound_in(ast) do
+    ast
+    |> Macro.prewalker()
+    |> Enum.flat_map(fn
+      {:=, _, [lhs, _rhs]} ->
+        pattern_var_names(lhs)
+
+      {:fn, _, clauses} ->
+        clauses
+        |> Enum.flat_map(fn
+          {:->, _, [args, _body]} -> args |> Enum.flat_map(&pattern_var_names/1)
+          _ -> []
+        end)
+
+      {:<-, _, [lhs, _rhs]} ->
+        pattern_var_names(lhs)
+
+      _ ->
+        []
+    end)
+    |> MapSet.new()
+  end
+
+  @doc """
+  Shave one column off `end_pos` if `ast` ends in a `nil` / `true` /
+  `false` literal that has no closing-bracket metadata. Sourceror
+  over-shoots the range of these tokens by exactly one column (it
+  measures via `:nil` / `:true` / `:false` atom names), and a raw
+  slice using that range leaks the next character — typically a `,`
+  or `}` — into the result.
+
+  Pass-through for any other shape, so this is safe to apply
+  unconditionally before slicing or patching.
+  """
+  @spec clip_end_for_boolish_tail(term(), keyword()) :: keyword()
+  def clip_end_for_boolish_tail(ast, end_pos) do
+    if has_closing_meta?(ast) do
+      end_pos
+    else
+      if rightmost_is_boolish?(ast) do
+        [line: l, column: c] = end_pos
+        [line: l, column: c - 1]
+      else
+        end_pos
+      end
+    end
+  end
+
+  @doc """
+  Whether `ast` is the empty list literal — either bare `[]` or the
+  Sourceror-parsed `{:__block__, _, [[]]}` form. Both shapes mean the
+  same thing semantically; consumers should treat them equally.
+  """
+  def empty_list?([]), do: true
+  def empty_list?({:__block__, _, [[]]}), do: true
+  def empty_list?(_), do: false
+
+  @doc """
+  Read the line number where this expression *ends* — Sourceror records
+  this in `meta[:end_of_expression][:line]` when available, otherwise
+  falls back to `meta[:line]`, otherwise `1`.
+
+  Used for inserting new lines immediately after an existing node.
+  """
+  def end_of_expression_line({_, meta, _}) when is_list(meta) do
+    Keyword.get(meta, :end_of_expression) |> end_of_expression_line_get(meta)
+  end
+
+  def end_of_expression_line(_), do: 1
+
+  @doc """
+  Pull `{name, params}` from a `def`/`defp`/`defmacro` head.
+
+      def foo(a, b)         → {:foo, [a_ast, b_ast]}
+      def foo(a) when ...   → {:foo, [a_ast]}      (when-guard stripped)
+      def foo                → {:foo, []}           (no args)
+
+  Returns `:error` for any shape that isn't a recognisable function head.
+  """
+  @spec extract_fn_signature(term()) :: {atom(), [term()]} | :error
+  def extract_fn_signature({:when, _, [inner | _]}), do: extract_fn_signature(inner)
+
+  def extract_fn_signature({name, _, args}) when is_atom(name) and is_list(args),
+    do: {name, args}
+
+  def extract_fn_signature({name, _, nil}) when is_atom(name), do: {name, []}
+  def extract_fn_signature(_), do: :error
+
+  @doc """
+  Compute the free variables of `ast` relative to a set of `available`
+  outer-scope names.
+
+  A name is free if it is referenced inside `ast` but not bound there
+  (no LHS-of-`=`, lambda arg, generator, etc.) AND it appears in
+  `available`. The `available` filter prevents module names, imported
+  functions, and other non-variable identifiers from being counted —
+  the caller passes in the names they know to be in scope at the
+  extraction site (function parameters + previously-bound vars).
+
+  Returned as a sorted atom list for deterministic helper signatures.
+  """
+  @spec free_vars(term(), MapSet.t()) :: [atom()]
+  def free_vars(ast, available) do
+    used = used_var_names(ast)
+    bound = bound_in(ast)
+
+    used
+    |> MapSet.difference(bound)
+    |> MapSet.intersection(available)
+    |> MapSet.to_list()
+    |> Enum.sort()
+  end
+
+  @doc """
+  Recursively rewrite every `lhs |> rhs` pipe in `ast` into the
+  equivalent direct call (`rhs(lhs, …)` with `lhs` injected as first
+  argument). Identical to applying `Macro.pipe/3` step-by-step, except
+  it walks the whole tree so nested/non-toplevel pipes are also
+  inlined.
+
+  Used by clone-detection passes that must compare two ASTs purely on
+  call-shape: pipes are sugar, and treating `a |> f(b)` as different
+  from `f(a, b)` would split semantically identical clones into
+  different buckets and produce broken helpers when only one side of a
+  divergent pipe-RHS gets parametrised.
+
+      iex> #{__MODULE__}.inline_pipes(quote do: a |> b(1))
+      quote(do: b(a, 1))
+  """
+  @spec inline_pipes(term()) :: term()
+  def inline_pipes(ast) do
+    Macro.prewalk(ast, fn
+      {:|>, _meta, [lhs, rhs]} -> inline_pipe(lhs, rhs)
+      other -> other
+    end)
+  end
+
+  @doc """
+  Read the source line from a node's metadata. Falls back to `1` for
+  shapes without a usable `:line` key.
+  """
+  def line_of({_, meta, _}) when is_list(meta), do: Keyword.get(meta, :line, 1)
+  def line_of(_), do: 1
 
   @doc """
   Derive a candidate identifier (string) from a hole-value AST. Used by
@@ -257,86 +414,67 @@ defmodule Number42.Refactors.AstHelpers do
 
   def name_from_value(_), do: nil
 
-  defp sanitize_identifier(str) when is_binary(str) do
-    # Kebab-case atoms (`:"oz-fragment"`) translate cleanly to a
-    # snake-case identifier — replace dashes with underscores. Any
-    # other non-identifier char makes the string unusable.
-    candidate = String.replace(str, "-", "_")
-
-    cond do
-      candidate == "" -> nil
-      candidate in @reserved_words -> candidate <> "_"
-      not Regex.match?(~r/\A[a-z_][a-zA-Z0-9_]*\z/, candidate) -> nil
-      true -> candidate
-    end
-  end
-
   @doc """
-  Recursively rewrite every `lhs |> rhs` pipe in `ast` into the
-  equivalent direct call (`rhs(lhs, …)` with `lhs` injected as first
-  argument). Identical to applying `Macro.pipe/3` step-by-step, except
-  it walks the whole tree so nested/non-toplevel pipes are also
-  inlined.
+  Variable names introduced by a pattern (LHS of `=`, lambda arg,
+  case/with clause head). Walks the pattern and collects every
+  `{name, _, ctx}` where both atoms, skipping underscored names and
+  the `__MODULE__`/`__CALLER__`/`__ENV__` reserved trio.
 
-  Used by clone-detection passes that must compare two ASTs purely on
-  call-shape: pipes are sugar, and treating `a |> f(b)` as different
-  from `f(a, b)` would split semantically identical clones into
-  different buckets and produce broken helpers when only one side of a
-  divergent pipe-RHS gets parametrised.
-
-      iex> #{__MODULE__}.inline_pipes(quote do: a |> b(1))
-      quote(do: b(a, 1))
+  Name capture in patterns: `{a, b}`, `%{key: c}`, `[d | rest]` all
+  introduce their bare-var children.
   """
-  @spec inline_pipes(term()) :: term()
-  def inline_pipes(ast) do
-    Macro.prewalk(ast, fn
-      {:|>, _meta, [lhs, rhs]} -> inline_pipe(lhs, rhs)
-      other -> other
+  @spec pattern_var_names(term()) :: [atom()]
+  def pattern_var_names(pattern) do
+    pattern
+    |> Macro.prewalker()
+    |> Enum.flat_map(fn
+      {name, _, ctx} when is_atom(name) and is_atom(ctx) ->
+        string = Atom.to_string(name)
+
+        if String.starts_with?(string, "_") or name in [:__MODULE__, :__CALLER__, :__ENV__] do
+          []
+        else
+          [name]
+        end
+
+      _ ->
+        []
     end)
   end
 
-  defp inline_pipe(lhs, {fun, meta, args}) when is_atom(fun) and is_list(args) do
-    {fun, meta, [lhs | args]}
-  end
-
-  defp inline_pipe(lhs, {{:., _, _} = dot, meta, args}) when is_list(args) do
-    {dot, meta, [lhs | args]}
-  end
-
-  defp inline_pipe(lhs, {fun, meta, ctx}) when is_atom(fun) and is_atom(ctx) do
-    {fun, meta, [lhs]}
-  end
-
-  defp inline_pipe(lhs, rhs), do: {:|>, [], [lhs, rhs]}
-
   @doc """
-  Whether `ast` is the empty list literal — either bare `[]` or the
-  Sourceror-parsed `{:__block__, _, [[]]}` form. Both shapes mean the
-  same thing semantically; consumers should treat them equally.
-  """
-  def empty_list?([]), do: true
-  def empty_list?({:__block__, _, [[]]}), do: true
-  def empty_list?(_), do: false
+  Decide whether a binding/param/function name is "short" — a candidate
+  for the ExpandShortForm refactors.
 
-  @doc """
-  Read the line number where this expression *ends* — Sourceror records
-  this in `meta[:end_of_expression][:line]` when available, otherwise
-  falls back to `meta[:line]`, otherwise `1`.
+  A name is short when **at least one** of its `_`-split subtokens is
+  short (≤ 3 chars) and not whitelisted. This catches `cs`, `cs_id`,
+  `user_cs_form` (mid-token short) just as well as bare single-segment
+  shorts.
 
-  Used for inserting new lines immediately after an existing node.
+  Short-circuits:
+
+  - `_`-prefixed names (intentional ignores) → never short
+  - exact-name in `ctx.whitelist` → never short
+  - exact-name key in `ctx.known` → always short
+
+  `ctx` is a map with `:whitelist` (`MapSet.t()` of `atom`) and `:known`
+  (a `%{String.t() => String.t()}` mapping). Extra keys are ignored.
   """
-  def end_of_expression_line({_, meta, _}) when is_list(meta) do
-    Keyword.get(meta, :end_of_expression) |> end_of_expression_line_get(meta)
+  @spec short_name?(atom(), %{
+          required(:whitelist) => MapSet.t(),
+          required(:known) => map(),
+          optional(any()) => any()
+        }) :: boolean()
+  def short_name?(name, ctx) when is_atom(name) do
+    string = Atom.to_string(name)
+
+    cond do
+      MapSet.member?(ctx.whitelist, name) -> false
+      Map.has_key?(ctx.known, string) -> true
+      String.starts_with?(string, "_") -> false
+      true -> any_short_subtoken?(string, ctx.whitelist)
+    end
   end
-
-  def end_of_expression_line(_), do: 1
-
-  @doc """
-  Read the source line from a node's metadata. Falls back to `1` for
-  shapes without a usable `:line` key.
-  """
-  def line_of({_, meta, _}) when is_list(meta), do: Keyword.get(meta, :line, 1)
-  def line_of(_), do: 1
 
   @doc """
   Render an AST node back to source text, preferring direct rendering
@@ -408,127 +546,6 @@ defmodule Number42.Refactors.AstHelpers do
   end
 
   @doc """
-  Collect every bare variable name introduced as a binding by the
-  given AST: LHS of `=` assignments, lambda parameters, comprehension
-  generators, and `case`/`with`/`fn` clause patterns. Underscored and
-  reserved names (`__MODULE__`, `__CALLER__`, `__ENV__`) are skipped.
-
-  Conservative: a name appearing in *any* binding shape inside `ast`
-  is reported, even if the binding is on a branch that wouldn't
-  execute. That's safe — over-reporting only suppresses helper
-  parameters that turn out to be unneeded, never the other way
-  around.
-  """
-  @spec bound_in(term()) :: MapSet.t()
-  def bound_in(ast) do
-    ast
-    |> Macro.prewalker()
-    |> Enum.flat_map(fn
-      {:=, _, [lhs, _rhs]} ->
-        pattern_var_names(lhs)
-
-      {:fn, _, clauses} ->
-        clauses
-        |> Enum.flat_map(fn
-          {:->, _, [args, _body]} -> args |> Enum.flat_map(&pattern_var_names/1)
-          _ -> []
-        end)
-
-      {:<-, _, [lhs, _rhs]} ->
-        pattern_var_names(lhs)
-
-      _ ->
-        []
-    end)
-    |> MapSet.new()
-  end
-
-  @doc """
-  Compute the free variables of `ast` relative to a set of `available`
-  outer-scope names.
-
-  A name is free if it is referenced inside `ast` but not bound there
-  (no LHS-of-`=`, lambda arg, generator, etc.) AND it appears in
-  `available`. The `available` filter prevents module names, imported
-  functions, and other non-variable identifiers from being counted —
-  the caller passes in the names they know to be in scope at the
-  extraction site (function parameters + previously-bound vars).
-
-  Returned as a sorted atom list for deterministic helper signatures.
-  """
-  @spec free_vars(term(), MapSet.t()) :: [atom()]
-  def free_vars(ast, available) do
-    used = used_var_names(ast)
-    bound = bound_in(ast)
-
-    used
-    |> MapSet.difference(bound)
-    |> MapSet.intersection(available)
-    |> MapSet.to_list()
-    |> Enum.sort()
-  end
-
-  @doc """
-  Variable names introduced by a pattern (LHS of `=`, lambda arg,
-  case/with clause head). Walks the pattern and collects every
-  `{name, _, ctx}` where both atoms, skipping underscored names and
-  the `__MODULE__`/`__CALLER__`/`__ENV__` reserved trio.
-
-  Name capture in patterns: `{a, b}`, `%{key: c}`, `[d | rest]` all
-  introduce their bare-var children.
-  """
-  @spec pattern_var_names(term()) :: [atom()]
-  def pattern_var_names(pattern) do
-    pattern
-    |> Macro.prewalker()
-    |> Enum.flat_map(fn
-      {name, _, ctx} when is_atom(name) and is_atom(ctx) ->
-        string = Atom.to_string(name)
-
-        if String.starts_with?(string, "_") or name in [:__MODULE__, :__CALLER__, :__ENV__] do
-          []
-        else
-          [name]
-        end
-
-      _ ->
-        []
-    end)
-  end
-
-  @doc """
-  Every bare variable name *referenced* (not bound) anywhere in `ast`.
-
-  This is a syntactic over-approximation — a name `foo` that's actually
-  a zero-arg local function call parses as `{:foo, _, ctx}` where `ctx`
-  is an atom and is indistinguishable from a variable reference at the
-  AST level. Callers filter this set against a known scope (e.g. via
-  `free_vars/2`) to drop those false positives.
-
-  Underscored and reserved names (`__MODULE__`/etc.) are excluded —
-  they're never things you'd thread through a helper signature.
-  """
-  @spec used_var_names(term()) :: MapSet.t()
-  def used_var_names(ast) do
-    ast
-    |> Macro.prewalker()
-    |> Enum.flat_map(fn
-      {name, _, ctx} when is_atom(name) and is_atom(ctx) ->
-        string = Atom.to_string(name)
-
-        if String.starts_with?(string, "_") or name in [:__MODULE__, :__CALLER__, :__ENV__] do
-          []
-        else
-          [name]
-        end
-
-      _ ->
-        []
-    end)
-    |> MapSet.new()
-  end
-
-  @doc """
   Whether the AST node is a special form that uses `do/end` blocks
   rather than `(...)` argument lists.
 
@@ -575,6 +592,38 @@ defmodule Number42.Refactors.AstHelpers do
   def unwrap_block(other), do: other
 
   @doc """
+  Every bare variable name *referenced* (not bound) anywhere in `ast`.
+
+  This is a syntactic over-approximation — a name `foo` that's actually
+  a zero-arg local function call parses as `{:foo, _, ctx}` where `ctx`
+  is an atom and is indistinguishable from a variable reference at the
+  AST level. Callers filter this set against a known scope (e.g. via
+  `free_vars/2`) to drop those false positives.
+
+  Underscored and reserved names (`__MODULE__`/etc.) are excluded —
+  they're never things you'd thread through a helper signature.
+  """
+  @spec used_var_names(term()) :: MapSet.t()
+  def used_var_names(ast) do
+    ast
+    |> Macro.prewalker()
+    |> Enum.flat_map(fn
+      {name, _, ctx} when is_atom(name) and is_atom(ctx) ->
+        string = Atom.to_string(name)
+
+        if String.starts_with?(string, "_") or name in [:__MODULE__, :__CALLER__, :__ENV__] do
+          []
+        else
+          [name]
+        end
+
+      _ ->
+        []
+    end)
+    |> MapSet.new()
+  end
+
+  @doc """
   Whether `node` is a reference to the variable named `var`.
 
   `{name, _, ctx}` where both atoms and `name == var`.
@@ -582,36 +631,74 @@ defmodule Number42.Refactors.AstHelpers do
   def var_ref?({name, _, ctx}, var) when is_atom(name) and is_atom(ctx), do: name == var
   def var_ref?(_, _), do: false
 
-  @doc """
-  Shave one column off `end_pos` if `ast` ends in a `nil` / `true` /
-  `false` literal that has no closing-bracket metadata. Sourceror
-  over-shoots the range of these tokens by exactly one column (it
-  measures via `:nil` / `:true` / `:false` atom names), and a raw
-  slice using that range leaks the next character — typically a `,`
-  or `}` — into the result.
+  defp any_short_subtoken?(string, whitelist) do
+    string
+    |> String.split("_", trim: true)
+    |> Enum.any?(fn part ->
+      cryptic_subtoken?(part) and not whitelisted_subtoken?(part, whitelist)
+    end)
+  end
 
-  Pass-through for any other shape, so this is safe to apply
-  unconditionally before slicing or patching.
-  """
-  @spec clip_end_for_boolish_tail(term(), keyword()) :: keyword()
-  def clip_end_for_boolish_tail(ast, end_pos) do
-    if has_closing_meta?(ast) do
-      end_pos
-    else
-      if rightmost_is_boolish?(ast) do
-        [line: l, column: c] = end_pos
-        [line: l, column: c - 1]
-      else
-        end_pos
-      end
+  defp consonant_heavy?(part) do
+    slots = part |> strip_plural_s() |> String.downcase() |> phoneme_slots()
+    vowel_count = slots |> Enum.count(&vowel_slot?/1)
+
+    cond do
+      consonant_run_at_least?(slots, 3) -> true
+      length(slots) == 4 and vowel_count <= 1 -> true
+      true -> false
     end
   end
+
+  defp cryptic_subtoken?(part) do
+    length = String.length(part)
+
+    cond do
+      length <= 3 -> true
+      true -> consonant_heavy?(part)
+    end
+  end
+
+  defp end_of_expression_line_get(nil, meta), do: meta |> Keyword.get(:line, 1)
+
+  defp end_of_expression_line_get(eoe, meta),
+    do: eoe |> Keyword.get(:line, Keyword.get(meta, :line, 1))
 
   defp has_closing_meta?({_, meta, _}) when is_list(meta) do
     Keyword.has_key?(meta, :closing)
   end
 
   defp has_closing_meta?(_), do: false
+
+  defp inline_pipe(lhs, {fun, meta, args}) when is_atom(fun) and is_list(args) do
+    {fun, meta, [lhs | args]}
+  end
+
+  defp inline_pipe(lhs, {{:., _, _} = dot, meta, args}) when is_list(args) do
+    {dot, meta, [lhs | args]}
+  end
+
+  defp inline_pipe(lhs, {fun, meta, ctx}) when is_atom(fun) and is_atom(ctx) do
+    {fun, meta, [lhs]}
+  end
+
+  defp inline_pipe(lhs, rhs), do: {:|>, [], [lhs, rhs]}
+
+  defp plural_singular_in_whitelist?(part, whitelist) do
+    cond do
+      String.ends_with?(part, "ies") and String.length(part) > 3 ->
+        singular = String.slice(part, 0..-4//1) <> "y"
+        MapSet.member?(whitelist, String.to_atom(singular))
+
+      String.ends_with?(part, "s") and String.length(part) > 1 ->
+        singular = String.slice(part, 0..-2//1)
+        MapSet.member?(whitelist, String.to_atom(singular))
+
+      true ->
+        false
+    end
+  end
+
   defp render_atom(nil), do: "nil"
   defp render_atom(true), do: "true"
   defp render_atom(false), do: "false"
@@ -637,272 +724,64 @@ defmodule Number42.Refactors.AstHelpers do
 
   defp rightmost_is_boolish?(_), do: false
 
-  defp end_of_expression_line_get(nil, meta), do: meta |> Keyword.get(:line, 1)
-
-  defp end_of_expression_line_get(eoe, meta),
-    do: eoe |> Keyword.get(:line, Keyword.get(meta, :line, 1))
-
-  # ---------------------------------------------------------------------
-  # Function-signature extraction
-  # ---------------------------------------------------------------------
-
-  @doc """
-  Pull `{name, params}` from a `def`/`defp`/`defmacro` head.
-
-      def foo(a, b)         → {:foo, [a_ast, b_ast]}
-      def foo(a) when ...   → {:foo, [a_ast]}      (when-guard stripped)
-      def foo                → {:foo, []}           (no args)
-
-  Returns `:error` for any shape that isn't a recognisable function head.
-  """
-  @spec extract_fn_signature(term()) :: {atom(), [term()]} | :error
-  def extract_fn_signature({:when, _, [inner | _]}), do: extract_fn_signature(inner)
-
-  def extract_fn_signature({name, _, args}) when is_atom(name) and is_list(args),
-    do: {name, args}
-
-  def extract_fn_signature({name, _, nil}) when is_atom(name), do: {name, []}
-  def extract_fn_signature(_), do: :error
-
-  # ---------------------------------------------------------------------
-  # Compound-name (snake_case) heuristics
-  # ---------------------------------------------------------------------
-
-  @doc """
-  Decide whether a binding/param/function name is "short" — a candidate
-  for the ExpandShortForm refactors.
-
-  A name is short when **at least one** of its `_`-split subtokens is
-  short (≤ 3 chars) and not whitelisted. This catches `cs`, `cs_id`,
-  `user_cs_form` (mid-token short) just as well as bare single-segment
-  shorts.
-
-  Short-circuits:
-
-  - `_`-prefixed names (intentional ignores) → never short
-  - exact-name in `ctx.whitelist` → never short
-  - exact-name key in `ctx.known` → always short
-
-  `ctx` is a map with `:whitelist` (`MapSet.t()` of `atom`) and `:known`
-  (a `%{String.t() => String.t()}` mapping). Extra keys are ignored.
-  """
-  @spec short_name?(atom(), %{
-          required(:whitelist) => MapSet.t(),
-          required(:known) => map(),
-          optional(any()) => any()
-        }) :: boolean()
-  def short_name?(name, ctx) when is_atom(name) do
-    string = Atom.to_string(name)
+  defp sanitize_identifier(str) when is_binary(str) do
+    # Kebab-case atoms (`:"oz-fragment"`) translate cleanly to a
+    # snake-case identifier — replace dashes with underscores. Any
+    # other non-identifier char makes the string unusable.
+    candidate = String.replace(str, "-", "_")
 
     cond do
-      MapSet.member?(ctx.whitelist, name) -> false
-      Map.has_key?(ctx.known, string) -> true
-      String.starts_with?(string, "_") -> false
-      true -> any_short_subtoken?(string, ctx.whitelist)
+      candidate == "" -> nil
+      candidate in @reserved_words -> candidate <> "_"
+      not Regex.match?(~r/\A[a-z_][a-zA-Z0-9_]*\z/, candidate) -> nil
+      true -> candidate
     end
   end
 
-  defp any_short_subtoken?(string, whitelist) do
-    string
-    |> String.split("_", trim: true)
-    |> Enum.any?(fn part ->
-      cryptic_subtoken?(part) and not whitelisted_subtoken?(part, whitelist)
-    end)
-  end
-
-  # A subtoken is whitelisted as itself, or as the singular of a regular
-  # `-s` plural. Lets `urls`, `ints`, `pids`, `args`, ... inherit the
-  # protection of their singular form (`url`, `int`, `pid`, `arg`) when
-  # the singular is in the whitelist. Same for the rare `-ies` plural
-  # (`entities` ← `entity`), though we don't go further than that.
   defp whitelisted_subtoken?(part, whitelist),
     do:
       MapSet.member?(whitelist, String.to_atom(part)) or
         plural_singular_in_whitelist?(part, whitelist)
 
-  defp plural_singular_in_whitelist?(part, whitelist) do
-    cond do
-      String.ends_with?(part, "ies") and String.length(part) > 3 ->
-        singular = String.slice(part, 0..-4//1) <> "y"
-        MapSet.member?(whitelist, String.to_atom(singular))
-
-      String.ends_with?(part, "s") and String.length(part) > 1 ->
-        singular = String.slice(part, 0..-2//1)
-        MapSet.member?(whitelist, String.to_atom(singular))
-
-      true ->
-        false
-    end
-  end
-
-  # A snake_case subtoken is "cryptic" when:
-  # - length ≤ 3 (`cs`, `ip`, `idx`, `rb`), OR
-  # - it has a run of ≥ 3 consonants in a row. Catches initial-stack
-  #   abbreviations like `rbip` (`rb` is 2-cons, plus the consonant-
-  #   heavy whole word) while leaving real English words like `path`,
-  #   `stat`, `node`, `name` alone.
-  #
-  # We deliberately do NOT treat 4-char `-s` plurals (`keys`, `paths`,
-  # `stats`, `urls`, `ints`, `pids`) as cryptic. They're conventional
-  # English plurals of perfectly readable 3-char singulars — renaming
-  # them to singular would lie about the value being a collection.
-  defp cryptic_subtoken?(part) do
-    length = String.length(part)
-
-    cond do
-      length <= 3 -> true
-      true -> consonant_heavy?(part)
-    end
-  end
-
-  # An initial-stack abbreviation either:
-  # - has a run of ≥ 3 consonant slots (`fbnk`, `chgst`), OR
-  # - resolves to 4 phoneme slots with only 1 vowel — `rbip`
-  #   (cons-cons-vowel-cons), `vftw`, `chgs`. Real 4-char English
-  #   words have 2 vowels (`path` after `th` collapse: 3 slots, fail;
-  #   `name`, `node`, `done`, `idea`) or the y-as-vowel pattern.
-  #
-  # Slot tokenization: English consonant **digraphs** (`th`, `st`,
-  # `ch`, `sh`, `ph`, `ng`, `nk`, `ck`) collapse to a single
-  # consonant slot — they're one phoneme, not two. So `path` →
-  # `p`, `a`, `th` (3 slots, 1 vowel → fails the 4-slots check);
-  # `stat` → `st`, `a`, `t` (3 slots); `back` → `b`, `a`, `ck`.
-  #
-  # Plural marker stripped before slotting: `urls`, `ints`, `pids`,
-  # `keys`, `paths` get their singular tested instead — conventional
-  # plurals of readable singulars are not cryptic.
-  defp consonant_heavy?(part) do
-    slots = part |> strip_plural_s() |> String.downcase() |> phoneme_slots()
-    vowel_count = slots |> Enum.count(&vowel_slot?/1)
-
-    cond do
-      consonant_run_at_least?(slots, 3) -> true
-      length(slots) == 4 and vowel_count <= 1 -> true
-      true -> false
-    end
-  end
-
   @consonant_digraphs ~w(th st ch sh ph ng nk ck)
 
   # Walk left to right collapsing recognized digraphs into single
   # slots; anything else stays as a one-grapheme slot.
-  defp phoneme_slots(""), do: []
-
-  defp phoneme_slots(stem),
-    do: String.split_at(stem, 2) |> slots_with_leading_digraph_or_char(stem)
-
-  defp vowel_slot?(slot), do: slot in ~w(a e i o u y)
-
-  defp consonant_run_at_least?(slots, n) do
-    slots
-    |> Enum.reduce_while(0, fn slot, run ->
-      cond do
-        vowel_slot?(slot) -> {:cont, 0}
-        run + 1 >= n -> {:halt, :found}
-        true -> {:cont, run + 1}
-      end
-    end)
-    |> Kernel.==(:found)
-  end
-
-  defp strip_plural_s(part) do
-    cond do
-      String.ends_with?(part, "ies") and String.length(part) > 3 ->
-        String.slice(part, 0..-4//1) <> "y"
-
-      String.ends_with?(part, "s") and String.length(part) > 1 ->
-        String.slice(part, 0..-2//1)
-
-      true ->
-        part
-    end
-  end
-
   @doc """
-  Naive English singularization on a single word.
+  Promote the head subtoken to a past-participle form when:
 
-  Three rules cover most practical cases:
+  1. The tail's last subtoken actually got singularized (it carried
+     a plural marker — so we have a "transformed plural → singular"
+     shape, not a `render_node`-style noun phrase).
+  2. The head's last subtoken is recognizably a **verb**, via either
+     - a verb-shaped suffix (`-ize`, `-ate`, `-ify`, `-en`), or
+     - explicit membership in `pp_verbs` (for verbs that don't carry
+       a tell-tale suffix: `parse`, `fetch`, `merge`, `build`, ...).
+  3. The head doesn't already look past-tense (no trailing `-ed`) —
+     otherwise we'd produce nonsense like `indexed → indexeded`.
 
-      ies → y               entries → entry
-      sses/xes/zes →        classes → class, boxes → box, fizzes → fizz
-      trailing s →          keys → key, items → item
+  Rationale: only verbal heads deserve PP promotion. `normalize_keys`
+  → `normalized_key` (verb suffix `-ize`); `mass_deps` stays as
+  `mass_deps` (`mass` is a noun, not a verb). `csv_attributes` stays
+  (`csv` is an acronym/noun). `indexed_args` stays (already `-ed`).
 
-  Words that don't follow these rules (children, feet, data, formulae)
-  pass through unchanged. Words ≤ 2 chars also pass through.
+  Returns `{:ok, "normalized"}` on success, `:skip` otherwise.
   """
-  @spec singularize(String.t()) :: String.t()
-  def singularize(word) do
-    base = drop_bang_or_question(word)
+  @spec maybe_past_participle([String.t()], [String.t()], String.t(), MapSet.t()) ::
+          {:ok, String.t()} | :skip
+  def maybe_past_participle(head, [tail_last], singularized, pp_verbs)
+      when tail_last != singularized and head != [] do
+    verb = List.last(head)
 
     cond do
-      String.length(base) <= 2 ->
-        base
-
-      String.ends_with?(base, "ies") ->
-        String.slice(base, 0..-4//1) <> "y"
-
-      String.ends_with?(base, "sses") or String.ends_with?(base, "xes") or
-          String.ends_with?(base, "zes") ->
-        String.slice(base, 0..-3//1)
-
-      String.ends_with?(base, "ss") ->
-        base
-
-      String.ends_with?(base, "s") ->
-        String.slice(base, 0..-2//1)
-
-      true ->
-        base
+      String.ends_with?(verb, "ed") -> :skip
+      verb_shaped?(verb) -> {:ok, past_participle(verb)}
+      MapSet.member?(pp_verbs, verb) -> maybe_past_participle_for_listed(verb)
+      true -> :skip
     end
   end
 
-  # `?` and `!` are valid trailing markers on Elixir function names
-  # (`predicate?`, `raises!`). When a function name flows into the
-  # plural/singular helpers via a subtoken split, the marker is
-  # noise — the output is used as a variable identifier where
-  # `!`/`?` are nonsensical. Strip the marker before the rules run
-  # so the output is a clean stem.
-  defp drop_bang_or_question(word), do: pop_bang_or_question(word) |> elem(0)
-
-  defp pop_bang_or_question(word) do
-    cond do
-      String.ends_with?(word, "!") -> {String.slice(word, 0..-2//1), "!"}
-      String.ends_with?(word, "?") -> {String.slice(word, 0..-2//1), "?"}
-      true -> {word, ""}
-    end
-  end
-
-  @doc """
-  Appends `suffix` to `name`, dealing with a trailing `?` or `!`
-  marker safely.
-
-  Two modes:
-
-    * `:keep` — keeps the marker, placing it AFTER the suffix.
-      Use when `name` is a function-name and the marker is
-      semantically meaningful (`references_var?` → `references_var_shared?`).
-    * `:drop` — discards the marker. Use when the output is a
-      variable identifier or another context where `?`/`!` are
-      nonsensical (`references_var?` → `references_var_shared`).
-
-      iex> AstHelpers.safe_append_suffix("references_var?", "_shared", :keep)
-      "references_var_shared?"
-
-      iex> AstHelpers.safe_append_suffix("fetch_user!", "_shared", :drop)
-      "fetch_user_shared"
-
-      iex> AstHelpers.safe_append_suffix("emit", "_shared", :keep)
-      "emit_shared"
-  """
-  @spec safe_append_suffix(String.t(), String.t(), :keep | :drop) :: String.t()
-  def safe_append_suffix(name, suffix, mode) when mode in [:keep, :drop] do
-    {base, marker} = pop_bang_or_question(name)
-
-    case mode do
-      :keep -> base <> suffix <> marker
-      :drop -> base <> suffix
-    end
-  end
+  def maybe_past_participle(_head, _tail, _singularized, _pp_verbs), do: :skip
 
   @doc """
   Inverse of `singularize/1`, applied to the LAST subtoken of a
@@ -953,79 +832,177 @@ defmodule Number42.Refactors.AstHelpers do
   end
 
   @doc """
-  Promote the head subtoken to a past-participle form when:
+  Appends `suffix` to `name`, dealing with a trailing `?` or `!`
+  marker safely.
 
-  1. The tail's last subtoken actually got singularized (it carried
-     a plural marker — so we have a "transformed plural → singular"
-     shape, not a `render_node`-style noun phrase).
-  2. The head's last subtoken is recognizably a **verb**, via either
-     - a verb-shaped suffix (`-ize`, `-ate`, `-ify`, `-en`), or
-     - explicit membership in `pp_verbs` (for verbs that don't carry
-       a tell-tale suffix: `parse`, `fetch`, `merge`, `build`, ...).
-  3. The head doesn't already look past-tense (no trailing `-ed`) —
-     otherwise we'd produce nonsense like `indexed → indexeded`.
+  Two modes:
 
-  Rationale: only verbal heads deserve PP promotion. `normalize_keys`
-  → `normalized_key` (verb suffix `-ize`); `mass_deps` stays as
-  `mass_deps` (`mass` is a noun, not a verb). `csv_attributes` stays
-  (`csv` is an acronym/noun). `indexed_args` stays (already `-ed`).
+    * `:keep` — keeps the marker, placing it AFTER the suffix.
+      Use when `name` is a function-name and the marker is
+      semantically meaningful (`references_var?` → `references_var_shared?`).
+    * `:drop` — discards the marker. Use when the output is a
+      variable identifier or another context where `?`/`!` are
+      nonsensical (`references_var?` → `references_var_shared`).
 
-  Returns `{:ok, "normalized"}` on success, `:skip` otherwise.
+      iex> AstHelpers.safe_append_suffix("references_var?", "_shared", :keep)
+      "references_var_shared?"
+
+      iex> AstHelpers.safe_append_suffix("fetch_user!", "_shared", :drop)
+      "fetch_user_shared"
+
+      iex> AstHelpers.safe_append_suffix("emit", "_shared", :keep)
+      "emit_shared"
   """
-  @spec maybe_past_participle([String.t()], [String.t()], String.t(), MapSet.t()) ::
-          {:ok, String.t()} | :skip
-  def maybe_past_participle(head, [tail_last], singularized, pp_verbs)
-      when tail_last != singularized and head != [] do
-    verb = List.last(head)
+  @spec safe_append_suffix(String.t(), String.t(), :keep | :drop) :: String.t()
+  def safe_append_suffix(name, suffix, mode) when mode in [:keep, :drop] do
+    {base, marker} = pop_bang_or_question(name)
 
-    cond do
-      String.ends_with?(verb, "ed") -> :skip
-      verb_shaped?(verb) -> {:ok, past_participle(verb)}
-      MapSet.member?(pp_verbs, verb) -> maybe_past_participle_for_listed(verb)
-      true -> :skip
+    case mode do
+      :keep -> base <> suffix <> marker
+      :drop -> base <> suffix
     end
   end
 
-  def maybe_past_participle(_head, _tail, _singularized, _pp_verbs), do: :skip
+  @doc """
+  Naive English singularization on a single word.
 
-  # Verbs explicitly listed in `pp_verbs` still need the `-e` guard for
-  # irregulars: `build → built` (not `builtd`), so non-`-e` listed verbs
-  # are suppressed. Listed `-e` verbs run through the regular rule.
+  Three rules cover most practical cases:
+
+      ies → y               entries → entry
+      sses/xes/zes →        classes → class, boxes → box, fizzes → fizz
+      trailing s →          keys → key, items → item
+
+  Words that don't follow these rules (children, feet, data, formulae)
+  pass through unchanged. Words ≤ 2 chars also pass through.
+  """
+  @spec singularize(String.t()) :: String.t()
+  def singularize(word) do
+    base = drop_bang_or_question(word)
+
+    cond do
+      String.length(base) <= 2 ->
+        base
+
+      String.ends_with?(base, "ies") ->
+        String.slice(base, 0..-4//1) <> "y"
+
+      String.ends_with?(base, "sses") or String.ends_with?(base, "xes") or
+          String.ends_with?(base, "zes") ->
+        String.slice(base, 0..-3//1)
+
+      String.ends_with?(base, "ss") ->
+        base
+
+      String.ends_with?(base, "s") ->
+        String.slice(base, 0..-2//1)
+
+      true ->
+        base
+    end
+  end
+
+  defp consonant_run_at_least?(slots, n) do
+    slots
+    |> Enum.reduce_while(0, fn slot, run ->
+      cond do
+        vowel_slot?(slot) -> {:cont, 0}
+        run + 1 >= n -> {:halt, :found}
+        true -> {:cont, run + 1}
+      end
+    end)
+    |> Kernel.==(:found)
+  end
+
+  defp drop_bang_or_question(word), do: pop_bang_or_question(word) |> elem(0)
+
   defp maybe_past_participle_for_listed(verb) do
     if String.ends_with?(verb, "e"), do: {:ok, past_participle(verb)}, else: :skip
   end
+
+  defp phoneme_slots(""), do: []
+
+  defp phoneme_slots(stem),
+    do: String.split_at(stem, 2) |> slots_with_leading_digraph_or_char(stem)
+
+  defp pop_bang_or_question(word) do
+    cond do
+      String.ends_with?(word, "!") -> {String.slice(word, 0..-2//1), "!"}
+      String.ends_with?(word, "?") -> {String.slice(word, 0..-2//1), "?"}
+      true -> {word, ""}
+    end
+  end
+
+  defp strip_plural_s(part) do
+    cond do
+      String.ends_with?(part, "ies") and String.length(part) > 3 ->
+        String.slice(part, 0..-4//1) <> "y"
+
+      String.ends_with?(part, "s") and String.length(part) > 1 ->
+        String.slice(part, 0..-2//1)
+
+      true ->
+        part
+    end
+  end
+
+  defp vowel_slot?(slot), do: slot in ~w(a e i o u y)
 
   # Suffix-based verb shape detector. Catches the regular verb-forming
   # suffixes in English. Deliberately conservative: we'd rather miss a
   # legitimate PP promotion than emit `csved_attribute` or `massed_dep`.
   @verb_suffixes ~w(ize ise ate ify en)
 
-  defp verb_shaped?(word), do: @verb_suffixes |> Enum.any?(&String.ends_with?(word, &1))
-
   @doc """
-  Regular-English past participle:
+  Collect every variable name that gets *bound* by a pattern inside
+  the given AST.
 
-      "normalize" → "normalized"   (-e → +d)
-      "parse"     → "parsed"
-      "apply"     → "applied"       (consonant + y → -y +ied)
-      "render"    → "rendered"      (default: +ed)
+  Returns a `MapSet` of atom names. A variable is "bound" if it
+  appears on the LHS of:
+
+    * `=` match operator (`x = ...`, `{a, b} = ...`)
+    * `case`/`cond`/`fn` clause heads (the LHS of `->`)
+    * `with`/`for` generator (the LHS of `<-`)
+    * struct/map/tuple/list patterns inside any of the above
+      (e.g. `%S{} = f` binds `f`; `{:ok, user}` binds `user`)
+
+  Bare-var **usages** (RHS positions, function-argument positions in
+  calls, etc.) are NOT counted.
+
+  Underscore-prefixed names (`_`, `_ignored`) are excluded —
+  consistent with `bare_var/1`.
+
+  This is the dual of `bare_var/1`: while `bare_var/1` answers
+  "is this node a usage of a bare variable", `collect_bound_vars/1`
+  answers "what variables does this AST introduce".
   """
-  @spec past_participle(String.t()) :: String.t()
-  def past_participle(verb) do
-    cond do
-      String.ends_with?(verb, "e") ->
-        verb <> "d"
+  @spec collect_bound_vars(term()) :: MapSet.t(atom())
+  def collect_bound_vars(ast) do
+    {_, vars} =
+      Macro.prewalk(ast, MapSet.new(), fn node, acc ->
+        case node do
+          # Match operator: LHS is a pattern, RHS is a value.
+          {:=, _, [lhs, _rhs]} ->
+            {node, collect_pattern_vars(lhs, acc)}
 
-      String.ends_with?(verb, "y") and consonant_before_trailing_y?(verb) ->
-        String.slice(verb, 0..-2//1) <> "ied"
+          # Generator (`<-`) in `with` / `for`: LHS is a pattern.
+          {:<-, _, [lhs, _rhs]} ->
+            {node, collect_pattern_vars(lhs, acc)}
 
-      true ->
-        verb <> "ed"
-    end
+          # Clause head (`->`): LHS list is a tuple of patterns
+          # (could be guarded via `when`).
+          {:->, _, [lhs_args, _body]} when is_list(lhs_args) ->
+            acc =
+              lhs_args |> Enum.reduce(acc, fn arg, a -> collect_pattern_vars(arg, a) end)
+
+            {node, acc}
+
+          _ ->
+            {node, acc}
+        end
+      end)
+
+    vars
   end
-
-  defp consonant_before_trailing_y?(verb),
-    do: String.slice(verb, -2..-2//1) |> consonant?()
 
   @doc """
   Latch-match a short string against a snake_case compound's subtokens.
@@ -1091,397 +1068,26 @@ defmodule Number42.Refactors.AstHelpers do
     end
   end
 
-  defp latch_try_at([first | rest], subtokens, idx) do
-    sub = subtokens |> Enum.at(idx)
+  @doc """
+  Regular-English past participle:
 
-    if sub != nil and String.first(sub) == first do
-      latch_consume_starts(rest, subtokens, idx + 1, sub, 1)
-    else
-      :error
-    end
-  end
-
-  defp latch_consume_starts([], _subtokens, _next_idx, _last_sub, starts), do: {:ok, starts}
-
-  defp latch_consume_starts([c | rest] = remaining, subtokens, next_idx, last_sub, starts) do
-    next_sub = subtokens |> Enum.at(next_idx)
-
+      "normalize" → "normalized"   (-e → +d)
+      "parse"     → "parsed"
+      "apply"     → "applied"       (consonant + y → -y +ied)
+      "render"    → "rendered"      (default: +ed)
+  """
+  @spec past_participle(String.t()) :: String.t()
+  def past_participle(verb) do
     cond do
-      next_sub != nil and String.first(next_sub) == c ->
-        latch_consume_starts(rest, subtokens, next_idx + 1, next_sub, starts + 1)
+      String.ends_with?(verb, "e") ->
+        verb <> "d"
+
+      String.ends_with?(verb, "y") and consonant_before_trailing_y?(verb) ->
+        String.slice(verb, 0..-2//1) <> "ied"
 
       true ->
-        last_sub_rest = String.slice(last_sub, 1..-1//1)
-        if subsequence?(remaining, last_sub_rest), do: {:ok, starts}, else: :error
+        verb <> "ed"
     end
-  end
-
-  defp subsequence?([], _haystack), do: true
-  defp subsequence?(_chars, ""), do: false
-
-  defp subsequence?([c | rest], haystack) do
-    case :binary.match(haystack, c) do
-      :nomatch -> false
-      {pos, _} -> subsequence?(rest, String.slice(haystack, (pos + 1)..-1//1))
-    end
-  end
-
-  defp patch_for_range_or_nil(%{end: end_pos, start: start_pos}, node, opts, replacement) do
-    end_pos =
-      if Keyword.get(opts, :boolish_tail?, false) do
-        clip_end_for_boolish_tail(node, end_pos)
-      else
-        end_pos
-      end
-
-    Patch.new(%{end: end_pos, start: start_pos}, replacement)
-  end
-
-  defp patch_for_range_or_nil(_, _node, _opts, _replacement), do: nil
-
-  defp slice_or_error(%{end: end_pos, start: start_pos}, ast, source) do
-    end_pos = clip_end_for_boolish_tail(ast, end_pos)
-    {:ok, slice_source(source, start_pos, end_pos)}
-  end
-
-  defp slice_or_error(_, _ast, _source), do: :error
-
-  # ---------------------------------------------------------------------
-  # Synthesised helper names + collision resolution
-  # ---------------------------------------------------------------------
-
-  @doc """
-  Build a synthesised helper name from up to four snake_case fragments.
-
-  Fragments in order: `prefix`, `host`, `scrutinee`, `suffix`. Each is
-  split on `_`, empty strings filtered out, then folded into a single
-  list with **overlap-merge** at every seam — if the tail of the
-  accumulator equals the head of the next fragment, the overlap is
-  taken only once. Overlap is checked longest-first.
-
-      [a, b, c] ⊕ [b, c, d]  →  [a, b, c, d]
-      [a]       ⊕ [a]        →  [a]
-      [a, b]    ⊕ [c, d]     →  [a, b, c, d]
-
-  ## Host-drop heuristic
-
-  If `scrutinee` splits into **2 or more subtokens**, `host` is treated
-  as redundant and dropped — the scrutinee already encodes the dispatch
-  identity. `prefix` and `suffix` still merge with the scrutinee.
-
-      synth_compound_name("handle", "host", "fetch_user_by_id", "")
-      → "handle_fetch_user_by_id"
-
-  Single-token scrutinees keep `host`:
-
-      synth_compound_name("handle", "host", "fetch", "")
-      → "handle_host_fetch"
-
-  Inputs may be strings, atoms, or `nil`/`""` (treated as empty).
-  Caller is responsible for stripping `?`/`!` suffixes that would
-  otherwise terminate identifiers mid-name.
-  """
-  @spec synth_compound_name(
-          String.t() | atom() | nil,
-          String.t() | atom() | nil,
-          String.t() | atom() | nil,
-          String.t() | atom() | nil
-        ) :: String.t()
-  def synth_compound_name(prefix, host, scrutinee, suffix) do
-    prefix_parts = to_subtokens(prefix)
-    host_parts = to_subtokens(host)
-    scrutinee_parts = to_subtokens(scrutinee)
-    suffix_parts = to_subtokens(suffix)
-
-    fragments =
-      if length(scrutinee_parts) >= 2 do
-        [prefix_parts, scrutinee_parts, suffix_parts]
-      else
-        [prefix_parts, host_parts, scrutinee_parts, suffix_parts]
-      end
-
-    fragments
-    |> Enum.reject(&(&1 == []))
-    |> Enum.reduce([], &overlap_merge(&2, &1))
-    |> Enum.join("_")
-  end
-
-  defp to_subtokens(nil), do: []
-  defp to_subtokens(atom) when is_atom(atom), do: to_subtokens(Atom.to_string(atom))
-
-  defp to_subtokens(str) when is_binary(str) do
-    String.split(str, "_", trim: true)
-  end
-
-  # Concatenate two subtoken lists, dropping the longest overlap where
-  # the tail of `acc` equals the head of `next`.
-  defp overlap_merge([], next), do: next
-  defp overlap_merge(acc, []), do: acc
-
-  defp overlap_merge(acc, next) do
-    max_overlap = min(length(acc), length(next))
-
-    overlap =
-      max_overlap..1//-1
-      |> Enum.find(0, fn n ->
-        Enum.take(acc, -n) == Enum.take(next, n)
-      end)
-
-    acc ++ Enum.drop(next, overlap)
-  end
-
-  @doc """
-  Resolve a synthesised name against an index of already-occupied names.
-
-  `existing_index` maps `String.t() => payload` — payload is whatever
-  the caller wants to inspect to decide structural equality (AST
-  clauses, full source text, a struct, anything).
-
-  ## Options
-
-    * `:same?` — `(payload -> boolean)`. Called with the occupant's
-      payload at each candidate slot. Returning `true` means the
-      occupant is already what the refactor would emit, so the
-      extraction is a no-op → result is `:skip`. Default: always
-      returns `false` (no slot is ever a match; pure name dedupe).
-
-    * `:on_collision` — `:suffix` (default) walks `_2`, `_3`, … until
-      a free slot or a `same?` match. `:skip` returns `:skip`
-      immediately on the first occupied slot — useful when a refactor
-      can't disambiguate (HEEx component names) and prefers to drop
-      the extraction over emitting a confusingly-suffixed identifier.
-
-  Returns `{:ok, name}` for a free or distinct slot, `:skip` for a
-  structural match or a `:skip`-mode collision.
-  """
-  @spec resolve_collision(String.t(), %{String.t() => any()}, keyword()) ::
-          {:ok, String.t()} | :skip
-  def resolve_collision(base_name, existing_index, opts \\ []) do
-    same? = Keyword.get(opts, :same?, fn _ -> false end)
-    on_collision = Keyword.get(opts, :on_collision, :suffix)
-
-    walk_collision(base_name, base_name, 1, existing_index, same?, on_collision)
-  end
-
-  defp walk_collision(candidate, base_name, attempt, existing_index, same?, on_collision),
-    do:
-      Map.fetch(existing_index, candidate)
-      |> resolve_collision_step(
-        attempt,
-        base_name,
-        candidate,
-        existing_index,
-        on_collision,
-        same?
-      )
-
-  @doc """
-  Decide which name a synthesised handler should take, given the
-  module's `defp` index and the branches the refactor would emit.
-
-  Wrapper around `resolve_collision/3` that flattens the `{name, arity}`
-  keyed `defps_index` into a name → clauses map and supplies the
-  AST-level structural-equality callback for `case`-clause helpers.
-
-  - No existing helper with this name at any arity → use `base_name`.
-  - Existing helper with this exact arity AND clauses match the
-    extraction's branches one-for-one (modulo metadata) → `:skip`.
-  - Existing helper but clauses differ (or different arity, even though
-    Elixir would tolerate same-name/different-arity — we suffix anyway
-    to keep the FIXME helper visually grouped) → walk `_2`, `_3`, …
-    until a free slot or another structural match is found.
-
-  `defps_index` shape: `%{{name_atom, arity} => [{head_ast, body_kw_ast}, ...]}`.
-
-  `branches` is a list of `%{pattern, body, guard, free_vars,
-  used_in_body}` maps. The per-branch `used_in_body` set lets us
-  tolerate `_var` spellings on unused params in existing helpers.
-  """
-  @spec resolve_handler_name(String.t(), pos_integer(), [map()], [atom()], %{
-          {atom(), pos_integer()} => list()
-        }) ::
-          {:ok, String.t()} | :skip
-  def resolve_handler_name(base_name, arity, branches, free_vars, defps_index) do
-    flat_index = flatten_defps_index(defps_index, arity)
-
-    same? = fn clauses_at_correct_arity ->
-      helpers_match?(clauses_at_correct_arity, branches, free_vars)
-    end
-
-    resolve_collision(base_name, flat_index, same?: same?)
-  end
-
-  # Build a string-keyed index for resolve_collision/3. Every name that
-  # has at least one defp clause gets an entry; the value is the list
-  # of clauses at the requested arity (possibly empty when a same-name
-  # helper exists only at a different arity — that still counts as an
-  # occupied slot, but `helpers_match?` on an empty list against any
-  # non-empty `branches` correctly returns false, so the suffix loop
-  # advances).
-  defp flatten_defps_index(defps_index, arity) do
-    defps_index
-    |> Map.keys()
-    |> Enum.map(fn {name_atom, _arity} -> name_atom end)
-    |> Enum.uniq()
-    |> Map.new(fn name_atom ->
-      {Atom.to_string(name_atom), Map.get(defps_index, {name_atom, arity}, [])}
-    end)
-  end
-
-  defp helpers_match?(existing_clauses, branches, _free_vars)
-       when length(existing_clauses) != length(branches),
-       do: false
-
-  defp helpers_match?(existing_clauses, branches, free_vars) do
-    existing_clauses
-    |> Enum.zip(branches)
-    |> Enum.all?(fn {{head, body_kw}, branch} ->
-      clause_matches?(head, body_kw, branch, free_vars)
-    end)
-  end
-
-  defp clause_matches?(head, body_kw, branch, free_vars) do
-    {existing_args, existing_guard} = head_args_and_guard(head)
-
-    with {:ok, existing_body} <- fetch_do_body(body_kw),
-         %{body: body, guard: guard, pattern: pattern, used_in_body: used_in_body} <- branch,
-         [scrutinee_arg | extra_args] <- existing_args,
-         true <- length(extra_args) == length(free_vars),
-         true <- ast_eq?(scrutinee_arg, pattern),
-         true <- guards_eq?(existing_guard, guard),
-         true <- extra_args_eq?(extra_args, free_vars, used_in_body),
-         true <- ast_eq?(existing_body, body) do
-      true
-    else
-      _ -> false
-    end
-  end
-
-  defp head_args_and_guard({:when, _, [inner, guard]}),
-    do: extract_fn_signature(inner) |> args_or_empty_with_guard(guard)
-
-  defp head_args_and_guard(head),
-    do: extract_fn_signature(head) |> args_or_empty()
-
-  defp fetch_do_body(keyword) do
-    keyword
-    |> Enum.find_value(:error, fn
-      {{:__block__, _, [:do]}, value} -> {:ok, value}
-      {:do, value} -> {:ok, value}
-      _ -> nil
-    end)
-  end
-
-  defp guards_eq?(nil, nil), do: true
-  defp guards_eq?(nil, _), do: false
-  defp guards_eq?(_, nil), do: false
-  defp guards_eq?(a, b), do: ast_eq?(a, b)
-
-  # Existing helper signatures may spell free vars as `_name` when the
-  # branch doesn't reference the name. Accept either spelling.
-  defp extra_args_eq?(extra_args, free_vars, used_in_body) do
-    extra_args
-    |> Enum.zip(free_vars)
-    |> Enum.all?(fn {arg, var} ->
-      case arg do
-        {name, _, ctx} when is_atom(name) and is_atom(ctx) ->
-          name == var or
-            (not MapSet.member?(used_in_body, var) and
-               name == String.to_atom("_" <> Atom.to_string(var)))
-
-        _ ->
-          false
-      end
-    end)
-  end
-
-  defp ast_eq?(a, b), do: strip_meta(a) == strip_meta(b)
-
-  defp strip_meta(ast) do
-    Macro.prewalk(ast, fn
-      {form, _meta, args} -> {form, [], args}
-      other -> other
-    end)
-  end
-
-  @doc """
-  Collect every variable name that gets *bound* by a pattern inside
-  the given AST.
-
-  Returns a `MapSet` of atom names. A variable is "bound" if it
-  appears on the LHS of:
-
-    * `=` match operator (`x = ...`, `{a, b} = ...`)
-    * `case`/`cond`/`fn` clause heads (the LHS of `->`)
-    * `with`/`for` generator (the LHS of `<-`)
-    * struct/map/tuple/list patterns inside any of the above
-      (e.g. `%S{} = f` binds `f`; `{:ok, user}` binds `user`)
-
-  Bare-var **usages** (RHS positions, function-argument positions in
-  calls, etc.) are NOT counted.
-
-  Underscore-prefixed names (`_`, `_ignored`) are excluded —
-  consistent with `bare_var/1`.
-
-  This is the dual of `bare_var/1`: while `bare_var/1` answers
-  "is this node a usage of a bare variable", `collect_bound_vars/1`
-  answers "what variables does this AST introduce".
-  """
-  @spec collect_bound_vars(term()) :: MapSet.t(atom())
-  def collect_bound_vars(ast) do
-    {_, vars} =
-      Macro.prewalk(ast, MapSet.new(), fn node, acc ->
-        case node do
-          # Match operator: LHS is a pattern, RHS is a value.
-          {:=, _, [lhs, _rhs]} ->
-            {node, collect_pattern_vars(lhs, acc)}
-
-          # Generator (`<-`) in `with` / `for`: LHS is a pattern.
-          {:<-, _, [lhs, _rhs]} ->
-            {node, collect_pattern_vars(lhs, acc)}
-
-          # Clause head (`->`): LHS list is a tuple of patterns
-          # (could be guarded via `when`).
-          {:->, _, [lhs_args, _body]} when is_list(lhs_args) ->
-            acc =
-              lhs_args |> Enum.reduce(acc, fn arg, a -> collect_pattern_vars(arg, a) end)
-
-            {node, acc}
-
-          _ ->
-            {node, acc}
-        end
-      end)
-
-    vars
-  end
-
-  # Walk a pattern AST and collect every bare-var name it binds.
-  # Patterns can nest: tuples, structs, maps, lists, `=` re-binding.
-  defp collect_pattern_vars(pattern, acc) do
-    Macro.prewalk(pattern, acc, fn
-      # Strip `when`-guards: only the LHS of `when` is a pattern; the
-      # RHS is a guard expression (uses, not binds).
-      {:when, _, [inner_pat, _guard]}, a ->
-        {nil, collect_pattern_vars(inner_pat, a)}
-
-      # `pattern = var` (or vice versa): both sides are patterns.
-      {:=, _, [l, r]}, a ->
-        a = collect_pattern_vars(l, a)
-        a = collect_pattern_vars(r, a)
-        {nil, a}
-
-      # Bare variable in pattern position: bind it.
-      {name, _, ctx}, a when is_atom(name) and is_atom(ctx) ->
-        case bare_var({name, [], ctx}) do
-          {:ok, n} -> {nil, MapSet.put(a, n)}
-          :skip -> {nil, a}
-        end
-
-      other, a ->
-        {other, a}
-    end)
-    |> elem(1)
   end
 
   @doc """
@@ -1541,6 +1147,269 @@ defmodule Number42.Refactors.AstHelpers do
     result
   end
 
+  @doc """
+  Resolve a synthesised name against an index of already-occupied names.
+
+  `existing_index` maps `String.t() => payload` — payload is whatever
+  the caller wants to inspect to decide structural equality (AST
+  clauses, full source text, a struct, anything).
+
+  ## Options
+
+    * `:same?` — `(payload -> boolean)`. Called with the occupant's
+      payload at each candidate slot. Returning `true` means the
+      occupant is already what the refactor would emit, so the
+      extraction is a no-op → result is `:skip`. Default: always
+      returns `false` (no slot is ever a match; pure name dedupe).
+
+    * `:on_collision` — `:suffix` (default) walks `_2`, `_3`, … until
+      a free slot or a `same?` match. `:skip` returns `:skip`
+      immediately on the first occupied slot — useful when a refactor
+      can't disambiguate (HEEx component names) and prefers to drop
+      the extraction over emitting a confusingly-suffixed identifier.
+
+  Returns `{:ok, name}` for a free or distinct slot, `:skip` for a
+  structural match or a `:skip`-mode collision.
+  """
+  @spec resolve_collision(String.t(), %{String.t() => any()}, keyword()) ::
+          {:ok, String.t()} | :skip
+  def resolve_collision(base_name, existing_index, opts \\ []) do
+    same? = Keyword.get(opts, :same?, fn _ -> false end)
+    on_collision = Keyword.get(opts, :on_collision, :suffix)
+
+    walk_collision(base_name, base_name, 1, existing_index, same?, on_collision)
+  end
+
+  @doc """
+  Decide which name a synthesised handler should take, given the
+  module's `defp` index and the branches the refactor would emit.
+
+  Wrapper around `resolve_collision/3` that flattens the `{name, arity}`
+  keyed `defps_index` into a name → clauses map and supplies the
+  AST-level structural-equality callback for `case`-clause helpers.
+
+  - No existing helper with this name at any arity → use `base_name`.
+  - Existing helper with this exact arity AND clauses match the
+    extraction's branches one-for-one (modulo metadata) → `:skip`.
+  - Existing helper but clauses differ (or different arity, even though
+    Elixir would tolerate same-name/different-arity — we suffix anyway
+    to keep the FIXME helper visually grouped) → walk `_2`, `_3`, …
+    until a free slot or another structural match is found.
+
+  `defps_index` shape: `%{{name_atom, arity} => [{head_ast, body_kw_ast}, ...]}`.
+
+  `branches` is a list of `%{pattern, body, guard, free_vars,
+  used_in_body}` maps. The per-branch `used_in_body` set lets us
+  tolerate `_var` spellings on unused params in existing helpers.
+  """
+  @spec resolve_handler_name(String.t(), pos_integer(), [map()], [atom()], %{
+          {atom(), pos_integer()} => list()
+        }) ::
+          {:ok, String.t()} | :skip
+  def resolve_handler_name(base_name, arity, branches, free_vars, defps_index) do
+    flat_index = flatten_defps_index(defps_index, arity)
+
+    same? = fn clauses_at_correct_arity ->
+      helpers_match?(clauses_at_correct_arity, branches, free_vars)
+    end
+
+    resolve_collision(base_name, flat_index, same?: same?)
+  end
+
+  @doc """
+  Build a synthesised helper name from up to four snake_case fragments.
+
+  Fragments in order: `prefix`, `host`, `scrutinee`, `suffix`. Each is
+  split on `_`, empty strings filtered out, then folded into a single
+  list with **overlap-merge** at every seam — if the tail of the
+  accumulator equals the head of the next fragment, the overlap is
+  taken only once. Overlap is checked longest-first.
+
+      [a, b, c] ⊕ [b, c, d]  →  [a, b, c, d]
+      [a]       ⊕ [a]        →  [a]
+      [a, b]    ⊕ [c, d]     →  [a, b, c, d]
+
+  ## Host-drop heuristic
+
+  If `scrutinee` splits into **2 or more subtokens**, `host` is treated
+  as redundant and dropped — the scrutinee already encodes the dispatch
+  identity. `prefix` and `suffix` still merge with the scrutinee.
+
+      synth_compound_name("handle", "host", "fetch_user_by_id", "")
+      → "handle_fetch_user_by_id"
+
+  Single-token scrutinees keep `host`:
+
+      synth_compound_name("handle", "host", "fetch", "")
+      → "handle_host_fetch"
+
+  Inputs may be strings, atoms, or `nil`/`""` (treated as empty).
+  Caller is responsible for stripping `?`/`!` suffixes that would
+  otherwise terminate identifiers mid-name.
+  """
+  @spec synth_compound_name(
+          String.t() | atom() | nil,
+          String.t() | atom() | nil,
+          String.t() | atom() | nil,
+          String.t() | atom() | nil
+        ) :: String.t()
+  def synth_compound_name(prefix, host, scrutinee, suffix) do
+    prefix_parts = to_subtokens(prefix)
+    host_parts = to_subtokens(host)
+    scrutinee_parts = to_subtokens(scrutinee)
+    suffix_parts = to_subtokens(suffix)
+
+    fragments =
+      if length(scrutinee_parts) >= 2 do
+        [prefix_parts, scrutinee_parts, suffix_parts]
+      else
+        [prefix_parts, host_parts, scrutinee_parts, suffix_parts]
+      end
+
+    fragments
+    |> Enum.reject(&(&1 == []))
+    |> Enum.reduce([], &overlap_merge(&2, &1))
+    |> Enum.join("_")
+  end
+
+  defp args_or_empty({_name, args}), do: {args, nil}
+  defp args_or_empty(:error), do: {[], nil}
+  defp args_or_empty_with_guard({_name, args}, guard), do: {args, guard}
+  defp args_or_empty_with_guard(:error, guard), do: {[], guard}
+  defp ast_eq?(a, b), do: strip_meta(a) == strip_meta(b)
+
+  defp clause_matches?(head, body_kw, branch, free_vars) do
+    {existing_args, existing_guard} = head_args_and_guard(head)
+
+    with {:ok, existing_body} <- fetch_do_body(body_kw),
+         %{body: body, guard: guard, pattern: pattern, used_in_body: used_in_body} <- branch,
+         [scrutinee_arg | extra_args] <- existing_args,
+         true <- length(extra_args) == length(free_vars),
+         true <- ast_eq?(scrutinee_arg, pattern),
+         true <- guards_eq?(existing_guard, guard),
+         true <- extra_args_eq?(extra_args, free_vars, used_in_body),
+         true <- ast_eq?(existing_body, body) do
+      true
+    else
+      _ -> false
+    end
+  end
+
+  defp collect_pattern_vars(pattern, acc) do
+    Macro.prewalk(pattern, acc, fn
+      # Strip `when`-guards: only the LHS of `when` is a pattern; the
+      # RHS is a guard expression (uses, not binds).
+      {:when, _, [inner_pat, _guard]}, a ->
+        {nil, collect_pattern_vars(inner_pat, a)}
+
+      # `pattern = var` (or vice versa): both sides are patterns.
+      {:=, _, [l, r]}, a ->
+        a = collect_pattern_vars(l, a)
+        a = collect_pattern_vars(r, a)
+        {nil, a}
+
+      # Bare variable in pattern position: bind it.
+      {name, _, ctx}, a when is_atom(name) and is_atom(ctx) ->
+        case bare_var({name, [], ctx}) do
+          {:ok, n} -> {nil, MapSet.put(a, n)}
+          :skip -> {nil, a}
+        end
+
+      other, a ->
+        {other, a}
+    end)
+    |> elem(1)
+  end
+
+  defp consonant?(""), do: false
+  defp consonant?(ch), do: ch not in ~w(a e i o u y)
+
+  defp consonant_before_trailing_y?(verb),
+    do: String.slice(verb, -2..-2//1) |> consonant?()
+
+  defp extra_args_eq?(extra_args, free_vars, used_in_body) do
+    extra_args
+    |> Enum.zip(free_vars)
+    |> Enum.all?(fn {arg, var} ->
+      case arg do
+        {name, _, ctx} when is_atom(name) and is_atom(ctx) ->
+          name == var or
+            (not MapSet.member?(used_in_body, var) and
+               name == String.to_atom("_" <> Atom.to_string(var)))
+
+        _ ->
+          false
+      end
+    end)
+  end
+
+  defp fetch_do_body(keyword) do
+    keyword
+    |> Enum.find_value(:error, fn
+      {{:__block__, _, [:do]}, value} -> {:ok, value}
+      {:do, value} -> {:ok, value}
+      _ -> nil
+    end)
+  end
+
+  defp flatten_defps_index(defps_index, arity) do
+    defps_index
+    |> Map.keys()
+    |> Enum.map(fn {name_atom, _arity} -> name_atom end)
+    |> Enum.uniq()
+    |> Map.new(fn name_atom ->
+      {Atom.to_string(name_atom), Map.get(defps_index, {name_atom, arity}, [])}
+    end)
+  end
+
+  defp guards_eq?(nil, nil), do: true
+  defp guards_eq?(nil, _), do: false
+  defp guards_eq?(_, nil), do: false
+  defp guards_eq?(a, b), do: ast_eq?(a, b)
+
+  defp head_args_and_guard({:when, _, [inner, guard]}),
+    do: extract_fn_signature(inner) |> args_or_empty_with_guard(guard)
+
+  defp head_args_and_guard(head),
+    do: extract_fn_signature(head) |> args_or_empty()
+
+  defp helpers_match?(existing_clauses, branches, _free_vars)
+       when length(existing_clauses) != length(branches),
+       do: false
+
+  defp helpers_match?(existing_clauses, branches, free_vars) do
+    existing_clauses
+    |> Enum.zip(branches)
+    |> Enum.all?(fn {{head, body_kw}, branch} ->
+      clause_matches?(head, body_kw, branch, free_vars)
+    end)
+  end
+
+  defp latch_consume_starts([], _subtokens, _next_idx, _last_sub, starts), do: {:ok, starts}
+
+  defp latch_consume_starts([c | rest] = remaining, subtokens, next_idx, last_sub, starts) do
+    next_sub = subtokens |> Enum.at(next_idx)
+
+    cond do
+      next_sub != nil and String.first(next_sub) == c ->
+        latch_consume_starts(rest, subtokens, next_idx + 1, next_sub, starts + 1)
+
+      true ->
+        last_sub_rest = String.slice(last_sub, 1..-1//1)
+        if subsequence?(remaining, last_sub_rest), do: {:ok, starts}, else: :error
+    end
+  end
+
+  defp latch_try_at([first | rest], subtokens, idx) do
+    sub = subtokens |> Enum.at(idx)
+
+    if sub != nil and String.first(sub) == first do
+      latch_consume_starts(rest, subtokens, idx + 1, sub, 1)
+    else
+      :error
+    end
+  end
+
   defp module_name_underscored("Elixir." <> rest),
     do:
       rest
@@ -1549,10 +1418,35 @@ defmodule Number42.Refactors.AstHelpers do
       |> Macro.underscore()
 
   defp module_name_underscored(_), do: nil
-
   defp name_from_atom_string("Elixir." <> _, v), do: v |> humanize_module()
-
   defp name_from_atom_string(str, _v), do: str |> sanitize_identifier()
+  defp overlap_merge([], next), do: next
+  defp overlap_merge(acc, []), do: acc
+
+  defp overlap_merge(acc, next) do
+    max_overlap = min(length(acc), length(next))
+
+    overlap =
+      max_overlap..1//-1
+      |> Enum.find(0, fn n ->
+        Enum.take(acc, -n) == Enum.take(next, n)
+      end)
+
+    acc ++ Enum.drop(next, overlap)
+  end
+
+  defp patch_for_range_or_nil(%{end: end_pos, start: start_pos}, node, opts, replacement) do
+    end_pos =
+      if Keyword.get(opts, :boolish_tail?, false) do
+        clip_end_for_boolish_tail(node, end_pos)
+      else
+        end_pos
+      end
+
+    Patch.new(%{end: end_pos, start: start_pos}, replacement)
+  end
+
+  defp patch_for_range_or_nil(_, _node, _opts, _replacement), do: nil
 
   defp resolve_collision_step(
          :error,
@@ -1589,14 +1483,12 @@ defmodule Number42.Refactors.AstHelpers do
     end
   end
 
-  defp args_or_empty_with_guard({_name, args}, guard), do: {args, guard}
-  defp args_or_empty_with_guard(:error, guard), do: {[], guard}
+  defp slice_or_error(%{end: end_pos, start: start_pos}, ast, source) do
+    end_pos = clip_end_for_boolish_tail(ast, end_pos)
+    {:ok, slice_source(source, start_pos, end_pos)}
+  end
 
-  defp args_or_empty({_name, args}), do: {args, nil}
-  defp args_or_empty(:error), do: {[], nil}
-
-  defp consonant?(""), do: false
-  defp consonant?(ch), do: ch not in ~w(a e i o u y)
+  defp slice_or_error(_, _ast, _source), do: :error
 
   defp slots_with_leading_digraph_or_char({digraph, rest}, _stem)
        when digraph in @consonant_digraphs do
@@ -1607,4 +1499,42 @@ defmodule Number42.Refactors.AstHelpers do
     {head, rest} = String.split_at(stem, 1)
     [head | phoneme_slots(rest)]
   end
+
+  defp strip_meta(ast) do
+    Macro.prewalk(ast, fn
+      {form, _meta, args} -> {form, [], args}
+      other -> other
+    end)
+  end
+
+  defp subsequence?([], _haystack), do: true
+  defp subsequence?(_chars, ""), do: false
+
+  defp subsequence?([c | rest], haystack) do
+    case :binary.match(haystack, c) do
+      :nomatch -> false
+      {pos, _} -> subsequence?(rest, String.slice(haystack, (pos + 1)..-1//1))
+    end
+  end
+
+  defp to_subtokens(nil), do: []
+  defp to_subtokens(atom) when is_atom(atom), do: to_subtokens(Atom.to_string(atom))
+
+  defp to_subtokens(str) when is_binary(str) do
+    String.split(str, "_", trim: true)
+  end
+
+  defp verb_shaped?(word), do: @verb_suffixes |> Enum.any?(&String.ends_with?(word, &1))
+
+  defp walk_collision(candidate, base_name, attempt, existing_index, same?, on_collision),
+    do:
+      Map.fetch(existing_index, candidate)
+      |> resolve_collision_step(
+        attempt,
+        base_name,
+        candidate,
+        existing_index,
+        on_collision,
+        same?
+      )
 end

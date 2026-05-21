@@ -61,10 +61,6 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
 
   @impl Number42.Refactors.Refactor
   def description, do: "Expand short-form local bindings to long forms"
-
-  @impl Number42.Refactors.Refactor
-  def priority, do: 250
-
   @impl Number42.Refactors.Refactor
   def explanation do
     """
@@ -78,6 +74,8 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
     """
   end
 
+  @impl Number42.Refactors.Refactor
+  def priority, do: 250
   @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
 
@@ -102,8 +100,17 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
     Sourceror.parse_string(source) |> apply_patches(ctx, source)
   end
 
-  # Per-call context bag: collects every config-driven knob so we can
-  # thread one value through the walk instead of multiple parameters.
+  defp apply_patches({:ok, ast}, ctx, source),
+    do: build_patches(ast, ctx) |> patch_or_passthrough(source)
+
+  defp apply_patches({:error, _}, _ctx, source), do: source
+
+  defp binding_from_key({:ok, key}, name, node) do
+    if underscore?(name), do: [], else: [{name, node, {key, [], []}}]
+  end
+
+  defp binding_from_key(:error, _name, _node), do: []
+
   defp build_ctx(opts) do
     extra_whitelist = opts |> Keyword.get(:whitelist, []) |> Enum.map(&to_atom/1) |> MapSet.new()
 
@@ -113,9 +120,6 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
       whitelist: MapSet.union(@default_whitelist, extra_whitelist)
     }
   end
-
-  defp to_atom(a) when is_atom(a), do: a
-  defp to_atom(s) when is_binary(s), do: String.to_atom(s)
 
   defp build_patches(ast, ctx) do
     module_tokens = collect_module_tokens(ast)
@@ -127,21 +131,37 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
     end)
   end
 
-  defp collect_module_tokens(ast) do
-    ast
+  defp call_name_string_or_nil({:ok, name}) when is_atom(name) do
+    name |> Atom.to_string() |> String.trim_trailing("!") |> String.trim_trailing("?")
+  end
+
+  defp call_name_string_or_nil(:error), do: nil
+
+  defp camel_to_snake(atom) when is_atom(atom) do
+    atom |> Atom.to_string() |> Macro.underscore()
+  end
+
+  defp choose_winner([]), do: :skip
+  defp choose_winner([{target, _}]), do: {:ok, target}
+  defp choose_winner([{target, s1}, {_other, s2} | _]) when s1 > s2, do: {:ok, target}
+  defp choose_winner(_tie), do: :skip
+
+  defp collect_bindings(body) do
+    body
     |> Macro.prewalker()
     |> Enum.flat_map(fn
-      {:defmodule, _, [{:__aliases__, _, parts}, _]} when is_list(parts) ->
-        parts |> Enum.map(&camel_to_snake/1)
+      {:=, _, [{name, _, ctx} = lhs, rhs]} when is_atom(name) and is_atom(ctx) ->
+        [{name, lhs, rhs}]
+
+      {:fn, _, [{:->, _, [params, _body]}]} when is_list(params) ->
+        params |> Enum.flat_map(&lambda_param_binding/1)
+
+      {:<-, _, [pattern, rhs]} ->
+        for_generator_bindings(pattern, rhs)
 
       _ ->
         []
     end)
-    |> Enum.uniq()
-  end
-
-  defp camel_to_snake(atom) when is_atom(atom) do
-    atom |> Atom.to_string() |> Macro.underscore()
   end
 
   defp collect_def_clauses(ast) do
@@ -162,7 +182,56 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
     end)
   end
 
-  defp patches_for_clause(head, body, module_compounds, ctx) do
+  defp collect_module_tokens(ast) do
+    ast
+    |> Macro.prewalker()
+    |> Enum.flat_map(fn
+      {:defmodule, _, [{:__aliases__, _, parts}, _]} when is_list(parts) ->
+        parts |> Enum.map(&camel_to_snake/1)
+
+      _ ->
+        []
+    end)
+    |> Enum.uniq()
+  end
+
+  defp for_generator_bindings(pattern, rhs),
+    do: top_level_bindings(pattern, rhs) ++ map_key_bindings(pattern)
+
+  defp head_signature(head), do: extract_fn_signature(head) |> name_args_or_unknown()
+  defp key_atom({:__block__, _, [atom]}) when is_atom(atom), do: {:ok, atom}
+  defp key_atom(atom) when is_atom(atom), do: {:ok, atom}
+  defp key_atom(_), do: :error
+
+  defp lambda_param_binding({name, _, ctx} = node) when is_atom(name) and is_atom(ctx) do
+    if underscore?(name), do: [], else: [{name, node, node}]
+  end
+
+  defp lambda_param_binding(_), do: []
+  defp long?(name, ctx), do: not short_name?(name, ctx)
+
+  defp map_key_binding({key_ast, {name, _, ctx} = node})
+       when is_atom(name) and is_atom(ctx) do
+    key_atom(key_ast) |> binding_from_key(name, node)
+  end
+
+  defp map_key_binding(_), do: []
+
+  defp map_key_bindings(pattern) do
+    pattern
+    |> Macro.prewalker()
+    |> Enum.flat_map(fn
+      {:%{}, _, pairs} when is_list(pairs) -> pairs |> Enum.flat_map(&map_key_binding/1)
+      _ -> []
+    end)
+  end
+
+  defp name_args_or_unknown({name, args}), do: {name, args}
+  defp name_args_or_unknown(:error), do: {:unknown, []}
+  defp patch_or_passthrough([], source), do: source
+  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
+
+  defp patches_for_clause(head, body, module_compounds, context_compound) do
     {fn_name, params} = head_signature(head)
     fn_compound = Atom.to_string(fn_name)
     param_names = params |> Enum.flat_map(&pattern_var_names/1)
@@ -171,7 +240,9 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
     collected_binding = collect_bindings(body)
 
     long_names_in_body =
-      collected_binding |> Enum.map(fn {name, _, _} -> name end) |> Enum.filter(&long?(&1, ctx))
+      collected_binding
+      |> Enum.map(fn {name, _, _} -> name end)
+      |> Enum.filter(&long?(&1, context_compound))
 
     long_compounds_in_body = long_names_in_body |> Enum.map(&Atom.to_string/1)
 
@@ -204,14 +275,14 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
       |> Enum.reject(&(&1 == ""))
 
     short_bindings =
-      collected_binding |> Enum.filter(fn {name, _, _} -> short_name?(name, ctx) end)
+      collected_binding |> Enum.filter(fn {name, _, _} -> short_name?(name, context_compound) end)
 
     # Resolve: short-name → long-name (atom) per binding.
     resolutions =
       short_bindings
       |> Enum.reject(fn {name, _node, _rhs} -> MapSet.member?(rebound, name) end)
       |> Enum.flat_map(fn {name, _node, rhs} ->
-        case resolve_long(name, rhs, context_compounds, ctx) do
+        case resolve_long(name, rhs, context_compounds, context_compound) do
           {:ok, long} ->
             long_atom = String.to_atom(long)
             if MapSet.member?(occupied, long_atom), do: [], else: [{name, long_atom}]
@@ -227,7 +298,7 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
     body
     |> Macro.prewalker()
     |> Enum.flat_map(fn
-      {name, _meta, ctx} = node when is_atom(name) and is_atom(ctx) ->
+      {name, _meta, context_compound} = node when is_atom(name) and is_atom(context_compound) ->
         case Map.fetch(resolutions, name) do
           {:ok, long_atom} ->
             replacement = Atom.to_string(long_atom)
@@ -247,133 +318,70 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
     |> Enum.reject(&is_nil/1)
   end
 
-  # Match-failure means we couldn't recover a name for the head; signal
-  # that to the caller so it skips this clause.
-  defp head_signature(head), do: extract_fn_signature(head) |> name_args_or_unknown()
+  defp pluralized?(nil), do: false
+  defp pluralized?(last), do: singularize(last) != last
 
-  defp collect_bindings(body) do
-    body
-    |> Macro.prewalker()
-    |> Enum.flat_map(fn
-      {:=, _, [{name, _, ctx} = lhs, rhs]} when is_atom(name) and is_atom(ctx) ->
-        [{name, lhs, rhs}]
+  defp prepend_pp_or_keep({:ok, pp}, tail_compound),
+    do: {:ok, [pp, tail_compound] |> Enum.join("_")}
 
-      {:fn, _, [{:->, _, [params, _body]}]} when is_list(params) ->
-        params |> Enum.flat_map(&lambda_param_binding/1)
+  defp prepend_pp_or_keep(:skip, tail_compound), do: {:ok, tail_compound}
 
-      {:<-, _, [pattern, rhs]} ->
-        for_generator_bindings(pattern, rhs)
-
-      _ ->
-        []
-    end)
-  end
-
-  defp lambda_param_binding({name, _, ctx} = node) when is_atom(name) and is_atom(ctx) do
-    if underscore?(name), do: [], else: [{name, node, node}]
-  end
-
-  defp lambda_param_binding(_), do: []
-
-  defp for_generator_bindings(pattern, rhs),
-    do: top_level_bindings(pattern, rhs) ++ map_key_bindings(pattern)
-
-  defp top_level_bindings({name, _, ctx} = node, rhs) when is_atom(name) and is_atom(ctx) do
-    if underscore?(name), do: [], else: [{name, node, rhs}]
-  end
-
-  defp top_level_bindings({:=, _, [_lhs, rhs_pat]}, rhs),
-    do: top_level_bindings(rhs_pat, rhs)
-
-  defp top_level_bindings(_other, _rhs), do: []
-
-  defp map_key_bindings(pattern) do
-    pattern
-    |> Macro.prewalker()
-    |> Enum.flat_map(fn
-      {:%{}, _, pairs} when is_list(pairs) -> pairs |> Enum.flat_map(&map_key_binding/1)
-      _ -> []
-    end)
-  end
-
-  defp map_key_binding({key_ast, {name, _, ctx} = node})
-       when is_atom(name) and is_atom(ctx) do
-    key_atom(key_ast) |> binding_from_key(name, node)
-  end
-
-  defp map_key_binding(_), do: []
-
-  defp key_atom({:__block__, _, [atom]}) when is_atom(atom), do: {:ok, atom}
-  defp key_atom(atom) when is_atom(atom), do: {:ok, atom}
-  defp key_atom(_), do: :error
-
-  defp long?(name, ctx), do: not short_name?(name, ctx)
-
-  # Resolve order:
-  # 1. Known table (explicit human-curated mapping).
-  # 2. RHS-based match — extract the function name from the right-hand
-  #    side, score `short` against it. Strongest contextual signal:
-  #    `cs = build_changeset(x)` → `cs` clearly means `changeset`. Also
-  #    the only path that fires for single-letter names.
-  # 3. Compound-context match — initial-of-each-subtoken against
-  #    function-name / parameters / body bindings / module-name
-  #    compounds.
-  defp resolve_long(name, rhs, context_compounds, ctx) do
+  defp resolve_long(name, rhs, context_compounds, context_compound) do
     string = Atom.to_string(name)
 
     cond do
-      Map.has_key?(ctx.known, string) ->
-        {:ok, Map.fetch!(ctx.known, string)}
+      Map.has_key?(context_compound.known, string) ->
+        {:ok, Map.fetch!(context_compound.known, string)}
 
       true ->
         {rhs_compound, rhs_is_call?} = rhs_function_compound(rhs)
-        compound_candidates = score_compound_candidates(string, context_compounds, ctx)
+
+        compound_candidates =
+          score_compound_candidates(string, context_compounds, context_compound)
 
         # RHS-match is rated higher than any compound-context match.
         # If RHS yielded a hit, take its target (the subtoken slice
         # corresponding to `short`'s initials); otherwise fall back to
         # compound matches.
-        case rhs_compound && rhs_target(string, rhs_compound, rhs_is_call?, ctx) do
+        case rhs_compound && rhs_target(string, rhs_compound, rhs_is_call?, context_compound) do
           {:ok, target} -> {:ok, target}
           _ -> choose_winner(compound_candidates)
         end
     end
   end
 
-  # Pick the single winning candidate or `:skip` on tie / empty.
-  # Each candidate is `{target, score}` where `target` is the resolved
-  # long form (already subtoken-sliced and singularized).
-  defp choose_winner([]), do: :skip
-  defp choose_winner([{target, _}]), do: {:ok, target}
-  defp choose_winner([{target, s1}, {_other, s2} | _]) when s1 > s2, do: {:ok, target}
-  defp choose_winner(_tie), do: :skip
-
-  defp score_compound_candidates(short, context_compounds, ctx) do
-    context_compounds
-    # Self-match would be a no-op rename; filter early.
-    |> Enum.reject(&(&1 == short))
-    |> Enum.flat_map(fn compound ->
-      case score_compound(short, compound, ctx) do
-        {score, target} when score > 0 -> [{target, score}]
-        _ -> []
-      end
-    end)
-    |> Enum.sort_by(fn {_target, score} -> -score end)
+  defp rhs_function_compound(rhs) do
+    name = extract_call_name(rhs) |> call_name_string_or_nil()
+    {name, name != nil and rhs_is_call?(rhs)}
   end
 
-  # Compound-context score (function/param/body/module names).
-  # Returns `{score, target}` or `{0, nil}`.
-  #
-  # 100: every char of `short` is the initial of a subtoken of compound,
-  #      consuming subtokens left-to-right. `fb` ↔ `formula_builder`,
-  #      target = whole compound (singularized).
-  # 80:  initial-prefix of compound. `fb` ↔ `formula_builder_node` —
-  #      first 2 initials match; target = first 2 subtokens (singularized).
-  # 0:   anything else. We deliberately do NOT score subsequence or
-  #      Prefix-of-Single-Subtoken matches: too many spurious hits for
-  #      tiny names (`c` ↔ `color`, `cs` ↔ `coords`/`cycles`/`cells`).
-  #
-  # Single-letter shorts can never score here: the `>= 2` guard.
+  defp rhs_is_call?({:|>, _, [_lhs, rhs]}), do: rhs_is_call?(rhs)
+  defp rhs_is_call?({{:., _, [_callee, _name]}, _, args}), do: args != []
+  defp rhs_is_call?({name, _, args}) when is_atom(name) and is_list(args), do: true
+  defp rhs_is_call?(_), do: false
+
+  defp rhs_target(short, rhs_compound, rhs_is_call?, ctx) do
+    subtokens = String.split(rhs_compound, "_", trim: true)
+
+    latch_match(short, subtokens)
+    |> tail_compound_from_latch(ctx, short, subtokens, rhs_is_call?)
+  end
+
+  defp rhs_target_from_split(subtokens, n, ctx, rhs_is_call?) do
+    {head, tail} = subtokens |> Enum.split(-n)
+    singularized = tail |> List.last() |> singularize()
+    tail_compound = (Enum.drop(tail, -1) ++ [singularized]) |> Enum.join("_")
+
+    pp =
+      if rhs_is_call? do
+        maybe_past_participle(head, tail, singularized, ctx.pp_verbs)
+      else
+        :skip
+      end
+
+    prepend_pp_or_keep(pp, tail_compound)
+  end
+
   defp score_compound(short, compound, ctx) do
     subtokens = String.split(compound, "_", trim: true)
     initials = subtokens |> Enum.map_join("", &String.first/1)
@@ -391,92 +399,25 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
     end
   end
 
-  # RHS-based match. We extract the *function name* from the right-hand
-  # side — the strongest hint of what the bound value represents:
-  #
-  #   cs = build_changeset(x)         → rhs compound: `build_changeset`
-  #   c  = build_changeset(x)         → rhs compound: `build_changeset`
-  #   pl = Pricing.get_price_list(id) → rhs compound: `get_price_list`
-  #   pls = list_price_lists()         → rhs compound: `list_price_lists`
-  #
-  # Match algorithm: find the earliest subtoken `i` such that
-  # subtokens[i] starts with short[0] AND the remaining short chars
-  # appear as an in-order subsequence within the concatenated text of
-  # subtokens[i..]. The tail is subtokens[i..]; the head is the
-  # preceding subtokens (kept for past-participle promotion).
-  #
-  # Examples:
-  #   cs ↔ build_changeset    → tail=[changeset]            → "changeset"
-  #   pls ↔ list_price_lists   → tail=[price, lists]         → "price_list"
-  #   pl ↔ get_price_list      → tail=[price, list]          → "price_list"
-  #   bc ↔ build_changesets    → tail=[changesets]           → "changeset"
-  #
-  # Length-1 shorts are accepted here because the RHS function name
-  # disambiguates the intent. The compound-context path forbids
-  # length-1 shorts because they have no intent signal.
-  defp rhs_target(short, rhs_compound, rhs_is_call?, ctx) do
-    subtokens = String.split(rhs_compound, "_", trim: true)
-
-    latch_match(short, subtokens)
-    |> tail_compound_from_latch(ctx, short, subtokens, rhs_is_call?)
-  end
-
-  # Compose the RHS target. Default: drop the head, keep the
-  # singularized tail. The head is only revived for past-participle
-  # promotion (`nk = normalize_keys(...)` → `normalized_key`).
-  #
-  # We don't sanity-check whether the tail is "good enough" — `t =
-  # String.trim(line)` becoming `trim` is a borderline case, but the
-  # programmer chose `t`; the rewrite to `trim` is at worst no worse.
-  defp rhs_target_from_split(subtokens, n, ctx, rhs_is_call?) do
-    {head, tail} = subtokens |> Enum.split(-n)
-    singularized = tail |> List.last() |> singularize()
-    tail_compound = (Enum.drop(tail, -1) ++ [singularized]) |> Enum.join("_")
-
-    pp =
-      if rhs_is_call? do
-        maybe_past_participle(head, tail, singularized, ctx.pp_verbs)
-      else
-        :skip
+  defp score_compound_candidates(short, context_compounds, context_compound) do
+    context_compounds
+    # Self-match would be a no-op rename; filter early.
+    |> Enum.reject(&(&1 == short))
+    |> Enum.flat_map(fn compound ->
+      case score_compound(short, compound, context_compound) do
+        {score, target} when score > 0 -> [{target, score}]
+        _ -> []
       end
-
-    prepend_pp_or_keep(pp, tail_compound)
+    end)
+    |> Enum.sort_by(fn {_target, score} -> -score end)
   end
 
-  # Compound-context path: param names, module names, function names.
-  # Those are noun compounds, not verb phrases — singularize the
-  # trailing subtoken only, no PP promotion.
   defp singularize_compound(subtokens, _ctx) when is_list(subtokens) do
     case subtokens |> Enum.split(-1) do
       {head, [last]} -> (head ++ [singularize(last)]) |> Enum.join("_")
       {_, []} -> ""
     end
   end
-
-  # Returns `{compound_string | nil, is_call?}`. `is_call?` distinguishes
-  # `cs = build_changeset(x)` (real call → PP-promotion allowed for
-  # matching pluralized tails) from `rbip <- record.field_path`
-  # (property access → no PP, the field IS the long form). Synthetic
-  # call ASTs built by `map_key_binding/1` (`{key, [], []}`) count as
-  # calls so a map-key compound can promote a pluralized tail.
-  defp rhs_function_compound(rhs) do
-    name = extract_call_name(rhs) |> call_name_string_or_nil()
-    {name, name != nil and rhs_is_call?(rhs)}
-  end
-
-  defp rhs_is_call?({:|>, _, [_lhs, rhs]}), do: rhs_is_call?(rhs)
-  defp rhs_is_call?({{:., _, [_callee, _name]}, _, args}), do: args != []
-  defp rhs_is_call?({name, _, args}) when is_atom(name) and is_list(args), do: true
-  defp rhs_is_call?(_), do: false
-
-  defp apply_patches({:ok, ast}, ctx, source),
-    do: build_patches(ast, ctx) |> patch_or_passthrough(source)
-
-  defp apply_patches({:error, _}, _ctx, source), do: source
-
-  defp name_args_or_unknown({name, args}), do: {name, args}
-
-  defp name_args_or_unknown(:error), do: {:unknown, []}
 
   defp tail_compound_from_latch(:error, _ctx, _short, _subtokens, _rhs_is_call?), do: :error
 
@@ -515,32 +456,15 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
   end
 
   defp tail_pluralized?(subtokens), do: List.last(subtokens) |> pluralized?()
+  defp to_atom(a) when is_atom(a), do: a
+  defp to_atom(s) when is_binary(s), do: String.to_atom(s)
 
-  defp prepend_pp_or_keep({:ok, pp}, tail_compound),
-    do: {:ok, [pp, tail_compound] |> Enum.join("_")}
-
-  defp prepend_pp_or_keep(:skip, tail_compound), do: {:ok, tail_compound}
-
-  # Strip a trailing `!` (bang convention for raising variants). The
-  # variable we're about to bind can't legally contain `!`, so the
-  # bang must come off the RHS function name before it becomes a name.
-  defp call_name_string_or_nil({:ok, name}) when is_atom(name) do
-    name |> Atom.to_string() |> String.trim_trailing("!") |> String.trim_trailing("?")
+  defp top_level_bindings({name, _, ctx} = node, rhs) when is_atom(name) and is_atom(ctx) do
+    if underscore?(name), do: [], else: [{name, node, rhs}]
   end
 
-  defp call_name_string_or_nil(:error), do: nil
+  defp top_level_bindings({:=, _, [_lhs, rhs_pat]}, rhs),
+    do: top_level_bindings(rhs_pat, rhs)
 
-  defp patch_or_passthrough([], source), do: source
-
-  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
-
-  defp binding_from_key({:ok, key}, name, node) do
-    if underscore?(name), do: [], else: [{name, node, {key, [], []}}]
-  end
-
-  defp binding_from_key(:error, _name, _node), do: []
-
-  defp pluralized?(nil), do: false
-
-  defp pluralized?(last), do: singularize(last) != last
+  defp top_level_bindings(_other, _rhs), do: []
 end

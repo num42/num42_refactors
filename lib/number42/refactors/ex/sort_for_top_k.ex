@@ -51,10 +51,6 @@ defmodule Number42.Refactors.Ex.SortForTopK do
 
   @impl Number42.Refactors.Refactor
   def description, do: "Enum.sort + take(1)/hd -> Enum.min/max"
-
-  @impl Number42.Refactors.Refactor
-  def priority, do: 130
-
   @impl Number42.Refactors.Refactor
   def explanation do
     """
@@ -68,9 +64,13 @@ defmodule Number42.Refactors.Ex.SortForTopK do
   end
 
   @impl Number42.Refactors.Refactor
+  def priority, do: 130
+  @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
   @impl Number42.Refactors.Refactor
   def transform(source, _opts), do: Sourceror.parse_string(source) |> apply_patches(source)
+  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
+  defp apply_patches({:error, _}, source), do: source
 
   defp build_patches(ast) do
     inner_pipes = collect_inner_pipes(ast)
@@ -93,6 +93,9 @@ defmodule Number42.Refactors.Ex.SortForTopK do
     )
   end
 
+  defp coll_direction_or_skip(:asc, coll), do: {:ok, coll, :asc}
+  defp coll_direction_or_skip(:desc, coll), do: {:ok, coll, :desc}
+  defp coll_direction_or_skip(_, _coll), do: :skip
   defp collapse_step(:asc, :scalar), do: enum_partial(:min)
   defp collapse_step(:desc, :scalar), do: enum_partial(:max)
   defp collapse_step(:asc, :list), do: enum_partial(:min)
@@ -110,6 +113,9 @@ defmodule Number42.Refactors.Ex.SortForTopK do
   defp direction_atom({:__block__, _, [atom]}) when atom in [:asc, :desc], do: atom
   defp direction_atom(atom) when atom in [:asc, :desc], do: atom
   defp direction_atom(_), do: nil
+  defp direction_or_skip(:asc), do: {:ok, :__piped__, :asc}
+  defp direction_or_skip(:desc), do: {:ok, :__piped__, :desc}
+  defp direction_or_skip(_), do: :skip
 
   defp do_rewrite_steps([sort, follower | rest], acc, fired?) do
     with {:ok, _coll, direction} <- partial_sort_call(sort),
@@ -145,7 +151,6 @@ defmodule Number42.Refactors.Ex.SortForTopK do
   end
 
   defp maybe_patch({:hd, _, [inner]} = node), do: sort_call(inner) |> sort_patch_or_skip(node)
-
   defp maybe_patch(_), do: []
 
   defp partial_sort_call({{:., _, [{:__aliases__, _, [:Enum]}, :sort]}, _, []}),
@@ -155,6 +160,13 @@ defmodule Number42.Refactors.Ex.SortForTopK do
     do: direction_atom(dir) |> direction_or_skip()
 
   defp partial_sort_call(_), do: :skip
+  defp patch_or_passthrough([], source), do: source
+  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
+
+  defp pipeline_patch_or_skip({:ok, new_steps}, node),
+    do: [Patch.replace(node, render_pipeline(new_steps))]
+
+  defp pipeline_patch_or_skip(:unchanged, _node), do: []
 
   defp render(:scalar, coll, direction) do
     fun = if direction == :asc, do: :min, else: :max
@@ -188,6 +200,13 @@ defmodule Number42.Refactors.Ex.SortForTopK do
     do: direction_atom(dir) |> coll_direction_or_skip(coll)
 
   defp sort_call(_), do: :skip
+
+  defp sort_patch_or_skip({:ok, coll, direction}, node),
+    do: [Patch.replace(node, render(:scalar, coll, direction))]
+
+  defp sort_patch_or_skip(_, _node), do: []
+  defp take_kind_or_skip({:ok, true}), do: {:ok, :list}
+  defp take_kind_or_skip(_), do: :skip
   defp take_one_arg({:__block__, _, [1]}), do: {:ok, true}
   defp take_one_arg(1), do: {:ok, true}
   defp take_one_arg(_), do: {:ok, false}
@@ -200,38 +219,4 @@ defmodule Number42.Refactors.Ex.SortForTopK do
   defp top_k_step(_), do: :skip
   defp unpipe({:|>, _, [left, right]}), do: unpipe(left) ++ [right]
   defp unpipe(other), do: [other]
-
-  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
-
-  defp apply_patches({:error, _}, source), do: source
-
-  defp pipeline_patch_or_skip({:ok, new_steps}, node),
-    do: [Patch.replace(node, render_pipeline(new_steps))]
-
-  defp pipeline_patch_or_skip(:unchanged, _node), do: []
-
-  defp sort_patch_or_skip({:ok, coll, direction}, node),
-    do: [Patch.replace(node, render(:scalar, coll, direction))]
-
-  defp sort_patch_or_skip(_, _node), do: []
-
-  defp direction_or_skip(:asc), do: {:ok, :__piped__, :asc}
-
-  defp direction_or_skip(:desc), do: {:ok, :__piped__, :desc}
-
-  defp direction_or_skip(_), do: :skip
-
-  defp coll_direction_or_skip(:asc, coll), do: {:ok, coll, :asc}
-
-  defp coll_direction_or_skip(:desc, coll), do: {:ok, coll, :desc}
-
-  defp coll_direction_or_skip(_, _coll), do: :skip
-
-  defp take_kind_or_skip({:ok, true}), do: {:ok, :list}
-
-  defp take_kind_or_skip(_), do: :skip
-
-  defp patch_or_passthrough([], source), do: source
-
-  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
 end

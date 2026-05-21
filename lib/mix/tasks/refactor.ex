@@ -357,20 +357,6 @@ defmodule Mix.Tasks.Refactor do
     Number42.Refactors.Ex.ExtractSharedModule
   ]
 
-  defp inject_paths_for_cross_file_refactors(configured, files),
-    do:
-      configured
-      |> inject_into(@cross_file_refactors, :paths, files)
-      |> inject_into(@source_files_refactors, :source_files, files)
-
-  defp inject_into(configured, modules, key, value) do
-    modules
-    |> Enum.reduce(configured, fn mod, acc ->
-      existing = Keyword.get(acc, mod, [])
-      Keyword.put(acc, mod, Keyword.put(existing, key, value))
-    end)
-  end
-
   defp explain(mod) do
     if function_exported?(mod, :explanation, 0), do: mod.explanation(), else: describe(mod)
   end
@@ -396,11 +382,49 @@ defmodule Mix.Tasks.Refactor do
     System.cmd("git", args, stderr_to_stdout: true) |> handle_git_commit_result(subject)
   end
 
+  defp handle_amend_result({_, 0}),
+    do: "[refactor] --auto: folded post-format pass into last commit" |> Mix.shell().info()
+
+  defp handle_amend_result({output, _}), do: "--auto: amend failed:\n#{output}" |> Mix.raise()
+  defp handle_cached_diff_probe({_, 0}), do: :ok
+
+  defp handle_cached_diff_probe({_, 1}),
+    do:
+      System.cmd(
+        "git",
+        ["commit", "--amend", "--no-verify", "--no-edit"],
+        stderr_to_stdout: true
+      )
+      |> handle_amend_result()
+
+  defp handle_cached_diff_probe({output, _}),
+    do: "--auto: cached-diff probe failed:\n#{output}" |> Mix.raise()
+
+  defp handle_git_commit_result({_output, 0}, subject),
+    do: "[refactor] --auto: committed — #{subject}" |> Mix.shell().info()
+
+  defp handle_git_commit_result({output, _}, _subject),
+    do: "--auto: git commit failed:\n#{output}" |> Mix.raise()
+
   defp indent(text, prefix),
     do:
       text
       |> String.split("\n")
       |> Enum.map_join("\n", &(prefix <> &1))
+
+  defp inject_into(configured, modules, key, value) do
+    modules
+    |> Enum.reduce(configured, fn mod, acc ->
+      existing = Keyword.get(acc, mod, [])
+      Keyword.put(acc, mod, Keyword.put(existing, key, value))
+    end)
+  end
+
+  defp inject_paths_for_cross_file_refactors(configured, files),
+    do:
+      configured
+      |> inject_into(@cross_file_refactors, :paths, files)
+      |> inject_into(@source_files_refactors, :source_files, files)
 
   defp load_config do
     path = Path.join(File.cwd!(), @config_path)
@@ -497,11 +521,21 @@ defmodule Mix.Tasks.Refactor do
       |> String.replace("_", "")
       |> String.downcase()
 
-  defp normalize_module(mod),
+  defp normalize_module(module),
     do:
-      mod
+      module
       |> short_name()
       |> normalize()
+
+  defp parse_config_or_raise({:ok, contents}, path) do
+    {config, _binding} = Code.eval_string(contents, [], file: path)
+    config
+  end
+
+  defp parse_config_or_raise({:error, _}, path),
+    do:
+      "#{@config_path} not found at #{path}. Create one with at least an `inputs:` key (see README)."
+      |> Mix.raise()
 
   defp print_module_step(module, [], _run_opts),
     do: "[#{short_name(module)}]: clear" |> Mix.shell().info()
@@ -745,39 +779,4 @@ defmodule Mix.Tasks.Refactor do
     do: "--auto cannot be combined with --check / --ci (nothing to commit)" |> Mix.raise()
 
   defp validate_run_opts!(_), do: :ok
-
-  defp handle_cached_diff_probe({_, 0}), do: :ok
-
-  defp handle_cached_diff_probe({_, 1}),
-    do:
-      System.cmd(
-        "git",
-        ["commit", "--amend", "--no-verify", "--no-edit"],
-        stderr_to_stdout: true
-      )
-      |> handle_amend_result()
-
-  defp handle_cached_diff_probe({output, _}),
-    do: "--auto: cached-diff probe failed:\n#{output}" |> Mix.raise()
-
-  defp handle_git_commit_result({_output, 0}, subject),
-    do: "[refactor] --auto: committed — #{subject}" |> Mix.shell().info()
-
-  defp handle_git_commit_result({output, _}, _subject),
-    do: "--auto: git commit failed:\n#{output}" |> Mix.raise()
-
-  defp parse_config_or_raise({:ok, contents}, path) do
-    {config, _binding} = Code.eval_string(contents, [], file: path)
-    config
-  end
-
-  defp parse_config_or_raise({:error, _}, path),
-    do:
-      "#{@config_path} not found at #{path}. Create one with at least an `inputs:` key (see README)."
-      |> Mix.raise()
-
-  defp handle_amend_result({_, 0}),
-    do: "[refactor] --auto: folded post-format pass into last commit" |> Mix.shell().info()
-
-  defp handle_amend_result({output, _}), do: "--auto: amend failed:\n#{output}" |> Mix.raise()
 end

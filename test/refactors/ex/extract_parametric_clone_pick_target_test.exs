@@ -3,8 +3,8 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone.PickTargetTest do
 
   alias Number42.Refactors.Ex.ExtractParametricClone
 
-  defp entry(module), do: %{module: module}
   defp entries(modules), do: modules |> Enum.map(&entry/1)
+  defp entry(module), do: %{module: module}
 
   describe "pick_target/1 — :intra (single file ≥ 2 occurrences)" do
     test "3 in Foo, 1 in Bar → :intra Foo" do

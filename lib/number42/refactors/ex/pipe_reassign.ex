@@ -63,10 +63,6 @@ defmodule Number42.Refactors.Ex.PipeReassign do
 
   @impl Number42.Refactors.Refactor
   def description, do: "x = f(x, ...) -> x = x |> f(...)"
-
-  @impl Number42.Refactors.Refactor
-  def priority, do: 200
-
   @impl Number42.Refactors.Refactor
   def explanation do
     """
@@ -80,6 +76,8 @@ defmodule Number42.Refactors.Ex.PipeReassign do
     """
   end
 
+  @impl Number42.Refactors.Refactor
+  def priority, do: 200
   @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
   @impl Number42.Refactors.Refactor
@@ -95,6 +93,10 @@ defmodule Number42.Refactors.Ex.PipeReassign do
     end
   end
 
+  defp apply_patches({:ok, ast}, source),
+    do: build_patches(ast, source) |> patch_or_passthrough(source)
+
+  defp apply_patches({:error, _}, source), do: source
   defp bare_var_name({name, _, ctx}) when is_atom(name) and is_atom(ctx), do: {:ok, name}
   defp bare_var_name(_), do: :error
 
@@ -166,6 +168,8 @@ defmodule Number42.Refactors.Ex.PipeReassign do
   end
 
   defp maybe_patch(_, _), do: []
+  defp patch_or_passthrough([], source), do: source
+  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
   defp pipe_or_operator?(:|>), do: true
 
   defp pipe_or_operator?(name),
@@ -230,13 +234,4 @@ defmodule Number42.Refactors.Ex.PipeReassign do
       _ -> :error
     end
   end
-
-  defp apply_patches({:ok, ast}, source),
-    do: build_patches(ast, source) |> patch_or_passthrough(source)
-
-  defp apply_patches({:error, _}, source), do: source
-
-  defp patch_or_passthrough([], source), do: source
-
-  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
 end

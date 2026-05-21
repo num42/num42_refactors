@@ -43,10 +43,6 @@ defmodule Number42.Refactors.Ex.RedundantBooleanIf do
 
   @impl Number42.Refactors.Refactor
   def description, do: "Rewrite `if cond, do: true, else: false` to the condition itself"
-
-  @impl Number42.Refactors.Refactor
-  def priority, do: 120
-
   @impl Number42.Refactors.Refactor
   def explanation do
     """
@@ -60,10 +56,13 @@ defmodule Number42.Refactors.Ex.RedundantBooleanIf do
   end
 
   @impl Number42.Refactors.Refactor
+  def priority, do: 120
+  @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
   @impl Number42.Refactors.Refactor
   def transform(source, _opts), do: Sourceror.parse_string(source) |> apply_patches(source)
-
+  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
+  defp apply_patches({:error, _}, source), do: source
   defp block_atom({:__block__, _, [atom]}) when is_atom(atom), do: atom
   defp block_atom(atom) when is_atom(atom), do: atom
   defp block_atom(_), do: nil
@@ -101,12 +100,6 @@ defmodule Number42.Refactors.Ex.RedundantBooleanIf do
   end
 
   defp maybe_patch(_), do: []
-
-  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
-
-  defp apply_patches({:error, _}, source), do: source
-
   defp patch_or_passthrough([], source), do: source
-
   defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
 end

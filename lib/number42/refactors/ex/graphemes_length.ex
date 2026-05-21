@@ -35,10 +35,6 @@ defmodule Number42.Refactors.Ex.GraphemesLength do
 
   @impl Number42.Refactors.Refactor
   def description, do: "String.graphemes(s) |> length() -> String.length(s)"
-
-  @impl Number42.Refactors.Refactor
-  def priority, do: 130
-
   @impl Number42.Refactors.Refactor
   def explanation do
     """
@@ -52,10 +48,13 @@ defmodule Number42.Refactors.Ex.GraphemesLength do
   end
 
   @impl Number42.Refactors.Refactor
+  def priority, do: 130
+  @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
-
   @impl Number42.Refactors.Refactor
   def transform(source, _opts), do: Sourceror.parse_string(source) |> apply_patches(source)
+  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
+  defp apply_patches({:error, _}, source), do: source
 
   defp build_patches(ast),
     do:
@@ -63,27 +62,17 @@ defmodule Number42.Refactors.Ex.GraphemesLength do
       |> Macro.prewalker()
       |> Enum.flat_map(&maybe_patch/1)
 
-  # Bare `length(String.graphemes(s))`.
   defp maybe_patch(
          {:length, _, [{{:., _, [{:__aliases__, _, [:String]}, :graphemes]}, _, [s]}]} = node
        ),
        do: [Patch.replace(node, "String.length(#{Sourceror.to_string(s)})")]
 
-  # Bare `Enum.count(String.graphemes(s))`.
   defp maybe_patch(
          {{:., _, [{:__aliases__, _, [:Enum]}, :count]}, _,
           [{{:., _, [{:__aliases__, _, [:String]}, :graphemes]}, _, [s]}]} = node
        ),
        do: [Patch.replace(node, "String.length(#{Sourceror.to_string(s)})")]
 
-  # Pipe form: `... |> String.graphemes() |> length()` (or Enum.count).
-  # The outer pipe is `lhs |> length()`, where `lhs` itself is `inner |>
-  # String.graphemes()`. We rewrite the whole outer pipe to
-  # `inner |> String.length()`.
-  #
-  # NB: pipe stages have NO explicit first argument — `String.graphemes()`
-  # at the AST level is `{{:., _, [String, :graphemes]}, _, []}`, with
-  # an empty arg list. Same for `length()` and `Enum.count()`.
   defp maybe_patch(
          {:|>, _,
           [
@@ -99,20 +88,11 @@ defmodule Number42.Refactors.Ex.GraphemesLength do
   end
 
   defp maybe_patch(_), do: []
-
-  # Recognize the pipe-stage shape of `length()` or `Enum.count()` —
-  # both with no args (the LHS becomes the implicit first arg).
+  defp patch_or_passthrough([], source), do: source
+  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
   defp pipe_counter?({:length, _, []}), do: true
   defp pipe_counter?({:length, _, nil}), do: true
   defp pipe_counter?({{:., _, [{:__aliases__, _, [:Enum]}, :count]}, _, []}), do: true
   defp pipe_counter?({{:., _, [{:__aliases__, _, [:Enum]}, :count]}, _, nil}), do: true
   defp pipe_counter?(_), do: false
-
-  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
-
-  defp apply_patches({:error, _}, source), do: source
-
-  defp patch_or_passthrough([], source), do: source
-
-  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
 end

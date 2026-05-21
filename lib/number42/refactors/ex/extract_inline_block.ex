@@ -62,7 +62,6 @@ defmodule Number42.Refactors.Ex.ExtractInlineBlock do
 
   @impl Number42.Refactors.Refactor
   def description, do: "Extract duplicated function bodies into a shared private helper"
-
   @impl Number42.Refactors.Refactor
   def explanation do
     """
@@ -75,7 +74,6 @@ defmodule Number42.Refactors.Ex.ExtractInlineBlock do
 
   @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
-
   @impl Number42.Refactors.Refactor
   def transform(source, opts) do
     min_mass = Keyword.get(opts, :min_mass, @default_min_mass)
@@ -111,27 +109,181 @@ defmodule Number42.Refactors.Ex.ExtractInlineBlock do
     end
   end
 
-  defp splice_helpers_before_module_end(source, []), do: source
+  defp apply_to_parse_result({:ok, ast}, min_mass, source),
+    do: ast |> apply_to_ast(source, min_mass)
 
-  defp splice_helpers_before_module_end(source, helpers) do
-    addition = helpers |> Enum.join("\n")
-    lines = String.split(source, "\n")
-    {prefix, suffix} = split_at_last_end(lines)
-    (prefix ++ [addition] ++ suffix) |> Enum.join("\n")
+  defp apply_to_parse_result({:error, _}, _min_mass, source), do: source
+
+  defp arg_atoms_of_head({_, _, args}) when is_list(args) do
+    args
+    |> Enum.flat_map(fn
+      {n, _, ctx} when is_atom(n) and is_atom(ctx) -> [n]
+      _ -> []
+    end)
   end
 
-  defp split_at_last_end(lines) do
-    idx =
-      lines
-      |> Enum.with_index()
-      |> Enum.reverse()
-      |> Enum.find_value(fn {line, i} ->
-        if String.trim(line) == "end", do: i, else: nil
+  defp arg_atoms_of_head(_), do: []
+
+  defp arg_names_of({kind, _, [head | _]}) when kind in [:def, :defp] do
+    strip_when(head) |> arg_atoms_of_head()
+  end
+
+  defp args_are_plain_vars?({_name, _, args}) when is_list(args),
+    do: args |> Enum.all?(&plain_var?/1)
+
+  defp args_are_plain_vars?({_name, _, nil}), do: true
+  defp args_are_plain_vars?(_), do: false
+
+  defp arity_of({kind, _, [head | _]}) when kind in [:def, :defp] do
+    strip_when(head) |> arity_of_head()
+  end
+
+  defp arity_of_head({_, _, args}) when is_list(args), do: length(args)
+  defp arity_of_head({_, _, nil}), do: 0
+  defp arity_of_head(_), do: -1
+
+  defp body_hash({_kind, _, [_head, body_kw]}),
+    do:
+      body_kw
+      |> Keyword.values()
+      |> Enum.map(&strip_meta/1)
+      |> rename_vars()
+      |> :erlang.phash2()
+
+  defp body_of({_kind, _, [_head, body_kw]}) do
+    body_kw
+    |> Enum.find_value(fn
+      {{:__block__, _, [:do]}, value} -> value
+      {:do, value} -> value
+      _ -> nil
+    end)
+  end
+
+  defp body_self_contained?(group, available) do
+    group
+    |> Enum.all?(fn clause ->
+      clause_args = MapSet.new(arg_names_of(clause))
+      free = free_vars_of_body(clause, clause_args)
+      free == [] or MapSet.subset?(MapSet.new(free), available)
+    end)
+  end
+
+  defp body_uses_module_attribute?({_kind, _, [_head, body_kw]}),
+    do:
+      body_kw
+      |> Keyword.values()
+      |> Enum.any?(&references_attribute?/1)
+
+  defp clause_callsite_patch(clause, helper_args) do
+    {kind, _, [head | _]} = clause
+    {fn_name, _, _} = strip_when(head)
+    fn_arg_names = arg_names_of(clause)
+    fn_arg_list = fn_arg_names |> Enum.join(", ")
+
+    helper_call_args =
+      helper_args
+      |> Enum.map_join(", ", fn name ->
+        if name in fn_arg_names, do: Atom.to_string(name), else: Atom.to_string(name)
       end)
 
-    case idx do
-      nil -> {lines, []}
-      i -> {lines |> Enum.take(i), lines |> Enum.drop(i)}
+    replacement =
+      "#{kind} #{fn_name}(#{fn_arg_list}) do\n  #{Atom.to_string(@helper_name)}(#{helper_call_args})\nend"
+
+    Sourceror.get_range(clause) |> patch_for_range(replacement)
+  end
+
+  defp clause_mass({_kind, _, [_head, body_kw]}),
+    do: body_kw |> Keyword.values() |> Enum.map(&node_count/1) |> Enum.sum()
+
+  defp def_clause?({kind, _, [_head, body_kw]}) when kind in [:def, :defp] and is_list(body_kw),
+    do: true
+
+  defp def_clause?(_), do: false
+
+  defp free_vars_of_body(clause, available) do
+    body = body_of(clause)
+    free_vars(body, available)
+  end
+
+  defp head_has_guard?({_kind, _, [{:when, _, _} | _]}), do: true
+  defp head_has_guard?(_), do: false
+
+  defp head_is_plain_vars?({_kind, _, [head | _]}) do
+    case strip_when(head) do
+      ^head -> args_are_plain_vars?(head)
+      _ -> false
+    end
+  end
+
+  defp helper_name_taken?(clauses) do
+    clauses |> Enum.any?(fn c -> name_of(c) == @helper_name end)
+  end
+
+  defp indent_body(text) do
+    text
+    |> String.split("\n")
+    |> Enum.map_join("\n", fn line -> "    " <> line end)
+  end
+
+  defp multi_clause_keys(clauses) do
+    clauses
+    |> Enum.group_by(&name_arity/1)
+    |> Enum.filter(fn {_k, list} -> length(list) > 1 end)
+    |> Enum.map(fn {k, _} -> k end)
+    |> MapSet.new()
+  end
+
+  defp name_arity(clause), do: {name_of(clause), arity_of(clause)}
+  defp name_atom_or_nil({name, _, _}) when is_atom(name), do: name
+  defp name_atom_or_nil(_), do: nil
+
+  defp name_of({kind, _, [head | _]}) when kind in [:def, :defp] do
+    strip_when(head) |> name_atom_or_nil()
+  end
+
+  defp node_count(ast) do
+    {_, count} = Macro.prewalk(ast, 0, fn node, acc -> {node, acc + 1} end)
+    count
+  end
+
+  defp patch_for_range(%{end: end_pos, start: start_pos}, replacement),
+    do: %{change: replacement, range: %{end: end_pos, start: start_pos}}
+
+  defp patch_for_range(_, _replacement), do: nil
+  defp patch_or_passthrough(source, []), do: source
+  defp patch_or_passthrough(source, patches), do: Sourceror.patch_string(source, patches)
+  defp plain_var?({:\\, _, _}), do: false
+
+  defp plain_var?({name, _, ctx}) when is_atom(name) and is_atom(ctx) do
+    not underscore?(name)
+  end
+
+  defp plain_var?(_), do: false
+
+  defp plan_for_group(group, first) do
+    arg_names = arg_names_of(first)
+    available = MapSet.new(arg_names)
+
+    cond do
+      not body_self_contained?(group, available) ->
+        []
+
+      true ->
+        helper_args = arg_names
+        helper_body = body_of(first)
+
+        callsite_patches =
+          group
+          |> Enum.map(
+            &clause_callsite_patch(
+              &1,
+              helper_args
+            )
+          )
+          |> Enum.reject(&is_nil/1)
+
+        helper_text = render_helper_text(helper_args, helper_body)
+        [%{callsite_patches: callsite_patches, helper_text: helper_text}]
     end
   end
 
@@ -164,106 +316,6 @@ defmodule Number42.Refactors.Ex.ExtractInlineBlock do
     end
   end
 
-  defp plan_for_group(group, first) do
-    arg_names = arg_names_of(first)
-    available = MapSet.new(arg_names)
-
-    cond do
-      not body_self_contained?(group, available) ->
-        []
-
-      true ->
-        helper_args = arg_names
-        helper_body = body_of(first)
-
-        callsite_patches =
-          group
-          |> Enum.map(
-            &clause_callsite_patch(
-              &1,
-              helper_args
-            )
-          )
-          |> Enum.reject(&is_nil/1)
-
-        helper_text = render_helper_text(helper_args, helper_body)
-        [%{callsite_patches: callsite_patches, helper_text: helper_text}]
-    end
-  end
-
-  defp body_self_contained?(group, available) do
-    group
-    |> Enum.all?(fn clause ->
-      clause_args = MapSet.new(arg_names_of(clause))
-      free = free_vars_of_body(clause, clause_args)
-      free == [] or MapSet.subset?(MapSet.new(free), available)
-    end)
-  end
-
-  defp def_clause?({kind, _, [_head, body_kw]}) when kind in [:def, :defp] and is_list(body_kw),
-    do: true
-
-  defp def_clause?(_), do: false
-
-  defp multi_clause_keys(clauses) do
-    clauses
-    |> Enum.group_by(&name_arity/1)
-    |> Enum.filter(fn {_k, list} -> length(list) > 1 end)
-    |> Enum.map(fn {k, _} -> k end)
-    |> MapSet.new()
-  end
-
-  defp helper_name_taken?(clauses) do
-    clauses |> Enum.any?(fn c -> name_of(c) == @helper_name end)
-  end
-
-  defp name_arity(clause), do: {name_of(clause), arity_of(clause)}
-
-  defp name_of({kind, _, [head | _]}) when kind in [:def, :defp] do
-    strip_when(head) |> name_atom_or_nil()
-  end
-
-  defp arity_of({kind, _, [head | _]}) when kind in [:def, :defp] do
-    strip_when(head) |> arity_of_head()
-  end
-
-  defp arg_names_of({kind, _, [head | _]}) when kind in [:def, :defp] do
-    strip_when(head) |> arg_atoms_of_head()
-  end
-
-  defp strip_when({:when, _, [inner | _]}), do: inner
-  defp strip_when(other), do: other
-
-  defp head_has_guard?({_kind, _, [{:when, _, _} | _]}), do: true
-  defp head_has_guard?(_), do: false
-
-  defp head_is_plain_vars?({_kind, _, [head | _]}) do
-    case strip_when(head) do
-      ^head -> args_are_plain_vars?(head)
-      _ -> false
-    end
-  end
-
-  defp args_are_plain_vars?({_name, _, args}) when is_list(args),
-    do: args |> Enum.all?(&plain_var?/1)
-
-  defp args_are_plain_vars?({_name, _, nil}), do: true
-  defp args_are_plain_vars?(_), do: false
-
-  defp plain_var?({:\\, _, _}), do: false
-
-  defp plain_var?({name, _, ctx}) when is_atom(name) and is_atom(ctx) do
-    not underscore?(name)
-  end
-
-  defp plain_var?(_), do: false
-
-  defp body_uses_module_attribute?({_kind, _, [_head, body_kw]}),
-    do:
-      body_kw
-      |> Keyword.values()
-      |> Enum.any?(&references_attribute?/1)
-
   defp references_attribute?(ast) do
     ast
     |> Macro.prewalker()
@@ -271,48 +323,6 @@ defmodule Number42.Refactors.Ex.ExtractInlineBlock do
       {:@, _, [{name, _, ctx}]} when is_atom(name) and is_atom(ctx) -> true
       _ -> false
     end)
-  end
-
-  defp clause_mass({_kind, _, [_head, body_kw]}),
-    do: body_kw |> Keyword.values() |> Enum.map(&node_count/1) |> Enum.sum()
-
-  defp node_count(ast) do
-    {_, count} = Macro.prewalk(ast, 0, fn node, acc -> {node, acc + 1} end)
-    count
-  end
-
-  defp body_hash({_kind, _, [_head, body_kw]}),
-    do:
-      body_kw
-      |> Keyword.values()
-      |> Enum.map(&strip_meta/1)
-      |> rename_vars()
-      |> :erlang.phash2()
-
-  defp body_of({_kind, _, [_head, body_kw]}) do
-    body_kw
-    |> Enum.find_value(fn
-      {{:__block__, _, [:do]}, value} -> value
-      {:do, value} -> value
-      _ -> nil
-    end)
-  end
-
-  defp free_vars_of_body(clause, available) do
-    body = body_of(clause)
-    free_vars(body, available)
-  end
-
-  defp strip_meta(ast) do
-    Macro.prewalk(ast, fn
-      {form, _meta, args} -> {form, [], args}
-      other -> other
-    end)
-  end
-
-  defp rename_vars(ast) do
-    {result, _} = Macro.prewalk(ast, %{}, &rename_var_node/2)
-    result
   end
 
   defp rename_var_node({name, [], ctx} = node, acc)
@@ -332,22 +342,9 @@ defmodule Number42.Refactors.Ex.ExtractInlineBlock do
 
   defp rename_var_node(node, acc), do: {node, acc}
 
-  defp clause_callsite_patch(clause, helper_args) do
-    {kind, _, [head | _]} = clause
-    {fn_name, _, _} = strip_when(head)
-    fn_arg_names = arg_names_of(clause)
-    fn_arg_list = fn_arg_names |> Enum.join(", ")
-
-    helper_call_args =
-      helper_args
-      |> Enum.map_join(", ", fn name ->
-        if name in fn_arg_names, do: Atom.to_string(name), else: Atom.to_string(name)
-      end)
-
-    replacement =
-      "#{kind} #{fn_name}(#{fn_arg_list}) do\n  #{Atom.to_string(@helper_name)}(#{helper_call_args})\nend"
-
-    Sourceror.get_range(clause) |> patch_for_range(replacement)
+  defp rename_vars(ast) do
+    {result, _} = Macro.prewalk(ast, %{}, &rename_var_node/2)
+    result
   end
 
   defp render_helper_text(helper_args, helper_body) do
@@ -359,39 +356,37 @@ defmodule Number42.Refactors.Ex.ExtractInlineBlock do
       "\n  end"
   end
 
-  defp indent_body(text) do
-    text
-    |> String.split("\n")
-    |> Enum.map_join("\n", fn line -> "    " <> line end)
+  defp splice_helpers_before_module_end(source, []), do: source
+
+  defp splice_helpers_before_module_end(source, helpers) do
+    addition = helpers |> Enum.join("\n")
+    lines = String.split(source, "\n")
+    {prefix, suffix} = split_at_last_end(lines)
+    (prefix ++ [addition] ++ suffix) |> Enum.join("\n")
   end
 
-  defp patch_or_passthrough(source, []), do: source
-  defp patch_or_passthrough(source, patches), do: Sourceror.patch_string(source, patches)
+  defp split_at_last_end(lines) do
+    idx =
+      lines
+      |> Enum.with_index()
+      |> Enum.reverse()
+      |> Enum.find_value(fn {line, i} ->
+        if String.trim(line) == "end", do: i, else: nil
+      end)
 
-  defp apply_to_parse_result({:ok, ast}, min_mass, source),
-    do: ast |> apply_to_ast(source, min_mass)
+    case idx do
+      nil -> {lines, []}
+      i -> {lines |> Enum.take(i), lines |> Enum.drop(i)}
+    end
+  end
 
-  defp apply_to_parse_result({:error, _}, _min_mass, source), do: source
-
-  defp name_atom_or_nil({name, _, _}) when is_atom(name), do: name
-  defp name_atom_or_nil(_), do: nil
-
-  defp arity_of_head({_, _, args}) when is_list(args), do: length(args)
-  defp arity_of_head({_, _, nil}), do: 0
-  defp arity_of_head(_), do: -1
-
-  defp arg_atoms_of_head({_, _, args}) when is_list(args) do
-    args
-    |> Enum.flat_map(fn
-      {n, _, ctx} when is_atom(n) and is_atom(ctx) -> [n]
-      _ -> []
+  defp strip_meta(ast) do
+    Macro.prewalk(ast, fn
+      {form, _meta, args} -> {form, [], args}
+      other -> other
     end)
   end
 
-  defp arg_atoms_of_head(_), do: []
-
-  defp patch_for_range(%{end: end_pos, start: start_pos}, replacement),
-    do: %{change: replacement, range: %{end: end_pos, start: start_pos}}
-
-  defp patch_for_range(_, _replacement), do: nil
+  defp strip_when({:when, _, [inner | _]}), do: inner
+  defp strip_when(other), do: other
 end

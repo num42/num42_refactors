@@ -57,10 +57,6 @@ defmodule Number42.Refactors.Ex.EnumReduceToSum do
 
   @impl Number42.Refactors.Refactor
   def description, do: "Enum.reduce/3 summing lambdas -> Enum.sum/1 or Enum.sum_by/2"
-
-  @impl Number42.Refactors.Refactor
-  def priority, do: 150
-
   @impl Number42.Refactors.Refactor
   def explanation do
     """
@@ -74,9 +70,13 @@ defmodule Number42.Refactors.Ex.EnumReduceToSum do
   end
 
   @impl Number42.Refactors.Refactor
+  def priority, do: 150
+  @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
   @impl Number42.Refactors.Refactor
   def transform(source, _opts), do: Sourceror.parse_string(source) |> apply_patches(source)
+  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
+  defp apply_patches({:error, _}, source), do: source
 
   defp bare_var_match?({name, _, ctx} = _arg_pat, {name2, _, ctx2} = _projection)
        when is_atom(name) and is_atom(ctx) and is_atom(name2) and is_atom(ctx2),
@@ -139,6 +139,8 @@ defmodule Number42.Refactors.Ex.EnumReduceToSum do
   end
 
   defp maybe_patch(_), do: []
+  defp patch_or_passthrough([], source), do: source
+  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
 
   defp pattern_introduces_referenced_name?(pat, projection),
     do:
@@ -177,12 +179,4 @@ defmodule Number42.Refactors.Ex.EnumReduceToSum do
   defp zero?(0), do: true
   defp zero?({:__block__, _, [0]}), do: true
   defp zero?(_), do: false
-
-  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
-
-  defp apply_patches({:error, _}, source), do: source
-
-  defp patch_or_passthrough([], source), do: source
-
-  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
 end

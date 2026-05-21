@@ -42,10 +42,6 @@ defmodule Number42.Refactors.Ex.UseMapJoin do
 
   @impl Number42.Refactors.Refactor
   def description, do: "Enum.map(coll, fun) |> Enum.join(sep) -> Enum.map_join(coll, sep, fun)"
-
-  @impl Number42.Refactors.Refactor
-  def priority, do: 130
-
   @impl Number42.Refactors.Refactor
   def explanation do
     """
@@ -59,10 +55,16 @@ defmodule Number42.Refactors.Ex.UseMapJoin do
   end
 
   @impl Number42.Refactors.Refactor
+  def priority, do: 130
+  @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
-
   @impl Number42.Refactors.Refactor
   def transform(source, _opts), do: Sourceror.parse_string(source) |> apply_patches(source)
+
+  defp apply_patches({:ok, ast}, source),
+    do: build_patches(ast, source) |> patch_or_passthrough(source)
+
+  defp apply_patches({:error, _}, source), do: source
 
   defp build_patches(ast, source),
     do:
@@ -71,15 +73,6 @@ defmodule Number42.Refactors.Ex.UseMapJoin do
       |> Enum.flat_map(&maybe_patch(&1, source))
       |> drop_enclosing_patches()
 
-  # Nested `Enum.map(...) |> Enum.join(...)` pipes generate one patch
-  # for the outer chain and one for the inner one — both written to
-  # the same source. Submitting both to `Sourceror.patch_string/2`
-  # produces overlapping ranges; the outer patch silently swallows
-  # bytes the inner one already consumed, corrupting whatever follows
-  # the outer pipe (typically a comment on the next line). Keep the
-  # innermost patch and drop any patch whose range strictly encloses
-  # another — the engine's fixpoint loop will pick up the outer in a
-  # later pass once the inner is rewritten.
   defp drop_enclosing_patches(patches) do
     patches
     |> Enum.reject(fn p ->
@@ -92,11 +85,6 @@ defmodule Number42.Refactors.Ex.UseMapJoin do
       pos_le(outer.start, inner.start) and pos_le(inner.end, outer.end) and
         not (pos_eq(outer.start, inner.start) and pos_eq(outer.end, inner.end))
 
-  defp pos_le(a, b), do: {a[:line], a[:column]} <= {b[:line], b[:column]}
-
-  defp pos_eq(a, b), do: a[:line] == b[:line] and a[:column] == b[:column]
-
-  # Nested form: `Enum.join(Enum.map(coll, fun), sep)`.
   defp maybe_patch(
          {{:., _, [{:__aliases__, _, [:Enum]}, :join]}, _,
           [
@@ -107,9 +95,6 @@ defmodule Number42.Refactors.Ex.UseMapJoin do
        ),
        do: node |> rewrite(coll, fun, sep, source)
 
-  # Pipe form: `coll |> Enum.map(fun) |> Enum.join(sep)`.
-  # Sourceror keeps `|>` as a node — no automatic expansion to the
-  # nested form, so we have to match the chain shape directly.
   defp maybe_patch(
          {:|>, _,
           [
@@ -125,6 +110,10 @@ defmodule Number42.Refactors.Ex.UseMapJoin do
        do: node |> rewrite(coll, fun, sep, source)
 
   defp maybe_patch(_, _), do: []
+  defp patch_or_passthrough([], source), do: source
+  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
+  defp pos_eq(a, b), do: a[:line] == b[:line] and a[:column] == b[:column]
+  defp pos_le(a, b), do: {a[:line], a[:column]} <= {b[:line], b[:column]}
 
   defp rewrite(node, coll, fun, sep, source) do
     coll_text = slice_node(source, coll)
@@ -139,13 +128,4 @@ defmodule Number42.Refactors.Ex.UseMapJoin do
         []
     end
   end
-
-  defp apply_patches({:ok, ast}, source),
-    do: build_patches(ast, source) |> patch_or_passthrough(source)
-
-  defp apply_patches({:error, _}, source), do: source
-
-  defp patch_or_passthrough([], source), do: source
-
-  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
 end

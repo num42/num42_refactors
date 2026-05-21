@@ -57,8 +57,11 @@ defmodule Number42.Refactors.Ex.AliasOrder do
     |> Enum.filter(&(length(&1) >= 2))
   end
 
-  defp blank_line_after?(meta), do: Keyword.get(meta, :end_of_expression) |> has_blank_line?()
+  defp apply_patches({:ok, ast}, source),
+    do: build_patches(ast, source) |> patch_or_passthrough(source)
 
+  defp apply_patches({:error, _}, source), do: source
+  defp blank_line_after?(meta), do: Keyword.get(meta, :end_of_expression) |> has_blank_line?()
   defp build_patches(ast, source), do: module_body_exprs(ast) |> group_patches_or_skip(source)
 
   defp build_replace_patch(group, sorted, source) do
@@ -116,6 +119,14 @@ defmodule Number42.Refactors.Ex.AliasOrder do
     end
   end
 
+  defp group_patches_or_skip(nil, _source), do: []
+
+  defp group_patches_or_skip(exprs, source),
+    do: exprs |> alias_groups() |> Enum.flat_map(&group_patch(&1, source))
+
+  defp has_blank_line?(nil), do: false
+  defp has_blank_line?(eoe), do: Keyword.get(eoe, :newlines, 1) >= 2
+
   defp leading_indent(source, line) do
     source
     |> String.split("\n")
@@ -156,6 +167,8 @@ defmodule Number42.Refactors.Ex.AliasOrder do
     end
   end
 
+  defp patch_or_passthrough([], source), do: source
+  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
   defp path_atoms({:__aliases__, _, segments}), do: segments
   defp path_atoms({{:., _, [{:__aliases__, _, segments}, :{}]}, _, _}), do: segments
   defp path_atoms(_), do: []
@@ -167,22 +180,4 @@ defmodule Number42.Refactors.Ex.AliasOrder do
       |> String.downcase()
 
   defp sort_key({:alias, _, [arg | _]}), do: arg |> path_atoms() |> path_string()
-
-  defp apply_patches({:ok, ast}, source),
-    do: build_patches(ast, source) |> patch_or_passthrough(source)
-
-  defp apply_patches({:error, _}, source), do: source
-
-  defp has_blank_line?(nil), do: false
-
-  defp has_blank_line?(eoe), do: Keyword.get(eoe, :newlines, 1) >= 2
-
-  defp group_patches_or_skip(nil, _source), do: []
-
-  defp group_patches_or_skip(exprs, source),
-    do: exprs |> alias_groups() |> Enum.flat_map(&group_patch(&1, source))
-
-  defp patch_or_passthrough([], source), do: source
-
-  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
 end

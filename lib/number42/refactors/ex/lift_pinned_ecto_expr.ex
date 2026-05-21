@@ -79,9 +79,6 @@ defmodule Number42.Refactors.Ex.LiftPinnedEctoExpr do
     do: "Pinned non-var expr in Ecto query -> hoist to a named binding"
 
   @impl Number42.Refactors.Refactor
-  def priority, do: 120
-
-  @impl Number42.Refactors.Refactor
   def explanation do
     """
     Ecto compiles and caches each query by its AST shape — a pinned
@@ -93,10 +90,57 @@ defmodule Number42.Refactors.Ex.LiftPinnedEctoExpr do
   end
 
   @impl Number42.Refactors.Refactor
+  def priority, do: 120
+  @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
+
+  def synth_binding_name(expr) do
+    case expr do
+      {{:., _, [{:__aliases__, _, _}, fname]}, _, args} when is_atom(fname) ->
+        compose(Atom.to_string(fname), first_var_arg(args))
+
+      # Defensive: only really a call if `liftable_call?` passed.
+      # `:__block__` is a Sourceror wrapper, not a name; we shouldn't
+      # see it here given the lift gate, but fall through cleanly.
+      {:__block__, _, _} ->
+        "pinned_binding"
+
+      {fname, _, args} when is_atom(fname) and is_list(args) ->
+        compose(Atom.to_string(fname), first_var_arg(args))
+
+      {{:., _, [{base_name, _, base_ctx}, field]}, _, []}
+      when is_atom(base_name) and is_atom(base_ctx) and is_atom(field) ->
+        "#{base_name}_#{field}_binding"
+
+      {:@, _, [{attr_name, _, _}]} when is_atom(attr_name) ->
+        "#{attr_name}_binding"
+
+      _ ->
+        "pinned_binding"
+    end
+  end
 
   @impl Number42.Refactors.Refactor
   def transform(source, _opts), do: Sourceror.parse_string(source) |> apply_patches(source)
+
+  defp apply_patches({:ok, ast}, source),
+    do: build_patches(ast, source) |> patch_or_passthrough(source)
+
+  defp apply_patches({:error, _}, source), do: source
+
+  defp block_groups_from_keyword(keyword) do
+    keyword
+    |> Enum.flat_map(fn
+      {{:__block__, _, [k]}, body} when k in [:do, :else, :rescue, :catch, :after] ->
+        [{:block, body_to_exprs(body)}]
+
+      {k, body} when k in [:do, :else, :rescue, :catch, :after] ->
+        [{:block, body_to_exprs(body)}]
+
+      _ ->
+        []
+    end)
+  end
 
   defp build_patches(ast, source),
     do:
@@ -105,19 +149,55 @@ defmodule Number42.Refactors.Ex.LiftPinnedEctoExpr do
       |> Enum.take(1)
       |> Enum.flat_map(&emit_patches(&1, source))
 
-  # Walks the AST, tracking:
-  #   - ancestors: list of ancestor nodes from outer to inner (only
-  #     ancestors that introduced a "block context" — i.e. a node we
-  #     could be a direct child statement of). Each entry is a tuple
-  #     `{:block, exprs}` or `{:host_stmt, stmt}`. We only need the
-  #     innermost host statement to decide insertion.
-  #   - in_ecto?: whether some ancestor on the path is an Ecto-macro
-  #     call.
-  #
-  # Returns extraction descriptors `%{pin_node, host_stmt}`.
+  defp child_groups_for({:defmodule, _, [_name, [{_do, body}]]}, in_ecto?),
+    do: {[{:block, body_to_exprs(body)}], in_ecto?}
+
+  defp child_groups_for({def_kind, _, [_head, [{_do, body}]]}, in_ecto?)
+       when def_kind?(def_kind) do
+    {[{:block, body_to_exprs(body)}], in_ecto?}
+  end
+
+  defp child_groups_for({:with, _, args}, in_ecto?) when is_list(args) and args != [] do
+    {clauses, kw} =
+      case split_do_block_keyword(args) do
+        {head, kw} -> {head, kw}
+        :no_kw -> {args, []}
+      end
+
+    {[{:with_clauses, clauses} | block_groups_from_keyword(kw)], in_ecto?}
+  end
+
+  defp child_groups_for({:->, _, [args, body]}, in_ecto?),
+    do: {[{:transparent, args}, {:block, body_to_exprs(body)}], in_ecto?}
+
+  defp child_groups_for({:fn, _, clauses}, in_ecto?), do: {[{:transparent, clauses}], in_ecto?}
+
+  defp child_groups_for({{:., _, _} = dot, _, args}, in_ecto?),
+    do:
+      split_do_block_keyword(args)
+      |> child_groups_with_or_without_blocks(args, dot, in_ecto?)
+
+  defp child_groups_for({_call, _, args}, in_ecto?) when is_list(args) do
+    split_do_block_keyword(args) |> child_groups_with_or_without_blocks(args, in_ecto?)
+  end
+
+  defp child_groups_for(_, in_ecto?), do: {[], in_ecto?}
+
+  defp child_groups_with_or_without_blocks({head, kw}, _args, in_ecto?),
+    do: {[{:transparent, head} | block_groups_from_keyword(kw)], in_ecto?}
+
+  defp child_groups_with_or_without_blocks(:no_kw, args, in_ecto?),
+    do: {[{:transparent, args}], in_ecto?}
+
+  defp child_groups_with_or_without_blocks({head, kw}, _args, dot, in_ecto?),
+    do: {[{:transparent, [dot | head]} | block_groups_from_keyword(kw)], in_ecto?}
+
+  defp child_groups_with_or_without_blocks(:no_kw, args, dot, in_ecto?),
+    do: {[{:transparent, [dot | args]}], in_ecto?}
+
   defp collect_extractions(node, host_stack, in_ecto?) do
     cond do
-      pin_to_lift?(node) and in_ecto? and host_stack != [] ->
+      pinned_ecto_expr_to_lift?(node) and in_ecto? and host_stack != [] ->
         {kind, stmt} = hd(host_stack)
         [%{host_kind: kind, host_stmt: stmt, pin_node: node}]
 
@@ -126,8 +206,9 @@ defmodule Number42.Refactors.Ex.LiftPinnedEctoExpr do
     end
   end
 
-  # Descend into a node's children, updating host_stack and in_ecto?
-  # based on the node's shape.
+  defp compose(callee, nil), do: "#{callee}_binding"
+  defp compose(callee, var), do: "#{callee}_#{var}_binding"
+
   defp descend({_, _, _} = node, host_stack, in_ecto?) do
     new_in_ecto = in_ecto? or ecto_macro_call?(node)
     {child_groups, child_in_ecto} = child_groups_for(node, new_in_ecto)
@@ -149,81 +230,6 @@ defmodule Number42.Refactors.Ex.LiftPinnedEctoExpr do
 
   defp descend(_leaf, _host_stack, _in_ecto?), do: []
 
-  # When we walk into a list of expressions that *is* a block (i.e.
-  # each expression is its own statement that could host an
-  # insertion), we update the host_stack with the current statement.
-  defp walk_children(exprs, :block, host_stack, in_ecto?),
-    do:
-      exprs |> Enum.flat_map(&collect_extractions(&1, [{:block_stmt, &1} | host_stack], in_ecto?))
-
-  # `with`-clause sequence: each clause anchors as its own host. A pin
-  # in the RHS of `pat <- expr` (or in `pat = expr`, or in a bare expr
-  # clause) attaches to the clause node — the patch inserts a `name =
-  # expr,` clause before it.
-  defp walk_children(clauses, :with_clauses, host_stack, in_ecto?),
-    do:
-      clauses
-      |> Enum.flat_map(&collect_extractions(&1, [{:with_clause, &1} | host_stack], in_ecto?))
-
-  defp walk_children(exprs, :transparent, host_stack, in_ecto?),
-    do: exprs |> Enum.flat_map(&collect_extractions(&1, host_stack, in_ecto?))
-
-  # Returns `{groups, in_ecto?}` where each group is `{context,
-  # exprs_list}`. `context` is `:block` if direct children form a
-  # statement block, `:transparent` otherwise.
-  defp child_groups_for({:defmodule, _, [_name, [{_do, body}]]}, in_ecto?),
-    do: {[{:block, body_to_exprs(body)}], in_ecto?}
-
-  defp child_groups_for({def_kind, _, [_head, [{_do, body}]]}, in_ecto?)
-       when def_kind?(def_kind) do
-    {[{:block, body_to_exprs(body)}], in_ecto?}
-  end
-
-  # `with` is special: its leading arguments are the clause sequence
-  # (each `pat <- expr`, `pat = expr`, or bare expr), and the trailing
-  # keyword list holds `do:` (and optional `else:`). Each clause is
-  # its own statement-like host: a binding lifted out of a clause RHS
-  # gets inserted as a `name = expr` clause directly before it (legal
-  # `with` syntax).
-  defp child_groups_for({:with, _, args}, in_ecto?) when is_list(args) and args != [] do
-    {clauses, kw} =
-      case split_do_block_keyword(args) do
-        {head, kw} -> {head, kw}
-        :no_kw -> {args, []}
-      end
-
-    {[{:with_clauses, clauses} | block_groups_from_keyword(kw)], in_ecto?}
-  end
-
-  defp child_groups_for({:->, _, [args, body]}, in_ecto?),
-    do: {[{:transparent, args}, {:block, body_to_exprs(body)}], in_ecto?}
-
-  defp child_groups_for({:fn, _, clauses}, in_ecto?), do: {[{:transparent, clauses}], in_ecto?}
-
-  defp child_groups_for({{:., _, _} = dot, _, args}, in_ecto?),
-    do:
-      split_do_block_keyword(args)
-      |> child_groups_with_or_without_blocks(args, dot, in_ecto?)
-
-  # Generic call shape. If the last argument is a keyword list with a
-  # `:do`-style key, treat the do-body (and any sibling block keys) as
-  # statement blocks. This catches `if`/`unless`/`case`/`cond`/`with`/
-  # `for`/`receive`/`try` AND any user-defined DSL macro with a do-block
-  # (`describe`, `test`, `setup`, custom macros) without needing a
-  # whitelist.
-  defp child_groups_for({_call, _, args}, in_ecto?) when is_list(args) do
-    split_do_block_keyword(args) |> child_groups_with_or_without_blocks(args, in_ecto?)
-  end
-
-  defp child_groups_for(_, in_ecto?), do: {[], in_ecto?}
-
-  defp split_do_block_keyword([]), do: :no_kw
-
-  defp split_do_block_keyword(args) do
-    {head, [last]} = args |> Enum.split(length(args) - 1)
-    if do_block_kw?(last), do: {head, last}, else: :no_kw
-  end
-
   defp do_block_kw?(kw) when is_list(kw) do
     kw
     |> Enum.any?(fn
@@ -235,44 +241,39 @@ defmodule Number42.Refactors.Ex.LiftPinnedEctoExpr do
 
   defp do_block_kw?(_), do: false
 
-  defp block_groups_from_keyword(keyword) do
-    keyword
-    |> Enum.flat_map(fn
-      {{:__block__, _, [k]}, body} when k in [:do, :else, :rescue, :catch, :after] ->
-        [{:block, body_to_exprs(body)}]
+  defp ecto_macro_call?({name, _, args}) when is_atom(name) and is_list(args) do
+    name in @ecto_macros
+  end
 
-      {k, body} when k in [:do, :else, :rescue, :catch, :after] ->
-        [{:block, body_to_exprs(body)}]
+  defp ecto_macro_call?({{:., _, [{:__aliases__, _, mod_segments}, fname]}, _, args})
+       when is_atom(fname) and is_list(args) do
+    fname in @ecto_macros and List.last(mod_segments) == :Query
+  end
+
+  defp ecto_macro_call?(_), do: false
+
+  defp emit_patches(%{host_kind: host_kind, host_stmt: host_stmt, pin_node: pin_node}, source) do
+    {:^, _, [pinned_expr]} = pin_node
+
+    base = synth_binding_name(pinned_expr)
+    binding_name = uniquify(base, host_stmt)
+
+    slice_node(source, pinned_expr)
+    |> replace_and_insert_patches_or_skip(binding_name, host_kind, host_stmt, pin_node)
+  end
+
+  defp first_var_arg(args) do
+    args
+    |> Enum.find_value(fn
+      {name, _, ctx} when is_atom(name) and is_atom(ctx) ->
+        string = Atom.to_string(name)
+        if String.starts_with?(string, "_"), do: nil, else: name
 
       _ ->
-        []
+        nil
     end)
   end
 
-  # Only function calls — local `f(args)` or remote `Mod.f(args)` —
-  # are lifted. Everything else stays:
-  #
-  #   - bare var (`^foo`) — already cache-stable
-  #   - dotted access (`^x.y`, `^x.y.z`) — cache-stable; cheap to read;
-  #     no compile-time recompile triggered
-  #   - module attribute (`^@attr`) — compile-time constant
-  #   - literal (`^"foo"`, `^123`, `^:atom`) — constant
-  #   - interpolated string (`^"...#{x}..."`) — parses as `<<>>`,
-  #     pathological output if lifted; conservative skip
-  #   - operators (`^x + 1`) — niche, leave to author
-  #
-  # Lifting is only valuable when the pinned expr is an actual call
-  # whose result we want to name; the rest is noise.
-  defp pin_to_lift?({:^, _, [arg]}), do: liftable_call?(arg)
-  defp pin_to_lift?(_), do: false
-
-  # Local call: `f(args)` where `f` is a real user-callable name.
-  # Operator-like names (`||`, `&&`, `++`, `<>`, ...) are explicitly
-  # rejected — synthesising a binding name from `||` would emit
-  # `||_arg_binding`, not a valid identifier. The set covers every
-  # operator atom that Sourceror produces for an infix/prefix operator
-  # node (mirrors `pipe_unsafe_op?/1` plus the obvious arithmetic /
-  # comparison operators).
   defp liftable_call?({fname, _, args})
        when is_atom(fname) and is_list(args) do
     fname not in [
@@ -310,130 +311,15 @@ defmodule Number42.Refactors.Ex.LiftPinnedEctoExpr do
     ]
   end
 
-  # Remote call: `Mod.f(args)` (with at least one segment) — `args` is
-  # a list (call form), not `[]` plus dot (which would be no-arg dotted
-  # access; that goes via the dot-access shape and isn't a call).
   defp liftable_call?({{:., _, [{:__aliases__, _, _}, fname]}, _, args})
        when is_atom(fname) and is_list(args),
        do: true
 
   defp liftable_call?(_), do: false
-
-  defp ecto_macro_call?({name, _, args}) when is_atom(name) and is_list(args) do
-    name in @ecto_macros
-  end
-
-  defp ecto_macro_call?({{:., _, [{:__aliases__, _, mod_segments}, fname]}, _, args})
-       when is_atom(fname) and is_list(args) do
-    fname in @ecto_macros and List.last(mod_segments) == :Query
-  end
-
-  defp ecto_macro_call?(_), do: false
-
-  defp emit_patches(%{host_kind: host_kind, host_stmt: host_stmt, pin_node: pin_node}, source) do
-    {:^, _, [pinned_expr]} = pin_node
-
-    base = synth_binding_name(pinned_expr)
-    binding_name = uniquify(base, host_stmt)
-
-    slice_node(source, pinned_expr)
-    |> replace_and_insert_patches_or_skip(binding_name, host_kind, host_stmt, pin_node)
-  end
-
-  defp replacement_range(range),
-    do: %{
-      end: [line: range.end[:line], column: range.end[:column]],
-      start: [line: range.start[:line], column: range.start[:column]]
-    }
-
-  # Produces a readable hint for the binding. Order of preference:
-  #
-  #   1. local call `f(arg)` with bare-var arg → `f_<arg>_binding`
-  #      (`Enum.map(tokens_to_expire, ...)` → `map_tokens_to_expire_binding`)
-  #   2. remote call `Mod.f(arg)` with bare-var arg → `f_<arg>_binding`
-  #   3. local/remote call without bare-var arg → `f_binding`
-  #   4. dotted access `x.y` → `x_y_binding`
-  #   5. module attr `@attr` → `attr_binding`
-  #   6. anything else → `pinned_binding`
-  def synth_binding_name(expr) do
-    case expr do
-      {{:., _, [{:__aliases__, _, _}, fname]}, _, args} when is_atom(fname) ->
-        compose(Atom.to_string(fname), first_var_arg(args))
-
-      # Defensive: only really a call if `liftable_call?` passed.
-      # `:__block__` is a Sourceror wrapper, not a name; we shouldn't
-      # see it here given the lift gate, but fall through cleanly.
-      {:__block__, _, _} ->
-        "pinned_binding"
-
-      {fname, _, args} when is_atom(fname) and is_list(args) ->
-        compose(Atom.to_string(fname), first_var_arg(args))
-
-      {{:., _, [{base_name, _, base_ctx}, field]}, _, []}
-      when is_atom(base_name) and is_atom(base_ctx) and is_atom(field) ->
-        "#{base_name}_#{field}_binding"
-
-      {:@, _, [{attr_name, _, _}]} when is_atom(attr_name) ->
-        "#{attr_name}_binding"
-
-      _ ->
-        "pinned_binding"
-    end
-  end
-
-  defp first_var_arg(args) do
-    args
-    |> Enum.find_value(fn
-      {name, _, ctx} when is_atom(name) and is_atom(ctx) ->
-        string = Atom.to_string(name)
-        if String.starts_with?(string, "_"), do: nil, else: name
-
-      _ ->
-        nil
-    end)
-  end
-
-  defp compose(callee, nil), do: "#{callee}_binding"
-  defp compose(callee, var), do: "#{callee}_#{var}_binding"
-
-  defp uniquify(base, host_stmt) do
-    used =
-      host_stmt
-      |> Macro.prewalker()
-      |> Enum.flat_map(fn
-        {name, _, ctx} when is_atom(name) and is_atom(ctx) -> [Atom.to_string(name)]
-        _ -> []
-      end)
-      |> MapSet.new()
-
-    if MapSet.member?(used, base) do
-      2
-      |> Stream.iterate(&(&1 + 1))
-      |> Enum.find_value(fn n ->
-        candidate = "#{base}_#{n}"
-        if MapSet.member?(used, candidate), do: nil, else: candidate
-      end)
-    else
-      base
-    end
-  end
-
-  defp apply_patches({:ok, ast}, source),
-    do: build_patches(ast, source) |> patch_or_passthrough(source)
-
-  defp apply_patches({:error, _}, source), do: source
-
-  defp child_groups_with_or_without_blocks({head, kw}, _args, dot, in_ecto?),
-    do: {[{:transparent, [dot | head]} | block_groups_from_keyword(kw)], in_ecto?}
-
-  defp child_groups_with_or_without_blocks(:no_kw, args, dot, in_ecto?),
-    do: {[{:transparent, [dot | args]}], in_ecto?}
-
-  defp child_groups_with_or_without_blocks({head, kw}, _args, in_ecto?),
-    do: {[{:transparent, head} | block_groups_from_keyword(kw)], in_ecto?}
-
-  defp child_groups_with_or_without_blocks(:no_kw, args, in_ecto?),
-    do: {[{:transparent, args}], in_ecto?}
+  defp patch_or_passthrough([], source), do: source
+  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
+  defp pinned_ecto_expr_to_lift?({:^, _, [arg]}), do: liftable_call?(arg)
+  defp pinned_ecto_expr_to_lift?(_), do: false
 
   defp replace_and_insert_patches_or_skip(
          {:ok, expr_text},
@@ -482,7 +368,50 @@ defmodule Number42.Refactors.Ex.LiftPinnedEctoExpr do
        ),
        do: []
 
-  defp patch_or_passthrough([], source), do: source
+  defp replacement_range(range),
+    do: %{
+      end: [line: range.end[:line], column: range.end[:column]],
+      start: [line: range.start[:line], column: range.start[:column]]
+    }
 
-  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
+  defp split_do_block_keyword([]), do: :no_kw
+
+  defp split_do_block_keyword(args) do
+    {head, [last]} = args |> Enum.split(length(args) - 1)
+    if do_block_kw?(last), do: {head, last}, else: :no_kw
+  end
+
+  defp uniquify(base, host_stmt) do
+    used =
+      host_stmt
+      |> Macro.prewalker()
+      |> Enum.flat_map(fn
+        {name, _, ctx} when is_atom(name) and is_atom(ctx) -> [Atom.to_string(name)]
+        _ -> []
+      end)
+      |> MapSet.new()
+
+    if MapSet.member?(used, base) do
+      2
+      |> Stream.iterate(&(&1 + 1))
+      |> Enum.find_value(fn n ->
+        candidate = "#{base}_#{n}"
+        if MapSet.member?(used, candidate), do: nil, else: candidate
+      end)
+    else
+      base
+    end
+  end
+
+  defp walk_children(exprs, :block, host_stack, in_ecto?),
+    do:
+      exprs |> Enum.flat_map(&collect_extractions(&1, [{:block_stmt, &1} | host_stack], in_ecto?))
+
+  defp walk_children(clauses, :with_clauses, host_stack, in_ecto?),
+    do:
+      clauses
+      |> Enum.flat_map(&collect_extractions(&1, [{:with_clause, &1} | host_stack], in_ecto?))
+
+  defp walk_children(exprs, :transparent, host_stack, in_ecto?),
+    do: exprs |> Enum.flat_map(&collect_extractions(&1, host_stack, in_ecto?))
 end

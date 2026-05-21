@@ -64,10 +64,6 @@ defmodule Number42.Refactors.Ex.TryRescueWithSafeAlternative do
 
   @impl Number42.Refactors.Refactor
   def description, do: "try/rescue around Map.fetch!/Keyword.fetch! -> .get(..., default)"
-
-  @impl Number42.Refactors.Refactor
-  def priority, do: 120
-
   @impl Number42.Refactors.Refactor
   def explanation do
     """
@@ -82,9 +78,13 @@ defmodule Number42.Refactors.Ex.TryRescueWithSafeAlternative do
   end
 
   @impl Number42.Refactors.Refactor
+  def priority, do: 120
+  @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
   @impl Number42.Refactors.Refactor
   def transform(source, _opts), do: Sourceror.parse_string(source) |> apply_patches(source)
+  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
+  defp apply_patches({:error, _}, source), do: source
 
   defp build_patches(ast),
     do:
@@ -132,6 +132,8 @@ defmodule Number42.Refactors.Ex.TryRescueWithSafeAlternative do
   end
 
   defp maybe_patch(_), do: []
+  defp patch_or_passthrough([], source), do: source
+  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
 
   defp raising_lookup({{:., _, [{:__aliases__, _, [mod]}, fun]}, _, args})
        when is_list(args) and length(args) == 2 do
@@ -170,12 +172,4 @@ defmodule Number42.Refactors.Ex.TryRescueWithSafeAlternative do
   end
 
   defp wildcard_pattern?(_), do: false
-
-  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
-
-  defp apply_patches({:error, _}, source), do: source
-
-  defp patch_or_passthrough([], source), do: source
-
-  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
 end

@@ -53,10 +53,6 @@ defmodule Number42.Refactors.Ex.FlatMapToFilter do
 
   @impl Number42.Refactors.Refactor
   def description, do: "Enum.flat_map(coll, fn x -> if c, do: [x], else: [] end) -> Enum.filter"
-
-  @impl Number42.Refactors.Refactor
-  def priority, do: 150
-
   @impl Number42.Refactors.Refactor
   def explanation do
     """
@@ -69,6 +65,8 @@ defmodule Number42.Refactors.Ex.FlatMapToFilter do
     """
   end
 
+  @impl Number42.Refactors.Refactor
+  def priority, do: 150
   @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
   @impl Number42.Refactors.Refactor
@@ -91,6 +89,8 @@ defmodule Number42.Refactors.Ex.FlatMapToFilter do
   end
 
   defp analyze_body(_, _), do: :skip
+  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
+  defp apply_patches({:error, _}, source), do: source
 
   defp build_patches(ast),
     do:
@@ -123,6 +123,18 @@ defmodule Number42.Refactors.Ex.FlatMapToFilter do
     end
   end
 
+  defp filter_patch_or_skip({:ok, var, cond_text}, node),
+    do: [Patch.replace(node, "Enum.filter(fn #{var} -> #{cond_text} end)")]
+
+  defp filter_patch_or_skip(:skip, _node), do: []
+
+  defp filter_patch_or_skip({:ok, var, cond_text}, coll, node) do
+    coll_text = Sourceror.to_string(coll)
+    [Patch.replace(node, "Enum.filter(#{coll_text}, fn #{var} -> #{cond_text} end)")]
+  end
+
+  defp filter_patch_or_skip(:skip, _coll, _node), do: []
+
   defp maybe_patch({{:., _, [{:__aliases__, _, [:Enum]}, :flat_map]}, _, [coll, fun]} = node),
     do: classify(fun) |> filter_patch_or_skip(coll, node)
 
@@ -130,9 +142,10 @@ defmodule Number42.Refactors.Ex.FlatMapToFilter do
     do: classify(fun) |> filter_patch_or_skip(node)
 
   defp maybe_patch(_), do: []
+  defp patch_or_passthrough([], source), do: source
+  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
   defp render_condition(cond_ast, :keep_on_true), do: Sourceror.to_string(cond_ast)
 
-  # Wrap in parens defensively — `not a and b` parses as
   defp render_condition(cond_ast, :keep_on_false),
     # `(not a) and b`, but if `cond_ast` is something like `a and b`
     # we'd want `not (a and b)`. `Code.format_string!` (triggered via
@@ -142,24 +155,4 @@ defmodule Number42.Refactors.Ex.FlatMapToFilter do
 
   defp singleton_of_var?([elem], var), do: var_ref?(elem, var)
   defp singleton_of_var?(_, _), do: false
-
-  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
-
-  defp apply_patches({:error, _}, source), do: source
-
-  defp filter_patch_or_skip({:ok, var, cond_text}, coll, node) do
-    coll_text = Sourceror.to_string(coll)
-    [Patch.replace(node, "Enum.filter(#{coll_text}, fn #{var} -> #{cond_text} end)")]
-  end
-
-  defp filter_patch_or_skip(:skip, _coll, _node), do: []
-
-  defp filter_patch_or_skip({:ok, var, cond_text}, node),
-    do: [Patch.replace(node, "Enum.filter(fn #{var} -> #{cond_text} end)")]
-
-  defp filter_patch_or_skip(:skip, _node), do: []
-
-  defp patch_or_passthrough([], source), do: source
-
-  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
 end

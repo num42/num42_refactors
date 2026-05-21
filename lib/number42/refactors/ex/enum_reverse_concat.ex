@@ -44,10 +44,6 @@ defmodule Number42.Refactors.Ex.EnumReverseConcat do
 
   @impl Number42.Refactors.Refactor
   def description, do: "Enum.reverse(a) ++ b -> Enum.reverse(a, b)"
-
-  @impl Number42.Refactors.Refactor
-  def priority, do: 130
-
   @impl Number42.Refactors.Refactor
   def explanation do
     """
@@ -59,10 +55,13 @@ defmodule Number42.Refactors.Ex.EnumReverseConcat do
   end
 
   @impl Number42.Refactors.Refactor
+  def priority, do: 130
+  @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
-
   @impl Number42.Refactors.Refactor
   def transform(source, _opts), do: Sourceror.parse_string(source) |> apply_patches(source)
+  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
+  defp apply_patches({:error, _}, source), do: source
 
   defp build_patches(ast),
     do:
@@ -70,7 +69,6 @@ defmodule Number42.Refactors.Ex.EnumReverseConcat do
       |> Macro.prewalker()
       |> Enum.flat_map(&maybe_patch/1)
 
-  # Direct form: Enum.reverse(a) ++ b
   defp maybe_patch(
          {:++, _,
           [
@@ -82,11 +80,6 @@ defmodule Number42.Refactors.Ex.EnumReverseConcat do
     [Patch.replace(node, render_clean(replacement))]
   end
 
-  # Pipe form: `a |> Enum.reverse() ++ tail` parses with `++` BELOW
-  # the pipe in operator precedence, so the AST is
-  # `a |> (Enum.reverse() ++ tail)`. We rewrite the inner `++` node to
-  # `Enum.reverse(tail)` (a 1-arg call — the LHS will flow in via the
-  # surrounding pipe).
   defp maybe_patch(
          {:|>, pm,
           [
@@ -105,11 +98,8 @@ defmodule Number42.Refactors.Ex.EnumReverseConcat do
   end
 
   defp maybe_patch(_), do: []
-
-  # `Sourceror.to_string/1` re-emits comments stored in node meta
-  # (`:leading_comments` / `:trailing_comments`). When we patch a
-  # subrange that already includes those comments in the source, the
-  # comments would get duplicated. Strip them before rendering.
+  defp patch_or_passthrough([], source), do: source
+  defp patch_or_passthrough(patches, source), do: Sourceror.patch_string(source, patches)
   defp render_clean(ast), do: ast |> strip_comments() |> Sourceror.to_string()
 
   defp strip_comments(ast) do
@@ -122,11 +112,4 @@ defmodule Number42.Refactors.Ex.EnumReverseConcat do
         other
     end)
   end
-
-  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
-
-  defp apply_patches({:error, _}, source), do: source
-
-  defp patch_or_passthrough([], source), do: source
-  defp patch_or_passthrough(patches, source), do: Sourceror.patch_string(source, patches)
 end

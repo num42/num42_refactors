@@ -81,29 +81,6 @@ defmodule Number42.Refactors.Ex.ExtractRenamedClone do
 
   @default_min_mass 20
 
-  @impl Number42.Refactors.Refactor
-  def description, do: "Cross-file: extract renamed duplicates into a {LCP}.Shared module"
-
-  @impl Number42.Refactors.Refactor
-  def explanation do
-    """
-    Same body, different function name across modules → extract the
-    body into `{LCP}.Shared` under the alphabetically-first module's
-    function name, and replace each original with a wrapper-`def`
-    pointing at the shared definition.
-    """
-  end
-
-  @impl Number42.Refactors.Refactor
-  def reformat_after?, do: true
-
-  @impl Number42.Refactors.Refactor
-  def prepare(opts), do: Keyword.get(opts, :source_files) |> prepared_for_paths(opts)
-
-  @impl Number42.Refactors.Refactor
-  def transform(source, opts),
-    do: Keyword.get(opts, :prepared) |> rewrite_with_plan_or_passthrough(source)
-
   @doc """
   Build a rewrite plan from `[{path, source_string}]` tuples.
 
@@ -140,48 +117,67 @@ defmodule Number42.Refactors.Ex.ExtractRenamedClone do
     plan_entries |> Enum.group_by(fn {loser, _} -> loser end, fn {_, entry} -> entry end)
   end
 
-  # ---- Source extraction ----------------------------------------------
+  @impl Number42.Refactors.Refactor
+  def description, do: "Cross-file: extract renamed duplicates into a {LCP}.Shared module"
+  @impl Number42.Refactors.Refactor
+  def explanation do
+    """
+    Same body, different function name across modules → extract the
+    body into `{LCP}.Shared` under the alphabetically-first module's
+    function name, and replace each original with a wrapper-`def`
+    pointing at the shared definition.
+    """
+  end
 
-  defp extract_module_info({_path, source}, min_mass),
-    do: Sourceror.parse_string(source) |> extract_from_parse_result(min_mass, source)
+  @impl Number42.Refactors.Refactor
+  def prepare(opts), do: Keyword.get(opts, :source_files) |> prepared_for_paths(opts)
+  @impl Number42.Refactors.Refactor
+  def reformat_after?, do: true
+  @impl Number42.Refactors.Refactor
+  def transform(source, opts),
+    do: Keyword.get(opts, :prepared) |> rewrite_with_plan_or_passthrough(source)
 
-  defp extract_from_ast(ast, _source, min_mass) do
+  defp append_if_missing(path, target_module, group) do
+    source = File.read!(path)
+
+    Sourceror.parse_string(source) |> splice_new_shared_items(group, path, source, target_module)
+  end
+
+  defp apply_plan_to_ast(ast, source, plan) do
     ast
     |> Macro.prewalker()
     |> Enum.flat_map(fn
       {:defmodule, _, [name_ast, [{_do, body}]]} ->
         case alias_to_module(name_ast) do
-          {:ok, mod} ->
-            body_exprs = body_to_exprs(body)
-            functions_in_module(mod, body_exprs, min_mass)
-
-          :error ->
-            []
+          {:ok, mod} -> patches_for_module(mod, body_to_exprs(body), plan)
+          :error -> []
         end
 
       _ ->
         []
     end)
+    |> patch_or_passthrough(source)
   end
 
-  defp functions_in_module(module, body_exprs, min_mass) do
-    body_exprs
-    |> Enum.filter(&def_clause?/1)
-    |> Enum.group_by(&def_name_arity_or_skip/1)
-    |> Enum.reject(fn {key, _} -> key == :skip end)
-    |> Enum.flat_map(fn {{kind, name, arity}, clauses} ->
-      build_function_entry(module, kind, name, arity, clauses, min_mass)
-    end)
+  defp apply_plan_to_parse_result({:ok, ast}, plan, source),
+    do: ast |> apply_plan_to_ast(source, plan)
+
+  defp apply_plan_to_parse_result({:error, _}, _plan, source), do: source
+
+  defp arg_names_or_empty({_name, _, args}) when is_list(args) do
+    args |> Enum.map(fn {n, _, _} -> n end)
   end
 
-  defp def_clause?({kind, _, [_head, body_kw]}) when kind in [:def, :defp] and is_list(body_kw),
-    do: true
+  defp arg_names_or_empty({_name, _, nil}), do: []
 
-  defp def_clause?(_), do: false
+  defp args_are_plain_vars?({_name, _, args}) when is_list(args),
+    do: args |> Enum.all?(&plain_var?/1)
 
-  defp def_name_arity_or_skip({kind, _, [head | _]}) when kind in [:def, :defp] do
-    strip_when(head) |> kind_name_arity_or_skip(kind)
-  end
+  defp args_are_plain_vars?({_name, _, nil}), do: true
+  defp args_are_plain_vars?(_), do: false
+
+  defp body_uses_module_attribute?(clauses),
+    do: clauses |> Enum.any?(&clause_references_attribute?/1)
 
   defp build_function_entry(module, kind, name, arity, clauses, min_mass) do
     cond do
@@ -225,60 +221,158 @@ defmodule Number42.Refactors.Ex.ExtractRenamedClone do
 
   defp clause_arg_names({_kind, _, [head | _]}), do: strip_when(head) |> arg_names_or_empty()
 
-  defp plain_var_clause?({_kind, _, [head | _]}) do
+  defp clause_mass({_kind, _, [_head, body_kw]}),
+    do: body_kw |> Keyword.values() |> Enum.map(&node_count/1) |> Enum.sum()
+
+  defp clause_matches?({kind, _, [head | _]}, name, arity) when kind in [:def, :defp] do
     case strip_when(head) do
-      ^head -> args_are_plain_vars?(head)
+      {^name, _, args} when is_list(args) and length(args) == arity -> true
+      {^name, _, nil} when arity == 0 -> true
       _ -> false
     end
   end
 
-  defp args_are_plain_vars?({_name, _, args}) when is_list(args),
-    do: args |> Enum.all?(&plain_var?/1)
-
-  defp args_are_plain_vars?({_name, _, nil}), do: true
-  defp args_are_plain_vars?(_), do: false
-
-  defp plain_var?({:\\, _, _}), do: false
-
-  defp plain_var?({name, _, ctx}) when is_atom(name) and is_atom(ctx) do
-    not underscore?(name)
-  end
-
-  defp plain_var?(_), do: false
-
-  defp body_uses_module_attribute?(clauses),
-    do: clauses |> Enum.any?(&clause_references_attribute?/1)
+  defp clause_matches?(_, _, _), do: false
 
   defp clause_references_attribute?({_kind, _, [_head, body_kw]}),
     do: body_kw |> Keyword.values() |> Enum.any?(&references_attribute?/1)
 
-  defp references_attribute?(ast) do
+  defp clause_replacement_patch(clause, replacement),
+    do: Sourceror.get_range(clause) |> patch_for_range(replacement)
+
+  defp collect_existing_function_keys(ast, target_module) do
     ast
     |> Macro.prewalker()
-    |> Enum.any?(fn
-      {:@, _, [{name, _, ctx}]} when is_atom(name) and is_atom(ctx) -> true
-      _ -> false
+    |> Enum.find_value(fn
+      {:defmodule, _, [name_ast, [{_do, body}]]} ->
+        case alias_to_module(name_ast) do
+          {:ok, ^target_module} -> {:ok, body_to_exprs(body)}
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end)
+    |> case do
+      {:ok, body_exprs} ->
+        body_exprs
+        |> Enum.filter(&def_clause?/1)
+        |> Enum.map(fn c ->
+          case def_name_arity_or_skip(c) do
+            {_kind, name, arity} -> {name, arity}
+            :skip -> nil
+          end
+        end)
+        |> Enum.reject(&is_nil/1)
+        |> MapSet.new()
+
+      _ ->
+        MapSet.new()
+    end
+  end
+
+  defp decide_target(entries) do
+    parts_lists = entries |> Enum.map(&Module.split(&1.module))
+    prefix = longest_common_prefix(parts_lists)
+
+    if prefix != [] do
+      {:ok, Module.concat(prefix ++ ["Shared"])}
+    else
+      :skip
+    end
+  end
+
+  defp def_clause?({kind, _, [_head, body_kw]}) when kind in [:def, :defp] and is_list(body_kw),
+    do: true
+
+  defp def_clause?(_), do: false
+
+  defp def_name_arity_or_skip({kind, _, [head | _]}) when kind in [:def, :defp] do
+    strip_when(head) |> kind_name_arity_or_skip(kind)
+  end
+
+  defp extract_from_ast(ast, _source, min_mass) do
+    ast
+    |> Macro.prewalker()
+    |> Enum.flat_map(fn
+      {:defmodule, _, [name_ast, [{_do, body}]]} ->
+        case alias_to_module(name_ast) do
+          {:ok, mod} ->
+            body_exprs = body_to_exprs(body)
+            functions_in_module(mod, body_exprs, min_mass)
+
+          :error ->
+            []
+        end
+
+      _ ->
+        []
     end)
   end
 
-  defp strip_when({:when, _, [inner | _]}), do: inner
-  defp strip_when(other), do: other
+  defp extract_from_parse_result({:ok, ast}, min_mass, source),
+    do: ast |> extract_from_ast(source, min_mass)
 
-  defp total_mass(clauses), do: clauses |> Enum.map(&clause_mass/1) |> Enum.sum()
+  defp extract_from_parse_result({:error, _}, _min_mass, _source), do: []
 
-  defp clause_mass({_kind, _, [_head, body_kw]}),
-    do: body_kw |> Keyword.values() |> Enum.map(&node_count/1) |> Enum.sum()
+  defp extract_module_info({_path, source}, min_mass),
+    do: Sourceror.parse_string(source) |> extract_from_parse_result(min_mass, source)
+
+  defp functions_in_module(module, body_exprs, min_mass) do
+    body_exprs
+    |> Enum.filter(&def_clause?/1)
+    |> Enum.group_by(&def_name_arity_or_skip/1)
+    |> Enum.reject(fn {key, _} -> key == :skip end)
+    |> Enum.flat_map(fn {{kind, name, arity}, clauses} ->
+      build_function_entry(module, kind, name, arity, clauses, min_mass)
+    end)
+  end
+
+  defp hash_clauses(clauses), do: clauses |> Enum.map(&normalize_clause/1) |> :erlang.phash2()
+
+  defp indent(text, prefix) do
+    text
+    |> String.split("\n")
+    |> Enum.map_join("\n", fn
+      "" -> ""
+      line -> prefix <> line
+    end)
+  end
+
+  defp kind_name_arity_or_skip({name, _, args}, kind) when is_atom(name) and is_list(args) do
+    {kind, name, length(args)}
+  end
+
+  defp kind_name_arity_or_skip({name, _, nil}, kind) when is_atom(name) do
+    {kind, name, 0}
+  end
+
+  defp kind_name_arity_or_skip(_, _kind), do: :skip
+  defp longest_common_prefix([]), do: []
+  defp longest_common_prefix([single]), do: single
+
+  defp longest_common_prefix(lists) do
+    lists
+    |> Enum.zip()
+    |> Enum.take_while(fn tuple ->
+      elems = Tuple.to_list(tuple)
+      elems |> Enum.all?(&(&1 == hd(elems)))
+    end)
+    |> Enum.map(&elem(&1, 0))
+  end
+
+  defp module_patches(nil, _body_exprs), do: []
+
+  defp module_patches(entries, body_exprs),
+    do:
+      entries
+      |> Enum.flat_map(&patch_for_entry(body_exprs, &1))
 
   defp node_count(ast) do
     {_, count} = Macro.prewalk(ast, 0, fn node, acc -> {node, acc + 1} end)
     count
   end
 
-  defp hash_clauses(clauses), do: clauses |> Enum.map(&normalize_clause/1) |> :erlang.phash2()
-
-  # IMPORTANT for renamed-clone detection: drop the function NAME
-  # from the head before hashing. Otherwise two identical bodies
-  # under different names hash differently and never cluster.
   defp normalize_clause({_kind, _, [head, body_kw]}) do
     stripped_head_args =
       case strip_when(head) do
@@ -291,36 +385,47 @@ defmodule Number42.Refactors.Ex.ExtractRenamedClone do
     rename_vars({stripped_head_args, stripped_body})
   end
 
-  defp strip_meta(ast) do
-    Macro.prewalk(ast, fn
-      {form, _meta, args} -> {form, [], args}
-      other -> other
-    end)
-  end
+  defp patch_for_entry(body_exprs, entry) do
+    clauses = body_exprs |> Enum.filter(&clause_matches?(&1, entry.name, entry.arity))
 
-  defp rename_vars(ast) do
-    {result, _} = Macro.prewalk(ast, %{}, &rename_var_node/2)
-    result
-  end
+    case clauses do
+      [] ->
+        []
 
-  defp rename_var_node({name, [], ctx} = node, acc)
-       when is_atom(name) and is_atom(ctx) do
-    cond do
-      underscore?(name) ->
-        {node, acc}
+      [single] ->
+        replacement = render_replacement(entry)
+        clause_replacement_patch(single, replacement)
 
-      Map.has_key?(acc, name) ->
-        {{:"$var", [], [Map.fetch!(acc, name)]}, acc}
-
-      true ->
-        idx = map_size(acc)
-        {{:"$var", [], [idx]}, Map.put(acc, name, idx)}
+      _multi ->
+        # Skipped earlier in build_function_entry; defensive guard.
+        []
     end
   end
 
-  defp rename_var_node(node, acc), do: {node, acc}
+  defp patch_for_range(%{end: end_pos, start: start_pos}, replacement),
+    do: [%{change: replacement, range: %{end: end_pos, start: start_pos}}]
 
-  # ---- Plan building --------------------------------------------------
+  defp patch_for_range(_, _replacement), do: []
+  defp patch_or_passthrough([], source), do: source
+  defp patch_or_passthrough(patches, source), do: Sourceror.patch_string(source, patches)
+
+  defp patches_for_module(module, body_exprs, plan),
+    do: Map.get(plan, module) |> module_patches(body_exprs)
+
+  defp plain_var?({:\\, _, _}), do: false
+
+  defp plain_var?({name, _, ctx}) when is_atom(name) and is_atom(ctx) do
+    not underscore?(name)
+  end
+
+  defp plain_var?(_), do: false
+
+  defp plain_var_clause?({_kind, _, [head | _]}) do
+    case strip_when(head) do
+      ^head -> args_are_plain_vars?(head)
+      _ -> false
+    end
+  end
 
   defp plan_for_group({_key, [_only]}), do: []
 
@@ -365,104 +470,45 @@ defmodule Number42.Refactors.Ex.ExtractRenamedClone do
     end
   end
 
-  defp decide_target(entries) do
-    parts_lists = entries |> Enum.map(&Module.split(&1.module))
-    prefix = longest_common_prefix(parts_lists)
+  defp prepared_for_paths(nil, _opts), do: {:ok, %{}}
 
-    if prefix != [] do
-      {:ok, Module.concat(prefix ++ ["Shared"])}
-    else
-      :skip
-    end
+  defp prepared_for_paths(paths, opts) when is_list(paths) do
+    sources = paths |> Enum.map(fn p -> {p, File.read!(p)} end)
+    {:ok, build_plan(sources, opts)}
   end
 
-  defp longest_common_prefix([]), do: []
-  defp longest_common_prefix([single]), do: single
-
-  defp longest_common_prefix(lists) do
-    lists
-    |> Enum.zip()
-    |> Enum.take_while(fn tuple ->
-      elems = Tuple.to_list(tuple)
-      elems |> Enum.all?(&(&1 == hd(elems)))
-    end)
-    |> Enum.map(&elem(&1, 0))
-  end
-
-  # ---- Per-file rewrite -----------------------------------------------
-
-  defp rewrite(source, plan),
-    do: Sourceror.parse_string(source) |> apply_plan_to_parse_result(plan, source)
-
-  defp apply_plan_to_ast(ast, source, plan) do
+  defp references_attribute?(ast) do
     ast
     |> Macro.prewalker()
-    |> Enum.flat_map(fn
-      {:defmodule, _, [name_ast, [{_do, body}]]} ->
-        case alias_to_module(name_ast) do
-          {:ok, mod} -> patches_for_module(mod, body_to_exprs(body), plan)
-          :error -> []
-        end
-
-      _ ->
-        []
-    end)
-    |> patch_or_passthrough(source)
-  end
-
-  defp patches_for_module(module, body_exprs, plan),
-    do: Map.get(plan, module) |> module_patches(body_exprs)
-
-  defp patch_for_entry(body_exprs, entry) do
-    clauses = body_exprs |> Enum.filter(&clause_matches?(&1, entry.name, entry.arity))
-
-    case clauses do
-      [] ->
-        []
-
-      [single] ->
-        replacement = render_replacement(entry)
-        clause_replacement_patch(single, replacement)
-
-      _multi ->
-        # Skipped earlier in build_function_entry; defensive guard.
-        []
-    end
-  end
-
-  defp clause_matches?({kind, _, [head | _]}, name, arity) when kind in [:def, :defp] do
-    case strip_when(head) do
-      {^name, _, args} when is_list(args) and length(args) == arity -> true
-      {^name, _, nil} when arity == 0 -> true
+    |> Enum.any?(fn
+      {:@, _, [{name, _, ctx}]} when is_atom(name) and is_atom(ctx) -> true
       _ -> false
+    end)
+  end
+
+  defp rename_var_node({name, [], ctx} = node, acc)
+       when is_atom(name) and is_atom(ctx) do
+    cond do
+      underscore?(name) ->
+        {node, acc}
+
+      Map.has_key?(acc, name) ->
+        {{:"$var", [], [Map.fetch!(acc, name)]}, acc}
+
+      true ->
+        idx = map_size(acc)
+        {{:"$var", [], [idx]}, Map.put(acc, name, idx)}
     end
   end
 
-  defp clause_matches?(_, _, _), do: false
+  defp rename_var_node(node, acc), do: {node, acc}
 
-  defp render_replacement(%{args: args, name: name, shared_name: shared, target: target}) do
-    arg_list = args |> Enum.join(", ")
-    "def #{name}(#{arg_list}), do: #{inspect(target)}.#{shared}(#{arg_list})"
+  defp rename_vars(ast) do
+    {result, _} = Macro.prewalk(ast, %{}, &rename_var_node/2)
+    result
   end
 
-  defp clause_replacement_patch(clause, replacement),
-    do: Sourceror.get_range(clause) |> patch_for_range(replacement)
-
-  defp patch_or_passthrough([], source), do: source
-  defp patch_or_passthrough(patches, source), do: Sourceror.patch_string(source, patches)
-
-  # ---- Writing the shared module --------------------------------------
-
-  defp write_shared_module(target_module, group, write_root) do
-    path = shared_module_path(target_module, write_root)
-    File.mkdir_p!(Path.dirname(path))
-
-    if File.exists?(path) do
-      append_if_missing(path, target_module, group)
-    else
-      File.write!(path, render_fresh_module(target_module, group))
-    end
-  end
+  defp render_clauses(clauses), do: clauses |> Enum.map_join("\n\n", &Sourceror.to_string/1)
 
   defp render_fresh_module(target_module, group) do
     body = render_shared_body(group)
@@ -472,6 +518,11 @@ defmodule Number42.Refactors.Ex.ExtractRenamedClone do
     #{indent(body, "  ")}
     end
     """
+  end
+
+  defp render_replacement(%{args: args, name: name, shared_name: shared, target: target}) do
+    arg_list = args |> Enum.join(", ")
+    "def #{name}(#{arg_list}), do: #{inspect(target)}.#{shared}(#{arg_list})"
   end
 
   defp render_shared_body(group) do
@@ -498,66 +549,11 @@ defmodule Number42.Refactors.Ex.ExtractRenamedClone do
     |> String.trim()
   end
 
-  defp render_clauses(clauses), do: clauses |> Enum.map_join("\n\n", &Sourceror.to_string/1)
+  defp rewrite(source, plan),
+    do: Sourceror.parse_string(source) |> apply_plan_to_parse_result(plan, source)
 
-  defp append_if_missing(path, target_module, group) do
-    source = File.read!(path)
-
-    Sourceror.parse_string(source) |> splice_new_shared_items(group, path, source, target_module)
-  end
-
-  defp collect_existing_function_keys(ast, target_module) do
-    ast
-    |> Macro.prewalker()
-    |> Enum.find_value(fn
-      {:defmodule, _, [name_ast, [{_do, body}]]} ->
-        case alias_to_module(name_ast) do
-          {:ok, ^target_module} -> {:ok, body_to_exprs(body)}
-          _ -> nil
-        end
-
-      _ ->
-        nil
-    end)
-    |> case do
-      {:ok, body_exprs} ->
-        body_exprs
-        |> Enum.filter(&def_clause?/1)
-        |> Enum.map(fn c ->
-          case def_name_arity_or_skip(c) do
-            {_kind, name, arity} -> {name, arity}
-            :skip -> nil
-          end
-        end)
-        |> Enum.reject(&is_nil/1)
-        |> MapSet.new()
-
-      _ ->
-        MapSet.new()
-    end
-  end
-
-  defp splice_before_module_end(source, addition) do
-    lines = String.split(source, "\n")
-    {prefix, suffix} = split_at_last_end(lines)
-    indented = indent(addition, "  ")
-    (prefix ++ ["", indented] ++ suffix) |> Enum.join("\n")
-  end
-
-  defp split_at_last_end(lines) do
-    idx =
-      lines
-      |> Enum.with_index()
-      |> Enum.reverse()
-      |> Enum.find_value(fn {line, i} ->
-        if String.trim(line) == "end", do: i, else: nil
-      end)
-
-    case idx do
-      nil -> {lines, []}
-      i -> {lines |> Enum.take(i), lines |> Enum.drop(i)}
-    end
-  end
+  defp rewrite_with_plan_or_passthrough(nil, source), do: source
+  defp rewrite_with_plan_or_passthrough(plan, source), do: source |> rewrite(plan)
 
   defp shared_module_path(target_module, write_root) do
     parts = Module.split(target_module)
@@ -572,63 +568,12 @@ defmodule Number42.Refactors.Ex.ExtractRenamedClone do
     Path.join(write_root, rel)
   end
 
-  defp indent(text, prefix) do
-    text
-    |> String.split("\n")
-    |> Enum.map_join("\n", fn
-      "" -> ""
-      line -> prefix <> line
-    end)
+  defp splice_before_module_end(source, addition) do
+    lines = String.split(source, "\n")
+    {prefix, suffix} = split_at_last_end(lines)
+    indented = indent(addition, "  ")
+    (prefix ++ ["", indented] ++ suffix) |> Enum.join("\n")
   end
-
-  defp prepared_for_paths(nil, _opts), do: {:ok, %{}}
-
-  defp prepared_for_paths(paths, opts) when is_list(paths) do
-    sources = paths |> Enum.map(fn p -> {p, File.read!(p)} end)
-    {:ok, build_plan(sources, opts)}
-  end
-
-  defp rewrite_with_plan_or_passthrough(nil, source), do: source
-
-  defp rewrite_with_plan_or_passthrough(plan, source), do: source |> rewrite(plan)
-
-  defp extract_from_parse_result({:ok, ast}, min_mass, source),
-    do: ast |> extract_from_ast(source, min_mass)
-
-  defp extract_from_parse_result({:error, _}, _min_mass, _source), do: []
-
-  defp kind_name_arity_or_skip({name, _, args}, kind) when is_atom(name) and is_list(args) do
-    {kind, name, length(args)}
-  end
-
-  defp kind_name_arity_or_skip({name, _, nil}, kind) when is_atom(name) do
-    {kind, name, 0}
-  end
-
-  defp kind_name_arity_or_skip(_, _kind), do: :skip
-
-  defp arg_names_or_empty({_name, _, args}) when is_list(args) do
-    args |> Enum.map(fn {n, _, _} -> n end)
-  end
-
-  defp arg_names_or_empty({_name, _, nil}), do: []
-
-  defp apply_plan_to_parse_result({:ok, ast}, plan, source),
-    do: ast |> apply_plan_to_ast(source, plan)
-
-  defp apply_plan_to_parse_result({:error, _}, _plan, source), do: source
-
-  defp module_patches(nil, _body_exprs), do: []
-
-  defp module_patches(entries, body_exprs),
-    do:
-      entries
-      |> Enum.flat_map(&patch_for_entry(body_exprs, &1))
-
-  defp patch_for_range(%{end: end_pos, start: start_pos}, replacement),
-    do: [%{change: replacement, range: %{end: end_pos, start: start_pos}}]
-
-  defp patch_for_range(_, _replacement), do: []
 
   defp splice_new_shared_items({:ok, ast}, group, path, source, target_module) do
     existing_keys = collect_existing_function_keys(ast, target_module)
@@ -648,4 +593,41 @@ defmodule Number42.Refactors.Ex.ExtractRenamedClone do
   end
 
   defp splice_new_shared_items(_, _group, _path, _source, _target_module), do: :ok
+
+  defp split_at_last_end(lines) do
+    idx =
+      lines
+      |> Enum.with_index()
+      |> Enum.reverse()
+      |> Enum.find_value(fn {line, i} ->
+        if String.trim(line) == "end", do: i, else: nil
+      end)
+
+    case idx do
+      nil -> {lines, []}
+      i -> {lines |> Enum.take(i), lines |> Enum.drop(i)}
+    end
+  end
+
+  defp strip_meta(ast) do
+    Macro.prewalk(ast, fn
+      {form, _meta, args} -> {form, [], args}
+      other -> other
+    end)
+  end
+
+  defp strip_when({:when, _, [inner | _]}), do: inner
+  defp strip_when(other), do: other
+  defp total_mass(clauses), do: clauses |> Enum.map(&clause_mass/1) |> Enum.sum()
+
+  defp write_shared_module(target_module, group, write_root) do
+    path = shared_module_path(target_module, write_root)
+    File.mkdir_p!(Path.dirname(path))
+
+    if File.exists?(path) do
+      append_if_missing(path, target_module, group)
+    else
+      File.write!(path, render_fresh_module(target_module, group))
+    end
+  end
 end

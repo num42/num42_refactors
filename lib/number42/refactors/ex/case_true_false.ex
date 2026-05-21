@@ -54,10 +54,6 @@ defmodule Number42.Refactors.Ex.CaseTrueFalse do
 
   @impl Number42.Refactors.Refactor
   def description, do: "Rewrite `case ... do true -> ...; false -> ... end` as `if`/`else`"
-
-  @impl Number42.Refactors.Refactor
-  def priority, do: 120
-
   @impl Number42.Refactors.Refactor
   def explanation do
     """
@@ -71,9 +67,13 @@ defmodule Number42.Refactors.Ex.CaseTrueFalse do
   end
 
   @impl Number42.Refactors.Refactor
+  def priority, do: 120
+  @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
   @impl Number42.Refactors.Refactor
   def transform(source, _opts), do: Sourceror.parse_string(source) |> apply_patches(source)
+  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
+  defp apply_patches({:error, _}, source), do: source
 
   defp build_patches(ast),
     do:
@@ -96,6 +96,13 @@ defmodule Number42.Refactors.Ex.CaseTrueFalse do
     end
   end
 
+  defp if_patch_or_skip({:ok, true_body, false_body}, cond_ast, node),
+    do: [Patch.replace(node, render_if(cond_ast, true_body, false_body))]
+
+  defp if_patch_or_skip(:skip, _cond_ast, _node), do: []
+  defp kind_or_skip(nil, _body), do: :skip
+  defp kind_or_skip(kind, body), do: {:ok, kind, body}
+
   defp maybe_patch({:case, _meta, [cond_ast, [{_do_block, clauses}]]} = node)
        when is_list(clauses) and length(clauses) == 2 do
     classify_clauses(clauses) |> if_patch_or_skip(cond_ast, node)
@@ -107,6 +114,8 @@ defmodule Number42.Refactors.Ex.CaseTrueFalse do
   defp pair_bodies(:true_lit, t, :wildcard, f), do: {:ok, t, f}
   defp pair_bodies(:false_lit, f, :wildcard, t), do: {:ok, t, f}
   defp pair_bodies(_, _, _, _), do: :skip
+  defp patch_or_passthrough([], source), do: source
+  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
   defp pattern_kind({:__block__, _, [true]}), do: :true_lit
   defp pattern_kind({:__block__, _, [false]}), do: :false_lit
   defp pattern_kind(true), do: :true_lit
@@ -128,21 +137,4 @@ defmodule Number42.Refactors.Ex.CaseTrueFalse do
        ]}
     )
   end
-
-  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
-
-  defp apply_patches({:error, _}, source), do: source
-
-  defp kind_or_skip(nil, _body), do: :skip
-
-  defp kind_or_skip(kind, body), do: {:ok, kind, body}
-
-  defp if_patch_or_skip({:ok, true_body, false_body}, cond_ast, node),
-    do: [Patch.replace(node, render_if(cond_ast, true_body, false_body))]
-
-  defp if_patch_or_skip(:skip, _cond_ast, _node), do: []
-
-  defp patch_or_passthrough([], source), do: source
-
-  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
 end

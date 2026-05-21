@@ -68,10 +68,6 @@ defmodule Number42.Refactors.Ex.ReduceMapPut do
 
   @impl Number42.Refactors.Refactor
   def description, do: "Enum.reduce/3 building a map via Map.put -> Map.new/2"
-
-  @impl Number42.Refactors.Refactor
-  def priority, do: 150
-
   @impl Number42.Refactors.Refactor
   def explanation do
     """
@@ -86,9 +82,13 @@ defmodule Number42.Refactors.Ex.ReduceMapPut do
   end
 
   @impl Number42.Refactors.Refactor
+  def priority, do: 150
+  @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
   @impl Number42.Refactors.Refactor
   def transform(source, _opts), do: Sourceror.parse_string(source) |> apply_patches(source)
+  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
+  defp apply_patches({:error, _}, source), do: source
 
   defp build_patches(ast),
     do:
@@ -151,6 +151,8 @@ defmodule Number42.Refactors.Ex.ReduceMapPut do
   end
 
   defp maybe_patch(_), do: []
+  defp patch_or_passthrough([], source), do: source
+  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
 
   defp pattern_introduces_referenced_name?(pat, key, value) do
     names = pattern_var_names(pat)
@@ -170,12 +172,4 @@ defmodule Number42.Refactors.Ex.ReduceMapPut do
     do: "Map.new(#{coll_text}, #{lambda_text(arg_pat, key, value)})"
 
   defp render_pipe(arg_pat, key, value), do: "Map.new(#{lambda_text(arg_pat, key, value)})"
-
-  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
-
-  defp apply_patches({:error, _}, source), do: source
-
-  defp patch_or_passthrough([], source), do: source
-
-  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
 end

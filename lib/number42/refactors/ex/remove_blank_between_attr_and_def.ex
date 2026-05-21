@@ -37,10 +37,6 @@ defmodule Number42.Refactors.Ex.RemoveBlankBetweenAttrAndDef do
 
   @impl Number42.Refactors.Refactor
   def description, do: "Strip blank lines between function-attached attributes and their def"
-
-  @impl Number42.Refactors.Refactor
-  def priority, do: 10
-
   @impl Number42.Refactors.Refactor
   def explanation do
     """
@@ -53,6 +49,8 @@ defmodule Number42.Refactors.Ex.RemoveBlankBetweenAttrAndDef do
     """
   end
 
+  @impl Number42.Refactors.Refactor
+  def priority, do: 10
   @impl Number42.Refactors.Refactor
   def reformat_after?, do: false
   @impl Number42.Refactors.Refactor

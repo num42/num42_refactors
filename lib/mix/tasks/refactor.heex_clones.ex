@@ -104,6 +104,62 @@ defmodule Mix.Tasks.Refactor.HeexClones do
     Mix.shell().info("\n[heex-clones] cluster totals: #{summary |> Enum.join(" ")}")
   end
 
+  defp cached_or_read_lines({:ok, lines}, cache, _file), do: {lines, cache}
+
+  defp cached_or_read_lines(:error, cache, file) do
+    lines = File.read!(file) |> String.split("\n")
+    {lines, Map.put(cache, file, lines)}
+  end
+
+  defp expand_inputs(patterns), do: expand_inputs_shared(patterns)
+  defp file_lines(nil, file), do: {File.read!(file) |> String.split("\n"), nil}
+
+  defp file_lines(cache, file),
+    do: Map.fetch(cache, file) |> cached_or_read_lines(cache, file)
+
+  defp load_inputs do
+    path = Path.join(File.cwd!(), @config_path)
+
+    File.read(path) |> parse_config_or_raise(path)
+  end
+
+  defp parse_config_or_raise({:ok, contents}, path) do
+    {config, _} = Code.eval_string(contents, [], file: path)
+    Keyword.fetch!(config, :inputs)
+  end
+
+  defp parse_config_or_raise({:error, _}, path),
+    do:
+      "#{@config_path} not found at #{path}. Pass paths explicitly or create the config."
+      |> Mix.raise()
+
+  defp parse_mode("exact"), do: :exact
+  defp parse_mode("class_stripped"), do: :class_stripped
+  defp parse_mode("attrs_stripped"), do: :attrs_stripped
+
+  defp parse_mode(other),
+    do:
+      "Unknown --mode #{inspect(other)}. Pick from: exact, class_stripped, attrs_stripped"
+      |> Mix.raise()
+
+  defp print_snippet(occ, mass, context, cache) do
+    {lines, cache} = file_lines(cache, occ.file)
+    snippet_height = trunc(mass * 1.5) + 3
+
+    start_idx = max(occ.line - 1 - context, 0)
+    finish_idx = min(occ.line - 1 + snippet_height, length(lines) - 1)
+
+    lines
+    |> Enum.slice(start_idx..finish_idx//1)
+    |> Enum.with_index(start_idx + 1)
+    |> Enum.each(fn {line, n} ->
+      marker = if n == occ.line, do: ">", else: " "
+      Mix.shell().info("       #{marker} #{String.pad_leading(to_string(n), 4)} | #{line}")
+    end)
+
+    cache
+  end
+
   defp render_mode(mode, [], _top, _code?, _context, cache) do
     Mix.shell().info("\n=== #{mode} ===")
     Mix.shell().info("  (no clusters)")
@@ -136,70 +192,6 @@ defmodule Mix.Tasks.Refactor.HeexClones do
     cache
   end
 
-  # Approximate snippet length: clones are emitted by Mass (= node
-  # count), and source lines/Mass-node ratio sits around 1.2–1.6 once
-  # multi-line attributes are factored in. We over-fetch slightly and
-  # let the human's eye pick the closing tag — mechanical extraction
-  # of the exact byte range is the next refactor's job, not the
-  # report's.
-  defp print_snippet(occ, mass, context, cache) do
-    {lines, cache} = file_lines(cache, occ.file)
-    snippet_height = trunc(mass * 1.5) + 3
-
-    start_idx = max(occ.line - 1 - context, 0)
-    finish_idx = min(occ.line - 1 + snippet_height, length(lines) - 1)
-
-    lines
-    |> Enum.slice(start_idx..finish_idx//1)
-    |> Enum.with_index(start_idx + 1)
-    |> Enum.each(fn {line, n} ->
-      marker = if n == occ.line, do: ">", else: " "
-      Mix.shell().info("       #{marker} #{String.pad_leading(to_string(n), 4)} | #{line}")
-    end)
-
-    cache
-  end
-
-  defp file_lines(nil, file), do: {File.read!(file) |> String.split("\n"), nil}
-
-  defp file_lines(cache, file),
-    do: Map.fetch(cache, file) |> cached_or_read_lines(cache, file)
-
   defp resolve_modes([]), do: [:exact, :class_stripped, :attrs_stripped]
-
   defp resolve_modes(values), do: values |> Enum.map(&parse_mode/1)
-
-  defp parse_mode("exact"), do: :exact
-  defp parse_mode("class_stripped"), do: :class_stripped
-  defp parse_mode("attrs_stripped"), do: :attrs_stripped
-
-  defp parse_mode(other),
-    do:
-      "Unknown --mode #{inspect(other)}. Pick from: exact, class_stripped, attrs_stripped"
-      |> Mix.raise()
-
-  defp load_inputs do
-    path = Path.join(File.cwd!(), @config_path)
-
-    File.read(path) |> parse_config_or_raise(path)
-  end
-
-  defp expand_inputs(patterns), do: expand_inputs_shared(patterns)
-
-  defp cached_or_read_lines({:ok, lines}, cache, _file), do: {lines, cache}
-
-  defp cached_or_read_lines(:error, cache, file) do
-    lines = File.read!(file) |> String.split("\n")
-    {lines, Map.put(cache, file, lines)}
-  end
-
-  defp parse_config_or_raise({:ok, contents}, path) do
-    {config, _} = Code.eval_string(contents, [], file: path)
-    Keyword.fetch!(config, :inputs)
-  end
-
-  defp parse_config_or_raise({:error, _}, path),
-    do:
-      "#{@config_path} not found at #{path}. Pass paths explicitly or create the config."
-      |> Mix.raise()
 end

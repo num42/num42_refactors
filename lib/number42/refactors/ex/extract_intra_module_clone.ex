@@ -60,7 +60,6 @@ defmodule Number42.Refactors.Ex.ExtractIntraModuleClone do
 
   @impl Number42.Refactors.Refactor
   def description, do: "Within-module clone collapse: extra clauses delegate to the first"
-
   @impl Number42.Refactors.Refactor
   def explanation do
     """
@@ -74,7 +73,6 @@ defmodule Number42.Refactors.Ex.ExtractIntraModuleClone do
 
   @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
-
   @impl Number42.Refactors.Refactor
   def transform(source, opts) do
     min_mass = Keyword.get(opts, :min_mass, @default_min_mass)
@@ -96,6 +94,106 @@ defmodule Number42.Refactors.Ex.ExtractIntraModuleClone do
     end)
     |> patch_or_passthrough(source)
   end
+
+  defp apply_to_parse_result({:ok, ast}, min_mass, source),
+    do: ast |> apply_to_ast(source, min_mass)
+
+  defp apply_to_parse_result({:error, _}, _min_mass, source), do: source
+
+  defp args_are_plain_vars?({_name, _, args}) when is_list(args),
+    do: args |> Enum.all?(&plain_var?/1)
+
+  defp args_are_plain_vars?({_name, _, nil}), do: true
+  defp args_are_plain_vars?(_), do: false
+
+  defp arity_of({kind, _, [head | _]}) when kind in [:def, :defp] do
+    strip_when(head) |> arity_of_head()
+  end
+
+  defp arity_of_head({_, _, args}) when is_list(args), do: length(args)
+  defp arity_of_head({_, _, nil}), do: 0
+  defp arity_of_head(_), do: -1
+
+  defp body_hash({_kind, _, [_head, body_kw]}),
+    do:
+      body_kw
+      |> Keyword.values()
+      |> Enum.map(&strip_meta/1)
+      |> rename_vars()
+      |> :erlang.phash2()
+
+  defp body_uses_module_attribute?({_kind, _, [_head, body_kw]}),
+    do:
+      body_kw
+      |> Keyword.values()
+      |> Enum.any?(&references_attribute?/1)
+
+  defp clause_mass({_kind, _, [_head, body_kw]}),
+    do: body_kw |> Keyword.values() |> Enum.map(&node_count/1) |> Enum.sum()
+
+  defp clause_replacement_patch(clause, replacement),
+    do: Sourceror.get_range(clause) |> patch_for_range(replacement)
+
+  defp def_clause?({kind, _, [_head, body_kw]}) when kind in [:def, :defp] and is_list(body_kw),
+    do: true
+
+  defp def_clause?(_), do: false
+  defp head_has_guard?({_kind, _, [{:when, _, _} | _]}), do: true
+  defp head_has_guard?(_), do: false
+
+  defp head_is_plain_vars?({_kind, _, [head | _]}) do
+    case strip_when(head) do
+      ^head -> args_are_plain_vars?(head)
+      _ -> false
+    end
+  end
+
+  defp multi_clause_keys(clauses) do
+    clauses
+    |> Enum.group_by(&name_arity/1)
+    |> Enum.filter(fn {_k, list} -> length(list) > 1 end)
+    |> Enum.map(fn {k, _} -> k end)
+    |> MapSet.new()
+  end
+
+  defp name_arity(clause), do: {name_of(clause), arity_of(clause)}
+  defp name_atom_or_nil({name, _, _}) when is_atom(name), do: name
+  defp name_atom_or_nil(_), do: nil
+
+  defp name_for_kind(_kind, head) do
+    {name, _, _} = strip_when(head)
+    name
+  end
+
+  defp name_of({kind, _, [head | _]}) when kind in [:def, :defp] do
+    strip_when(head) |> name_atom_or_nil()
+  end
+
+  defp node_count(ast) do
+    {_, count} = Macro.prewalk(ast, 0, fn node, acc -> {node, acc + 1} end)
+    count
+  end
+
+  defp patch_for_loser(loser_clause, source_name) do
+    cond do
+      head_has_guard?(loser_clause) ->
+        []
+
+      not head_is_plain_vars?(loser_clause) ->
+        []
+
+      true ->
+        replacement = render_replacement(loser_clause, source_name)
+        clause_replacement_patch(loser_clause, replacement)
+    end
+  end
+
+  defp patch_for_range(%{end: end_pos, start: start_pos}, replacement),
+    do: [%{change: replacement, range: %{end: end_pos, start: start_pos}}]
+
+  defp patch_for_range(_, _replacement), do: []
+  defp patch_or_passthrough([], source), do: source
+  defp patch_or_passthrough(patches, source), do: Sourceror.patch_string(source, patches)
 
   defp patches_for_module(body_exprs, min_mass) do
     clauses = body_exprs |> Enum.filter(&def_clause?/1)
@@ -122,48 +220,6 @@ defmodule Number42.Refactors.Ex.ExtractIntraModuleClone do
     end)
   end
 
-  defp def_clause?({kind, _, [_head, body_kw]}) when kind in [:def, :defp] and is_list(body_kw),
-    do: true
-
-  defp def_clause?(_), do: false
-
-  defp multi_clause_keys(clauses) do
-    clauses
-    |> Enum.group_by(&name_arity/1)
-    |> Enum.filter(fn {_k, list} -> length(list) > 1 end)
-    |> Enum.map(fn {k, _} -> k end)
-    |> MapSet.new()
-  end
-
-  defp name_arity(clause), do: {name_of(clause), arity_of(clause)}
-
-  defp name_of({kind, _, [head | _]}) when kind in [:def, :defp] do
-    strip_when(head) |> name_atom_or_nil()
-  end
-
-  defp arity_of({kind, _, [head | _]}) when kind in [:def, :defp] do
-    strip_when(head) |> arity_of_head()
-  end
-
-  defp strip_when({:when, _, [inner | _]}), do: inner
-  defp strip_when(other), do: other
-
-  defp head_has_guard?({_kind, _, [{:when, _, _} | _]}), do: true
-  defp head_has_guard?(_), do: false
-
-  defp head_is_plain_vars?({_kind, _, [head | _]}) do
-    case strip_when(head) do
-      ^head -> args_are_plain_vars?(head)
-      _ -> false
-    end
-  end
-
-  defp args_are_plain_vars?({_name, _, args}) when is_list(args),
-    do: args |> Enum.all?(&plain_var?/1)
-
-  defp args_are_plain_vars?({_name, _, nil}), do: true
-  defp args_are_plain_vars?(_), do: false
-
   defp plain_var?({:\\, _, _}), do: false
 
   defp plain_var?({name, _, ctx}) when is_atom(name) and is_atom(ctx) do
@@ -172,12 +228,6 @@ defmodule Number42.Refactors.Ex.ExtractIntraModuleClone do
 
   defp plain_var?(_), do: false
 
-  defp body_uses_module_attribute?({_kind, _, [_head, body_kw]}),
-    do:
-      body_kw
-      |> Keyword.values()
-      |> Enum.any?(&references_attribute?/1)
-
   defp references_attribute?(ast) do
     ast
     |> Macro.prewalker()
@@ -185,34 +235,6 @@ defmodule Number42.Refactors.Ex.ExtractIntraModuleClone do
       {:@, _, [{name, _, ctx}]} when is_atom(name) and is_atom(ctx) -> true
       _ -> false
     end)
-  end
-
-  defp clause_mass({_kind, _, [_head, body_kw]}),
-    do: body_kw |> Keyword.values() |> Enum.map(&node_count/1) |> Enum.sum()
-
-  defp node_count(ast) do
-    {_, count} = Macro.prewalk(ast, 0, fn node, acc -> {node, acc + 1} end)
-    count
-  end
-
-  defp body_hash({_kind, _, [_head, body_kw]}),
-    do:
-      body_kw
-      |> Keyword.values()
-      |> Enum.map(&strip_meta/1)
-      |> rename_vars()
-      |> :erlang.phash2()
-
-  defp strip_meta(ast) do
-    Macro.prewalk(ast, fn
-      {form, _meta, args} -> {form, [], args}
-      other -> other
-    end)
-  end
-
-  defp rename_vars(ast) do
-    {result, _} = Macro.prewalk(ast, %{}, &rename_var_node/2)
-    result
   end
 
   defp rename_var_node({name, [], ctx} = node, acc)
@@ -232,18 +254,9 @@ defmodule Number42.Refactors.Ex.ExtractIntraModuleClone do
 
   defp rename_var_node(node, acc), do: {node, acc}
 
-  defp patch_for_loser(loser_clause, source_name) do
-    cond do
-      head_has_guard?(loser_clause) ->
-        []
-
-      not head_is_plain_vars?(loser_clause) ->
-        []
-
-      true ->
-        replacement = render_replacement(loser_clause, source_name)
-        clause_replacement_patch(loser_clause, replacement)
-    end
+  defp rename_vars(ast) do
+    {result, _} = Macro.prewalk(ast, %{}, &rename_var_node/2)
+    result
   end
 
   defp render_replacement({kind, _, [head | _]}, source_name) do
@@ -254,31 +267,13 @@ defmodule Number42.Refactors.Ex.ExtractIntraModuleClone do
     "#{kind} #{name_for_kind(kind, head)}(#{arg_list}), do: #{source_name}(#{arg_list})"
   end
 
-  defp name_for_kind(_kind, head) do
-    {name, _, _} = strip_when(head)
-    name
+  defp strip_meta(ast) do
+    Macro.prewalk(ast, fn
+      {form, _meta, args} -> {form, [], args}
+      other -> other
+    end)
   end
 
-  defp clause_replacement_patch(clause, replacement),
-    do: Sourceror.get_range(clause) |> patch_for_range(replacement)
-
-  defp patch_or_passthrough([], source), do: source
-  defp patch_or_passthrough(patches, source), do: Sourceror.patch_string(source, patches)
-
-  defp apply_to_parse_result({:ok, ast}, min_mass, source),
-    do: ast |> apply_to_ast(source, min_mass)
-
-  defp apply_to_parse_result({:error, _}, _min_mass, source), do: source
-
-  defp name_atom_or_nil({name, _, _}) when is_atom(name), do: name
-  defp name_atom_or_nil(_), do: nil
-
-  defp arity_of_head({_, _, args}) when is_list(args), do: length(args)
-  defp arity_of_head({_, _, nil}), do: 0
-  defp arity_of_head(_), do: -1
-
-  defp patch_for_range(%{end: end_pos, start: start_pos}, replacement),
-    do: [%{change: replacement, range: %{end: end_pos, start: start_pos}}]
-
-  defp patch_for_range(_, _replacement), do: []
+  defp strip_when({:when, _, [inner | _]}), do: inner
+  defp strip_when(other), do: other
 end

@@ -100,31 +100,6 @@ defmodule Number42.Refactors.Ex.DelegateExactDuplicates do
   #   to another refactor would silently swap implementations.
   @excluded_path_prefixes ["test/", "dev/"]
 
-  @impl Number42.Refactors.Refactor
-  def description, do: "Cross-file: replace exact duplicates with defdelegate"
-
-  @impl Number42.Refactors.Refactor
-  def explanation do
-    """
-    Same function body in two modules → keep the implementation in the
-    module with the longer name, replace the others with
-    `defdelegate name(args), to: WinnerModule`. Reduces duplication
-    without forcing a structural extraction; downstream callers don't
-    notice the rename because `defdelegate` preserves the public
-    contract.
-    """
-  end
-
-  @impl Number42.Refactors.Refactor
-  def reformat_after?, do: true
-
-  @impl Number42.Refactors.Refactor
-  def prepare(opts), do: Keyword.get(opts, :source_files) |> prepared_for_paths()
-
-  @impl Number42.Refactors.Refactor
-  def transform(source, opts),
-    do: Keyword.get(opts, :prepared) |> rewrite_with_plan_or_passthrough(source)
-
   @doc """
   Build a rewrite plan from a list of `{path, source_string}` pairs.
 
@@ -152,66 +127,72 @@ defmodule Number42.Refactors.Ex.DelegateExactDuplicates do
     end)
   end
 
-  # ---- Plan building --------------------------------------------------
-
-  defp plan_for_group({{_name, _arity, _hash}, [_only]}), do: []
-
-  defp plan_for_group({{name, arity, _hash}, entries}) do
-    # All entries share `{name, arity, hash}`. Pick a winner by module-
-    # name length (more segments = longer = winner). Tie-break by
-    # alphabetical order, alphabetically later wins.
-    winner = entries |> Enum.max_by(&{module_segments(&1.module), Atom.to_string(&1.module)})
-
-    entries
-    |> Enum.reject(&(&1.module == winner.module))
-    |> Enum.map(fn loser -> {loser.module, {name, arity, loser.args, winner.module}} end)
+  @impl Number42.Refactors.Refactor
+  def description, do: "Cross-file: replace exact duplicates with defdelegate"
+  @impl Number42.Refactors.Refactor
+  def explanation do
+    """
+    Same function body in two modules → keep the implementation in the
+    module with the longer name, replace the others with
+    `defdelegate name(args), to: WinnerModule`. Reduces duplication
+    without forcing a structural extraction; downstream callers don't
+    notice the rename because `defdelegate` preserves the public
+    contract.
+    """
   end
 
-  defp module_segments(module) when is_atom(module) do
-    module |> Module.split() |> length()
-  end
+  @impl Number42.Refactors.Refactor
+  def prepare(opts), do: Keyword.get(opts, :source_files) |> prepared_for_paths()
+  @impl Number42.Refactors.Refactor
+  def reformat_after?, do: true
+  @impl Number42.Refactors.Refactor
+  def transform(source, opts),
+    do: Keyword.get(opts, :prepared) |> rewrite_with_plan_or_passthrough(source)
 
-  # ---- Source extraction ----------------------------------------------
-
-  # Returns a list of %{module:, name:, arity:, args:, hash:, clause_asts:}
-  # entries — one per public function group in `source`. Multi-clause
-  # functions are collapsed into a single entry whose hash combines all
-  # clauses; that way `def foo(0)` + `def foo(n)` is treated atomically.
-  defp extract_functions({_path, source}, min_mass),
-    do: Sourceror.parse_string(source) |> extract_functions_or_empty(min_mass)
-
-  defp extract_functions_from_ast(ast, min_mass) do
+  defp apply_plan_to_ast(ast, source, plan) do
     ast
     |> Macro.prewalker()
     |> Enum.flat_map(fn
       {:defmodule, _, [name_ast, [{_do, body}]]} ->
         case alias_to_module(name_ast) do
-          {:ok, mod} -> functions_in_module(mod, body_to_exprs(body), min_mass)
+          {:ok, mod} -> patches_for_module(mod, body_to_exprs(body), plan)
           :error -> []
         end
 
       _ ->
         []
     end)
+    |> patch_or_passthrough(source)
   end
 
-  defp functions_in_module(module, body_exprs, min_mass) do
-    body_exprs
-    |> Enum.filter(&def_clause?/1)
-    |> Enum.group_by(&def_name_arity_or_skip/1)
-    |> Enum.reject(fn {key, _clauses} -> key == :skip end)
-    |> Enum.flat_map(fn {{name, arity}, clauses} ->
-      build_function_entry(module, name, arity, clauses, body_exprs, min_mass)
-    end)
+  defp apply_plan_to_parse_result({:ok, ast}, plan, source),
+    do: ast |> apply_plan_to_ast(source, plan)
+
+  defp apply_plan_to_parse_result({:error, _}, _plan, source), do: source
+
+  defp args_are_plain_vars?({_name, _, args}) when is_list(args) do
+    args |> Enum.all?(&plain_var?/1)
   end
 
-  defp def_clause?({:def, _, [_head | _]}), do: true
-  defp def_clause?(_), do: false
+  defp args_are_plain_vars?({_name, _, nil}), do: true
+  defp args_are_plain_vars?(_), do: false
 
-  defp def_name_arity_or_skip({:def, _, [head | _]}), do: strip_when(head) |> name_arity_or_skip()
+  defp body_uses_module_attribute?(clauses),
+    do: clauses |> Enum.any?(&clause_references_attribute?/1)
 
-  defp strip_when({:when, _, [inner | _]}), do: inner
-  defp strip_when(other), do: other
+  defp build_clause_group_patch(first_node, last_node, replacement) do
+    with %{start: start_pos} <- Sourceror.get_range(first_node),
+         %{end: end_pos} <- Sourceror.get_range(last_node) do
+      [
+        %{
+          change: replacement,
+          range: %{end: end_pos, start: start_pos}
+        }
+      ]
+    else
+      _ -> []
+    end
+  end
 
   defp build_function_entry(module, name, arity, clauses, body_exprs, min_mass) do
     cond do
@@ -246,117 +227,7 @@ defmodule Number42.Refactors.Ex.DelegateExactDuplicates do
     end
   end
 
-  # ---- Clause eligibility ---------------------------------------------
-
-  defp eligible_clause?({:def, _, [head | _]} = node) do
-    case strip_when(head) do
-      ^head ->
-        # No `when` wrapper. Check that all args are plain vars and no
-        # defaults are present. Body check happens via `body_uses_module_attribute?/1`.
-        args_are_plain_vars?(head)
-
-      _stripped ->
-        # Has a `when`-guard — skip.
-        false
-    end
-    |> drop_node_arg(node)
-  end
-
-  defp drop_node_arg(value, _node), do: value
-
-  defp args_are_plain_vars?({_name, _, args}) when is_list(args) do
-    args |> Enum.all?(&plain_var?/1)
-  end
-
-  defp args_are_plain_vars?({_name, _, nil}), do: true
-  defp args_are_plain_vars?(_), do: false
-
-  defp plain_var?({:\\, _, _}), do: false
-
-  defp plain_var?({name, _, ctx}) when is_atom(name) and is_atom(ctx) do
-    not underscore?(name)
-  end
-
-  defp plain_var?(_), do: false
-
   defp clause_arg_names({:def, _, [head | _]}), do: head |> strip_when() |> head_arg_names()
-
-  defp head_arg_names({_name, _, args}) when is_list(args) do
-    args |> Enum.map(fn {n, _, _} -> n end)
-  end
-
-  defp head_arg_names({_name, _, nil}), do: []
-
-  # ---- Body inspection ------------------------------------------------
-
-  defp body_uses_module_attribute?(clauses),
-    do: clauses |> Enum.any?(&clause_references_attribute?/1)
-
-  defp clause_references_attribute?({:def, _, [_head, body_kw]}),
-    do:
-      body_kw
-      |> Keyword.values()
-      |> Enum.any?(&references_attribute?/1)
-
-  defp references_attribute?(ast) do
-    ast
-    |> Macro.prewalker()
-    |> Enum.any?(fn
-      {:@, _, [{name, _, ctx}]} when is_atom(name) and is_atom(ctx) -> true
-      _ -> false
-    end)
-  end
-
-  # ---- Hashing --------------------------------------------------------
-
-  defp hash_clauses(clauses),
-    do:
-      clauses
-      |> Enum.map(&normalize_clause/1)
-      |> :erlang.phash2()
-
-  defp normalize_clause({:def, _, [head, body_kw]}) do
-    # Strip meta and rename variables positionally. Result is a pure
-    # structural fingerprint: same shape, same vars, regardless of
-    # naming or location.
-    stripped_head = strip_meta(head)
-    stripped_body = body_kw |> Keyword.values() |> Enum.map(&strip_meta/1)
-    rename_vars({stripped_head, stripped_body})
-  end
-
-  defp strip_meta(ast) do
-    Macro.prewalk(ast, fn
-      {form, _meta, args} -> {form, [], args}
-      other -> other
-    end)
-  end
-
-  # Walk the AST, build a {var_name -> positional_index} map, and
-  # replace every variable occurrence with `{:"$var", [], idx}`. This
-  # makes `(a, b) -> a + b` and `(x, y) -> x + y` hash identically.
-  defp rename_vars(ast) do
-    {result, _map} = Macro.prewalk(ast, %{}, &rename_var_node/2)
-    result
-  end
-
-  defp rename_var_node({name, [], ctx} = node, acc)
-       when is_atom(name) and is_atom(ctx) do
-    cond do
-      underscore?(name) ->
-        {node, acc}
-
-      Map.has_key?(acc, name) ->
-        {{:"$var", [], [Map.fetch!(acc, name)]}, acc}
-
-      true ->
-        idx = map_size(acc)
-        {{:"$var", [], [idx]}, Map.put(acc, name, idx)}
-    end
-  end
-
-  defp rename_var_node(node, acc), do: {node, acc}
-
-  defp total_mass(clauses), do: clauses |> Enum.map(&clause_mass/1) |> Enum.sum()
 
   defp clause_mass({:def, _, [_head, body_kw]}),
     do:
@@ -365,122 +236,22 @@ defmodule Number42.Refactors.Ex.DelegateExactDuplicates do
       |> Enum.map(&node_count/1)
       |> Enum.sum()
 
-  defp node_count(ast) do
-    {_, count} = Macro.prewalk(ast, 0, fn node, acc -> {node, acc + 1} end)
-    count
-  end
-
-  # ---- Per-file rewrite -----------------------------------------------
-
-  defp rewrite(source, plan),
-    do: Sourceror.parse_string(source) |> apply_plan_to_parse_result(plan, source)
-
-  defp apply_plan_to_ast(ast, source, plan) do
-    ast
-    |> Macro.prewalker()
-    |> Enum.flat_map(fn
-      {:defmodule, _, [name_ast, [{_do, body}]]} ->
-        case alias_to_module(name_ast) do
-          {:ok, mod} -> patches_for_module(mod, body_to_exprs(body), plan)
-          :error -> []
-        end
-
-      _ ->
-        []
-    end)
-    |> patch_or_passthrough(source)
-  end
-
-  defp patches_for_module(module, body_exprs, plan),
-    do: Map.get(plan, module) |> module_patches(body_exprs)
-
-  # Find defps that, after delegation, are only reachable from the
-  # functions we just delegated away. They become unused — emit delete
-  # patches for them.
-  #
-  # Algorithm:
-  # 1. Build a call graph: for each def/defp, what {name, arity} pairs
-  #    does its body reference?
-  # 2. Mark "live roots" — every def NOT being delegated away.
-  # 3. Compute the transitive closure of live roots over the call graph
-  #    (which {name, arity} pairs are reachable from any live def).
-  # 4. Any defp not in the closure is dead — emit a patch removing its
-  #    entire clause group.
-  defp dead_helper_patches(body_exprs, delegated_entries) do
-    delegated_set =
-      delegated_entries
-      |> Enum.map(fn {name, arity, _args, _winner} -> {name, arity} end)
-      |> MapSet.new()
-
-    definitions = collect_definitions(body_exprs)
-
-    live_roots =
-      definitions
-      |> Enum.filter(fn %{arity: arity, kind: kind, name: name} ->
-        kind == :def and not MapSet.member?(delegated_set, {name, arity})
-      end)
-      |> Enum.map(&{&1.name, &1.arity})
-      |> MapSet.new()
-
-    call_graph =
-      for def_info <- definitions do
-        {{def_info.name, def_info.arity}, def_info.calls}
-      end
-      |> Map.new()
-
-    reachable = transitive_closure(live_roots, call_graph)
-
-    definitions
-    |> Enum.filter(fn %{arity: arity, kind: kind, name: name} ->
-      kind == :defp and not MapSet.member?(reachable, {name, arity})
-    end)
-    |> Enum.flat_map(&delete_patch_for/1)
-  end
-
-  defp collect_definitions(body_exprs) do
-    body_exprs
-    |> Enum.filter(fn
-      {kind, _, [_head | _]} when kind in [:def, :defp] -> true
+  defp clause_matches?({:def, _, [head | _]}, name, arity) do
+    case strip_when(head) do
+      {^name, _, args} when is_list(args) and length(args) == arity -> true
+      {^name, _, nil} when arity == 0 -> true
       _ -> false
-    end)
-    |> Enum.group_by(fn {kind, _, [head | _]} ->
-      case strip_when(head) do
-        {name, _, args} when is_atom(name) and is_list(args) -> {kind, name, length(args)}
-        {name, _, nil} when is_atom(name) -> {kind, name, 0}
-        _ -> :skip
-      end
-    end)
-    |> Enum.reject(fn {key, _} -> key == :skip end)
-    |> Enum.map(fn {{kind, name, arity}, clauses} ->
-      %{
-        arity: arity,
-        calls: collect_calls_in_clauses(clauses),
-        clauses: clauses,
-        kind: kind,
-        name: name
-      }
-    end)
+    end
   end
 
-  defp collect_calls_in_clauses(clauses) do
-    clauses
-    |> Enum.flat_map(fn {_kind, _, [_head, body_kw]} ->
-      body_kw |> Keyword.values() |> Enum.flat_map(&collect_calls/1)
-    end)
-    |> MapSet.new()
-  end
+  defp clause_matches?(_, _, _), do: false
 
-  # Walk the AST and collect every local call shape {name, arity}.
-  # We record:
-  # - direct calls:        foo(x, y)            → {:foo, 2}
-  # - pipe targets:        x |> foo(y)          → {:foo, 2}  (NOT 1)
-  # - captures:            &foo/2               → {:foo, 2}
-  # We deliberately do NOT chase remote calls (Foo.bar(x)) — those
-  # don't reference local helpers. Pipe rhs are handled specially: the
-  # rhs `foo(y)` parses as a 1-arg call, but the actual call site is
-  # 2-arg (the lhs flows in as arg 0). To avoid double-counting we
-  # mark every pipe rhs and skip its naked-call accounting in the
-  # generic clause.
+  defp clause_references_attribute?({:def, _, [_head, body_kw]}),
+    do:
+      body_kw
+      |> Keyword.values()
+      |> Enum.any?(&references_attribute?/1)
+
   defp collect_calls(ast) do
     {_, pipe_rhs_set} =
       Macro.prewalk(ast, MapSet.new(), fn
@@ -545,29 +316,73 @@ defmodule Number42.Refactors.Ex.DelegateExactDuplicates do
     calls
   end
 
-  defp local_call_candidate?(name),
-    do:
-      not Macro.special_form?(name, 0) and
-        not Macro.special_form?(name, 1) and
-        not Macro.special_form?(name, 2) and
-        not Macro.operator?(name, 1) and
-        not Macro.operator?(name, 2)
-
-  defp transitive_closure(roots, graph),
-    do: roots |> transitive_closure_step(graph, MapSet.to_list(roots))
-
-  defp transitive_closure_step(reached, _graph, []), do: reached
-
-  defp transitive_closure_step(reached, graph, [current | rest]) do
-    callees = Map.get(graph, current, MapSet.new())
-
-    new_callees =
-      callees
-      |> Enum.reject(&MapSet.member?(reached, &1))
-
-    next_reached = new_callees |> Enum.reduce(reached, &MapSet.put(&2, &1))
-    transitive_closure_step(next_reached, graph, rest ++ new_callees)
+  defp collect_calls_in_clauses(clauses) do
+    clauses
+    |> Enum.flat_map(fn {_kind, _, [_head, body_kw]} ->
+      body_kw |> Keyword.values() |> Enum.flat_map(&collect_calls/1)
+    end)
+    |> MapSet.new()
   end
+
+  defp collect_definitions(body_exprs) do
+    body_exprs
+    |> Enum.filter(fn
+      {kind, _, [_head | _]} when kind in [:def, :defp] -> true
+      _ -> false
+    end)
+    |> Enum.group_by(fn {kind, _, [head | _]} ->
+      case strip_when(head) do
+        {name, _, args} when is_atom(name) and is_list(args) -> {kind, name, length(args)}
+        {name, _, nil} when is_atom(name) -> {kind, name, 0}
+        _ -> :skip
+      end
+    end)
+    |> Enum.reject(fn {key, _} -> key == :skip end)
+    |> Enum.map(fn {{kind, name, arity}, clauses} ->
+      %{
+        arity: arity,
+        calls: collect_calls_in_clauses(clauses),
+        clauses: clauses,
+        kind: kind,
+        name: name
+      }
+    end)
+  end
+
+  defp dead_helper_patches(body_exprs, delegated_entries) do
+    delegated_set =
+      delegated_entries
+      |> Enum.map(fn {name, arity, _args, _winner} -> {name, arity} end)
+      |> MapSet.new()
+
+    definitions = collect_definitions(body_exprs)
+
+    live_roots =
+      definitions
+      |> Enum.filter(fn %{arity: arity, kind: kind, name: name} ->
+        kind == :def and not MapSet.member?(delegated_set, {name, arity})
+      end)
+      |> Enum.map(&{&1.name, &1.arity})
+      |> MapSet.new()
+
+    call_graph =
+      for def_info <- definitions do
+        {{def_info.name, def_info.arity}, def_info.calls}
+      end
+      |> Map.new()
+
+    reachable = transitive_closure(live_roots, call_graph)
+
+    definitions
+    |> Enum.filter(fn %{arity: arity, kind: kind, name: name} ->
+      kind == :defp and not MapSet.member?(reachable, {name, arity})
+    end)
+    |> Enum.flat_map(&delete_patch_for/1)
+  end
+
+  defp def_clause?({:def, _, [_head | _]}), do: true
+  defp def_clause?(_), do: false
+  defp def_name_arity_or_skip({:def, _, [head | _]}), do: strip_when(head) |> name_arity_or_skip()
 
   defp delete_patch_for(%{clauses: [first | _] = clauses}) do
     last = List.last(clauses)
@@ -580,93 +395,82 @@ defmodule Number42.Refactors.Ex.DelegateExactDuplicates do
     end
   end
 
-  defp patch_for_function(body_exprs, name, arity, args, winner) do
-    clauses = body_exprs |> Enum.filter(&clause_matches?(&1, name, arity))
+  defp drop_node_arg(value, _node), do: value
 
-    case clauses do
-      [] ->
-        []
-
-      [first | _] = list ->
-        last = List.last(list)
-        replacement = render_defdelegate(name, args, winner)
-        build_clause_group_patch(first, last, replacement)
-    end
-  end
-
-  defp clause_matches?({:def, _, [head | _]}, name, arity) do
+  defp eligible_clause?({:def, _, [head | _]} = node) do
     case strip_when(head) do
-      {^name, _, args} when is_list(args) and length(args) == arity -> true
-      {^name, _, nil} when arity == 0 -> true
-      _ -> false
+      ^head ->
+        # No `when` wrapper. Check that all args are plain vars and no
+        # defaults are present. Body check happens via `body_uses_module_attribute?/1`.
+        args_are_plain_vars?(head)
+
+      _stripped ->
+        # Has a `when`-guard — skip.
+        false
     end
+    |> drop_node_arg(node)
   end
-
-  defp clause_matches?(_, _, _), do: false
-
-  defp render_defdelegate(name, args, winner) do
-    args_src = args |> Enum.join(", ")
-    "defdelegate #{name}(#{args_src}), to: #{inspect(winner)}"
-  end
-
-  defp build_clause_group_patch(first_node, last_node, replacement) do
-    with %{start: start_pos} <- Sourceror.get_range(first_node),
-         %{end: end_pos} <- Sourceror.get_range(last_node) do
-      [
-        %{
-          change: replacement,
-          range: %{end: end_pos, start: start_pos}
-        }
-      ]
-    else
-      _ -> []
-    end
-  end
-
-  defp patch_or_passthrough([], source), do: source
-
-  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
-
-  # ---- Default source loading -----------------------------------------
-
-  defp load_default_sources,
-    do: File.read(".refactor.exs") |> parse_inputs_from_config()
 
   defp excluded_path?(path?) do
     normalized = String.trim_leading(path?, "./")
     @excluded_path_prefixes |> Enum.any?(&String.starts_with?(normalized, &1))
   end
 
-  defp prepared_for_paths(nil), do: load_default_sources() |> plan_from_sources()
+  defp extract_functions({_path, source}, min_mass),
+    do: Sourceror.parse_string(source) |> extract_functions_or_empty(min_mass)
 
-  defp prepared_for_paths(paths) when is_list(paths) do
-    sources = paths |> Enum.map(fn p -> {p, File.read!(p)} end)
-    {:ok, build_plan(sources)}
+  defp extract_functions_from_ast(ast, min_mass) do
+    ast
+    |> Macro.prewalker()
+    |> Enum.flat_map(fn
+      {:defmodule, _, [name_ast, [{_do, body}]]} ->
+        case alias_to_module(name_ast) do
+          {:ok, mod} -> functions_in_module(mod, body_to_exprs(body), min_mass)
+          :error -> []
+        end
+
+      _ ->
+        []
+    end)
   end
-
-  defp rewrite_with_plan_or_passthrough(nil, source), do: source
-
-  defp rewrite_with_plan_or_passthrough(plan, source), do: source |> rewrite(plan)
 
   defp extract_functions_or_empty({:ok, ast}, min_mass),
     do: ast |> extract_functions_from_ast(min_mass)
 
   defp extract_functions_or_empty({:error, _}, _min_mass), do: []
 
-  defp name_arity_or_skip({name, _, args}) when is_atom(name) and is_list(args) do
-    {name, length(args)}
+  defp functions_in_module(module, body_exprs, min_mass) do
+    body_exprs
+    |> Enum.filter(&def_clause?/1)
+    |> Enum.group_by(&def_name_arity_or_skip/1)
+    |> Enum.reject(fn {key, _clauses} -> key == :skip end)
+    |> Enum.flat_map(fn {{name, arity}, clauses} ->
+      build_function_entry(module, name, arity, clauses, body_exprs, min_mass)
+    end)
   end
 
-  defp name_arity_or_skip({name, _, nil}) when is_atom(name) do
-    {name, 0}
+  defp hash_clauses(clauses),
+    do:
+      clauses
+      |> Enum.map(&normalize_clause/1)
+      |> :erlang.phash2()
+
+  defp head_arg_names({_name, _, args}) when is_list(args) do
+    args |> Enum.map(fn {n, _, _} -> n end)
   end
 
-  defp name_arity_or_skip(_), do: :skip
+  defp head_arg_names({_name, _, nil}), do: []
 
-  defp apply_plan_to_parse_result({:ok, ast}, plan, source),
-    do: ast |> apply_plan_to_ast(source, plan)
+  defp load_default_sources,
+    do: File.read(".refactor.exs") |> parse_inputs_from_config()
 
-  defp apply_plan_to_parse_result({:error, _}, _plan, source), do: source
+  defp local_call_candidate?(name),
+    do:
+      not Macro.special_form?(name, 0) and
+        not Macro.special_form?(name, 1) and
+        not Macro.special_form?(name, 2) and
+        not Macro.operator?(name, 1) and
+        not Macro.operator?(name, 2)
 
   defp module_patches(nil, _body_exprs), do: []
 
@@ -679,6 +483,34 @@ defmodule Number42.Refactors.Ex.DelegateExactDuplicates do
 
     cleanup_patches = dead_helper_patches(body_exprs, entries)
     delegate_patches ++ cleanup_patches
+  end
+
+  defp module_segments(module) when is_atom(module) do
+    module |> Module.split() |> length()
+  end
+
+  defp name_arity_or_skip({name, _, args}) when is_atom(name) and is_list(args) do
+    {name, length(args)}
+  end
+
+  defp name_arity_or_skip({name, _, nil}) when is_atom(name) do
+    {name, 0}
+  end
+
+  defp name_arity_or_skip(_), do: :skip
+
+  defp node_count(ast) do
+    {_, count} = Macro.prewalk(ast, 0, fn node, acc -> {node, acc + 1} end)
+    count
+  end
+
+  defp normalize_clause({:def, _, [head, body_kw]}) do
+    # Strip meta and rename variables positionally. Result is a pure
+    # structural fingerprint: same shape, same vars, regardless of
+    # naming or location.
+    stripped_head = strip_meta(head)
+    stripped_body = body_kw |> Keyword.values() |> Enum.map(&strip_meta/1)
+    rename_vars({stripped_head, stripped_body})
   end
 
   defp parse_inputs_from_config({:ok, contents}) do
@@ -695,7 +527,121 @@ defmodule Number42.Refactors.Ex.DelegateExactDuplicates do
 
   defp parse_inputs_from_config(_), do: []
 
-  defp plan_from_sources([]), do: :no_cache
+  defp patch_for_function(body_exprs, name, arity, args, winner) do
+    clauses = body_exprs |> Enum.filter(&clause_matches?(&1, name, arity))
 
+    case clauses do
+      [] ->
+        []
+
+      [first | _] = list ->
+        last = List.last(list)
+        replacement = render_defdelegate(name, args, winner)
+        build_clause_group_patch(first, last, replacement)
+    end
+  end
+
+  defp patch_or_passthrough([], source), do: source
+  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
+
+  defp patches_for_module(module, body_exprs, plan),
+    do: Map.get(plan, module) |> module_patches(body_exprs)
+
+  defp plain_var?({:\\, _, _}), do: false
+
+  defp plain_var?({name, _, ctx}) when is_atom(name) and is_atom(ctx) do
+    not underscore?(name)
+  end
+
+  defp plain_var?(_), do: false
+  defp plan_for_group({{_name, _arity, _hash}, [_only]}), do: []
+
+  defp plan_for_group({{name, arity, _hash}, entries}) do
+    # All entries share `{name, arity, hash}`. Pick a winner by module-
+    # name length (more segments = longer = winner). Tie-break by
+    # alphabetical order, alphabetically later wins.
+    winner = entries |> Enum.max_by(&{module_segments(&1.module), Atom.to_string(&1.module)})
+
+    entries
+    |> Enum.reject(&(&1.module == winner.module))
+    |> Enum.map(fn loser -> {loser.module, {name, arity, loser.args, winner.module}} end)
+  end
+
+  defp plan_from_sources([]), do: :no_cache
   defp plan_from_sources(sources), do: {:ok, build_plan(sources)}
+  defp prepared_for_paths(nil), do: load_default_sources() |> plan_from_sources()
+
+  defp prepared_for_paths(paths) when is_list(paths) do
+    sources = paths |> Enum.map(fn p -> {p, File.read!(p)} end)
+    {:ok, build_plan(sources)}
+  end
+
+  defp references_attribute?(ast) do
+    ast
+    |> Macro.prewalker()
+    |> Enum.any?(fn
+      {:@, _, [{name, _, ctx}]} when is_atom(name) and is_atom(ctx) -> true
+      _ -> false
+    end)
+  end
+
+  defp rename_var_node({name, [], ctx} = node, acc)
+       when is_atom(name) and is_atom(ctx) do
+    cond do
+      underscore?(name) ->
+        {node, acc}
+
+      Map.has_key?(acc, name) ->
+        {{:"$var", [], [Map.fetch!(acc, name)]}, acc}
+
+      true ->
+        idx = map_size(acc)
+        {{:"$var", [], [idx]}, Map.put(acc, name, idx)}
+    end
+  end
+
+  defp rename_var_node(node, acc), do: {node, acc}
+
+  defp rename_vars(ast) do
+    {result, _map} = Macro.prewalk(ast, %{}, &rename_var_node/2)
+    result
+  end
+
+  defp render_defdelegate(name, args, winner) do
+    args_src = args |> Enum.join(", ")
+    "defdelegate #{name}(#{args_src}), to: #{inspect(winner)}"
+  end
+
+  defp rewrite(source, plan),
+    do: Sourceror.parse_string(source) |> apply_plan_to_parse_result(plan, source)
+
+  defp rewrite_with_plan_or_passthrough(nil, source), do: source
+  defp rewrite_with_plan_or_passthrough(plan, source), do: source |> rewrite(plan)
+
+  defp strip_meta(ast) do
+    Macro.prewalk(ast, fn
+      {form, _meta, args} -> {form, [], args}
+      other -> other
+    end)
+  end
+
+  defp strip_when({:when, _, [inner | _]}), do: inner
+  defp strip_when(other), do: other
+  defp total_mass(clauses), do: clauses |> Enum.map(&clause_mass/1) |> Enum.sum()
+
+  defp transitive_closure(roots, graph),
+    do: roots |> transitive_closure_step(graph, MapSet.to_list(roots))
+
+  defp transitive_closure_step(reached, _graph, []), do: reached
+
+  defp transitive_closure_step(reached, graph, [current | rest]) do
+    callees = Map.get(graph, current, MapSet.new())
+
+    new_callees =
+      callees
+      |> Enum.reject(&MapSet.member?(reached, &1))
+
+    next_reached = new_callees |> Enum.reduce(reached, &MapSet.put(&2, &1))
+    transitive_closure_step(next_reached, graph, rest ++ new_callees)
+  end
 end

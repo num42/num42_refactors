@@ -31,10 +31,6 @@ defmodule Number42.Refactors.Ex.MultiAliasExpand do
 
   @impl Number42.Refactors.Refactor
   def description, do: "Expand `alias Foo.{A, B}` into one alias per module"
-
-  @impl Number42.Refactors.Refactor
-  def priority, do: 220
-
   @impl Number42.Refactors.Refactor
   def explanation do
     """
@@ -47,9 +43,20 @@ defmodule Number42.Refactors.Ex.MultiAliasExpand do
   end
 
   @impl Number42.Refactors.Refactor
+  def priority, do: 220
+  @impl Number42.Refactors.Refactor
   def reformat_after?, do: false
   @impl Number42.Refactors.Refactor
   def transform(source, _opts), do: Sourceror.parse_string(source) |> apply_patches(source)
+  defp alias_expand_patches_or_skip(nil, _source), do: []
+
+  defp alias_expand_patches_or_skip(exprs, source),
+    do: exprs |> Enum.flat_map(&maybe_expand_patch(&1, source))
+
+  defp apply_patches({:ok, ast}, source),
+    do: build_patches(ast, source) |> patch_or_passthrough(source)
+
+  defp apply_patches({:error, _}, source), do: source
 
   defp build_patches(ast, source),
     do: module_body_exprs(ast) |> alias_expand_patches_or_skip(source)
@@ -96,20 +103,7 @@ defmodule Number42.Refactors.Ex.MultiAliasExpand do
   end
 
   defp maybe_expand_patch(_, _), do: []
-
-  defp render_alias(segments), do: "alias " <> Enum.map_join(segments, ".", &Atom.to_string/1)
-
-  defp apply_patches({:ok, ast}, source),
-    do: build_patches(ast, source) |> patch_or_passthrough(source)
-
-  defp apply_patches({:error, _}, source), do: source
-
-  defp alias_expand_patches_or_skip(nil, _source), do: []
-
-  defp alias_expand_patches_or_skip(exprs, source),
-    do: exprs |> Enum.flat_map(&maybe_expand_patch(&1, source))
-
   defp patch_or_passthrough([], source), do: source
-
   defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
+  defp render_alias(segments), do: "alias " <> Enum.map_join(segments, ".", &Atom.to_string/1)
 end

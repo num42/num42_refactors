@@ -70,10 +70,6 @@ defmodule Number42.Refactors.Ex.InlineSingleExpressionDef do
 
   @impl Number42.Refactors.Refactor
   def description, do: "Collapse single-expression def/defp body to `do:` form"
-
-  @impl Number42.Refactors.Refactor
-  def priority, do: 50
-
   @impl Number42.Refactors.Refactor
   def explanation do
     """
@@ -88,16 +84,72 @@ defmodule Number42.Refactors.Ex.InlineSingleExpressionDef do
   end
 
   @impl Number42.Refactors.Refactor
+  def priority, do: 50
+  @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
-
   @impl Number42.Refactors.Refactor
   def transform(source, _opts), do: Sourceror.parse_string(source) |> apply_patches(source)
+  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
+  defp apply_patches({:error, _}, source), do: source
+  defp binding_first_arg?({:in, _, [_, _]}), do: true
+  defp binding_first_arg?(_), do: false
+
+  defp binding_macro_call?({{:., _, [_, fun]}, _, [first | _]})
+       when is_atom(fun),
+       do: binding_first_arg?(first)
+
+  defp binding_macro_call?({name, _, [first | _] = args})
+       when is_atom(name) and is_list(args),
+       do: binding_first_arg?(first)
+
+  defp binding_macro_call?(_), do: false
+
+  defp block_form?(meta) when is_list(meta) do
+    Keyword.has_key?(meta, :do) or Keyword.has_key?(meta, :end)
+  end
+
+  defp block_form?(_), do: false
 
   defp build_patches(ast),
     do:
       ast
       |> Macro.prewalker()
       |> Enum.flat_map(&maybe_patch/1)
+
+  defp contains_block_construct?(ast) do
+    ast
+    |> Macro.prewalker()
+    |> Enum.any?(fn
+      {name, _, _}
+      when name in [:fn, :case, :cond, :if, :unless, :with, :try, :receive, :for, :quote] ->
+        true
+
+      _ ->
+        false
+    end)
+  end
+
+  defp fetch_do_body(body_kw) do
+    body_kw
+    |> Enum.find_value(:error, fn
+      {{:__block__, _, [:do]}, value} -> {:ok, value}
+      {:do, value} -> {:ok, value}
+      _ -> nil
+    end)
+    |> case do
+      :error -> :error
+      {:ok, _} = ok -> ok
+    end
+  end
+
+  defp has_when_guard?({:when, _, _}), do: true
+  defp has_when_guard?(_), do: false
+
+  defp heredoc_body?({:__block__, meta, [bin]}) when is_binary(bin) and is_list(meta) do
+    Keyword.get(meta, :delimiter) == ~s(""")
+  end
+
+  defp heredoc_body?(_), do: false
 
   defp maybe_patch({kind, meta, [head, body_kw]} = node)
        when kind in [:def, :defp] and is_list(body_kw) do
@@ -120,20 +172,6 @@ defmodule Number42.Refactors.Ex.InlineSingleExpressionDef do
 
   defp maybe_patch(_), do: []
 
-  defp block_form?(meta) when is_list(meta) do
-    Keyword.has_key?(meta, :do) or Keyword.has_key?(meta, :end)
-  end
-
-  defp block_form?(_), do: false
-
-  defp has_when_guard?({:when, _, _}), do: true
-  defp has_when_guard?(_), do: false
-
-  # `def f do ... rescue ... end` parses as a body keyword with both
-  # `:do` and `:rescue` keys (also `:catch`, `:after`, `:else`).
-  # Inlining only the `:do` arm would silently drop the others — a
-  # semantics-breaking rewrite. Only proceed when `:do` is the sole
-  # branch.
   defp only_do_branch?(body_kw) do
     body_kw
     |> Enum.all?(fn
@@ -143,33 +181,17 @@ defmodule Number42.Refactors.Ex.InlineSingleExpressionDef do
     end)
   end
 
-  defp fetch_do_body(body_kw) do
-    body_kw
-    |> Enum.find_value(:error, fn
-      {{:__block__, _, [:do]}, value} -> {:ok, value}
-      {:do, value} -> {:ok, value}
-      _ -> nil
-    end)
-    |> case do
-      :error -> :error
-      {:ok, _} = ok -> ok
-    end
+  defp patch_or_passthrough([], source), do: source
+  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
+  defp pipeable_call?({{:., _, [_callee, fun]}, _, _}) when is_atom(fun), do: true
+
+  defp pipeable_call?({name, _, args}) when is_atom(name) and is_list(args) do
+    not Macro.operator?(name, length(args)) and not special_form_name?(name)
   end
 
-  defp single_expression({:__block__, _, [single]}), do: {:ok, single}
-  defp single_expression({:__block__, _, _}), do: :skip
-  defp single_expression(other), do: {:ok, other}
-
-  defp render_inline(kind, head, body) do
-    head_text = Sourceror.to_string(head)
-    body_text = render_body(body)
-    {:ok, "#{kind} #{head_text}, do: #{body_text}"}
-  end
-
-  # Pipe stays as-is.
+  defp pipeable_call?(_), do: false
   defp render_body({:|>, _, _} = pipe), do: Sourceror.to_string(pipe)
 
-  # Multi-arg local or qualified call → pipe the first arg.
   defp render_body({callee, meta, args} = call) when is_list(args) and args != [] do
     if pipeable_call?(call) do
       [first | rest] = args
@@ -182,84 +204,20 @@ defmodule Number42.Refactors.Ex.InlineSingleExpressionDef do
 
   defp render_body(other), do: Sourceror.to_string(other)
 
-  # A "pipeable call" is a regular function/macro call where the
-  # callee is either a bare local name or a `Module.fun` chain. We
-  # explicitly exclude operators (which share AST shape with calls)
-  # and special forms (case/cond/if/...).
-  defp pipeable_call?({{:., _, [_callee, fun]}, _, _}) when is_atom(fun), do: true
-
-  defp pipeable_call?({name, _, args}) when is_atom(name) and is_list(args) do
-    not Macro.operator?(name, length(args)) and not special_form_name?(name)
+  defp render_inline(kind, head, body) do
+    head_text = Sourceror.to_string(head)
+    body_text = render_body(body)
+    {:ok, "#{kind} #{head_text}, do: #{body_text}"}
   end
 
-  defp pipeable_call?(_), do: false
-
-  # `f(x in Source, ...)` — first arg is a binding form (Ecto's
-  # `from(i in Item, where: …)`, custom query/comprehension macros).
-  # The `in` is a binding operator the receiving macro introspects;
-  # it does not survive any rewrite that pulls it out of the
-  # argument list. Two ways the inline rewrite would corrupt it:
-  #   - Pipe form: `(i in Item) |> from(where: …)` — pipe can't
-  #     carry the binding through the macro's pattern match.
-  #   - Keyword `do:` form: `def all, do: from(i in Item, …)` —
-  #     parses, but multi-arg query macros tend to be multi-line
-  #     and don't read well on one keyword line.
-  # Either way the right call is to leave the whole def alone.
-  defp binding_macro_call?({{:., _, [_, fun]}, _, [first | _]})
-       when is_atom(fun),
-       do: binding_first_arg?(first)
-
-  defp binding_macro_call?({name, _, [first | _] = args})
-       when is_atom(name) and is_list(args),
-       do: binding_first_arg?(first)
-
-  defp binding_macro_call?(_), do: false
-
-  defp binding_first_arg?({:in, _, [_, _]}), do: true
-  defp binding_first_arg?(_), do: false
-
-  # Skip when the body is a heredoc-delimited string. Sourceror keeps the
-  # delimiter in meta of the wrapping `__block__`; we check before
-  # `single_expression/1` would strip that wrapper. Distinguishes
-  # `"""..."""` (skip) from `"..."` (rewrite as `do: "..."`).
-  defp heredoc_body?({:__block__, meta, [bin]}) when is_binary(bin) and is_list(meta) do
-    Keyword.get(meta, :delimiter) == ~s(""")
-  end
-
-  defp heredoc_body?(_), do: false
-
-  # Skip when the body is a sigil call (`~H"""..."""`, `~S"..."`, etc.).
-  # Sourceror's `to_string` round-trips the sigil correctly, but the
-  # post-format pass parses the rewritten source through
-  # `Code.format_string!/2`, which mishandles complex sigil contents
-  # inside a `do:` keyword (HEEx with embedded `#{}` interpolations
-  # gets re-escaped). Sigils are also typically multi-line and don't
-  # belong on a single `do:` line anyway.
   defp sigil_body?({sigil_name, _, [{:<<>>, _, _}, _modifiers]}) when is_atom(sigil_name) do
     sigil_name |> Atom.to_string() |> String.starts_with?("sigil_")
   end
 
   defp sigil_body?(_), do: false
-
-  # A body contains a "block construct" when any sub-node is a `do/end`
-  # special form: `fn`, `case`, `cond`, `if`, `unless`, `with`, `try`,
-  # `receive`, `for`, `quote`. These shapes can appear inside a pipe
-  # (e.g. `... |> case do ... end`) but they don't survive the rewrite
-  # to `do:` form: the formatter can't re-parse a `do: ... case do
-  # ... end` body, since `do:` is a keyword and the inner `do` reopens
-  # block syntax. Skip the whole def in that case.
-  defp contains_block_construct?(ast) do
-    ast
-    |> Macro.prewalker()
-    |> Enum.any?(fn
-      {name, _, _}
-      when name in [:fn, :case, :cond, :if, :unless, :with, :try, :receive, :for, :quote] ->
-        true
-
-      _ ->
-        false
-    end)
-  end
+  defp single_expression({:__block__, _, [single]}), do: {:ok, single}
+  defp single_expression({:__block__, _, _}), do: :skip
+  defp single_expression(other), do: {:ok, other}
 
   defp special_form_name?(name),
     do:
@@ -282,12 +240,4 @@ defmodule Number42.Refactors.Ex.InlineSingleExpressionDef do
         :{},
         :__aliases__
       ]
-
-  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
-
-  defp apply_patches({:error, _}, source), do: source
-
-  defp patch_or_passthrough([], source), do: source
-
-  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
 end

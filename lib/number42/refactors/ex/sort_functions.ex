@@ -18,7 +18,11 @@ defmodule Number42.Refactors.Ex.SortFunctions do
       end
 
   Sorting is **conservative**: we only sort regions of the module
-  where every node is provably safe to reorder.
+  where the surrounding node shapes give us no obvious reason a
+  reorder would change behaviour. That is a discipline applied at
+  pattern-match time, not a formal proof — review the diff after
+  running, especially in files that use module-level state (`@on_load`,
+  `@before_compile`, runtime attribute reads at compile time).
 
   ## What gets sorted
 
@@ -110,10 +114,6 @@ defmodule Number42.Refactors.Ex.SortFunctions do
 
   @impl Number42.Refactors.Refactor
   def description, do: "Sort def/defp groups alphabetically"
-
-  @impl Number42.Refactors.Refactor
-  def priority, do: 30
-
   @impl Number42.Refactors.Refactor
   def explanation do
     """
@@ -127,6 +127,8 @@ defmodule Number42.Refactors.Ex.SortFunctions do
     """
   end
 
+  @impl Number42.Refactors.Refactor
+  def priority, do: 30
   @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
   @impl Number42.Refactors.Refactor
@@ -148,6 +150,13 @@ defmodule Number42.Refactors.Ex.SortFunctions do
         []
     end)
   end
+
+  defp apply_patches({:ok, ast}, source),
+    do:
+      build_patches(ast, source)
+      |> patch_or_passthrough(source)
+
+  defp apply_patches({:error, _}, source), do: source
 
   defp block_source({:fn_block, _, _, nodes}, source) do
     first_range = nodes |> List.first() |> Sourceror.get_range()
@@ -222,6 +231,10 @@ defmodule Number42.Refactors.Ex.SortFunctions do
     end)
   end
 
+  defp def_classification_or_other({:ok, name, arity}), do: {:def, name, arity}
+  defp def_classification_or_other(:error), do: :other
+  defp def_node?({def_or_defp, _, _}) when def_or_defp in [:def, :defp], do: true
+  defp def_node?(_), do: false
   defp extract_name_arity({:when, _, [head | _]}), do: extract_name_arity(head)
 
   defp extract_name_arity({name, _, ctx}) when is_atom(name) and is_atom(ctx),
@@ -276,8 +289,6 @@ defmodule Number42.Refactors.Ex.SortFunctions do
     |> MapSet.new()
   end
 
-  defp def_node?({def_or_defp, _, _}) when def_or_defp in [:def, :defp], do: true
-  defp def_node?(_), do: false
   defp last_node_of_block({:fn_block, _, _, nodes}), do: List.last(nodes)
 
   defp leading_indent(source, line) do
@@ -294,6 +305,9 @@ defmodule Number42.Refactors.Ex.SortFunctions do
 
   defp original_line({:fn_block, _, _, [first | _]}),
     do: Sourceror.get_range(first) |> start_line_or_zero()
+
+  defp patch_or_passthrough([], source), do: source
+  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
 
   defp region_patch(blocks, source, heex_set) do
     sorted = blocks |> Enum.sort_by(&sort_key(&1, heex_set))
@@ -374,22 +388,6 @@ defmodule Number42.Refactors.Ex.SortFunctions do
     |> Enum.filter(&(length(&1) >= 2))
   end
 
-  defp apply_patches({:ok, ast}, source),
-    do:
-      build_patches(ast, source)
-      |> patch_or_passthrough(source)
-
-  defp apply_patches({:error, _}, source), do: source
-
-  defp def_classification_or_other({:ok, name, arity}), do: {:def, name, arity}
-
-  defp def_classification_or_other(:error), do: :other
-
   defp start_line_or_zero(%{start: start}), do: start |> Keyword.fetch!(:line)
-
   defp start_line_or_zero(_), do: 0
-
-  defp patch_or_passthrough([], source), do: source
-
-  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
 end

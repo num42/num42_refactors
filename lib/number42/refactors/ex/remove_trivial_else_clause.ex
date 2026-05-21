@@ -56,10 +56,6 @@ defmodule Number42.Refactors.Ex.RemoveTrivialElseClause do
 
   @impl Number42.Refactors.Refactor
   def description, do: "Remove identity-only `else` clauses from `with` expressions"
-
-  @impl Number42.Refactors.Refactor
-  def priority, do: 120
-
   @impl Number42.Refactors.Refactor
   def explanation do
     """
@@ -74,16 +70,36 @@ defmodule Number42.Refactors.Ex.RemoveTrivialElseClause do
   end
 
   @impl Number42.Refactors.Refactor
+  def priority, do: 120
+  @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
-
   @impl Number42.Refactors.Refactor
   def transform(source, _opts), do: Sourceror.parse_string(source) |> apply_patches(source)
+  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
+  defp apply_patches({:error, _}, source), do: source
 
   defp build_patches(ast),
     do:
       ast
       |> Macro.prewalker()
       |> Enum.flat_map(&maybe_patch/1)
+
+  defp else_clauses_or_default({:ok, clauses}) when is_list(clauses) do
+    {:ok, clauses}
+  end
+
+  defp else_clauses_or_default(:error), do: {:ok, []}
+  defp else_clauses_or_default(_), do: :error
+  defp fetch_else(keyword), do: fetch_keyword(keyword, :else) |> else_clauses_or_default()
+
+  defp fetch_keyword(keyword, key) do
+    keyword
+    |> Enum.find_value(:error, fn
+      {{:__block__, _, [^key]}, value} -> {:ok, value}
+      {^key, value} -> {:ok, value}
+      _ -> nil
+    end)
+  end
 
   defp maybe_patch({:with, _meta, clauses} = node) when is_list(clauses) do
     {kw, head_clauses} = split_keyword(clauses)
@@ -99,23 +115,22 @@ defmodule Number42.Refactors.Ex.RemoveTrivialElseClause do
   end
 
   defp maybe_patch(_), do: []
+  defp patch_or_passthrough([], source), do: source
+  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
+
+  defp render_with_no_else(head_clauses, do_body) do
+    with_meta = [do: [line: 1], end: [line: 1]]
+    with_ast = {:with, with_meta, head_clauses ++ [[{{:__block__, [], [:do]}, do_body}]]}
+    Sourceror.to_string(with_ast)
+  end
 
   defp split_keyword(clauses), do: List.last(clauses) |> split_off_keyword(clauses)
 
-  defp fetch_keyword(keyword, key) do
-    keyword
-    |> Enum.find_value(:error, fn
-      {{:__block__, _, [^key]}, value} -> {:ok, value}
-      {^key, value} -> {:ok, value}
-      _ -> nil
-    end)
+  defp split_off_keyword(kw, clauses) when is_list(kw) do
+    {kw, clauses |> Enum.drop(-1)}
   end
 
-  defp fetch_else(keyword), do: fetch_keyword(keyword, :else) |> else_clauses_or_default()
-
-  defp trivial_arm?({:->, _, [[pattern], body]}), do: strip_meta(pattern) == strip_meta(body)
-
-  defp trivial_arm?(_), do: false
+  defp split_off_keyword(_, clauses), do: {[], clauses}
 
   defp strip_meta(ast) do
     Macro.prewalk(ast, fn
@@ -124,31 +139,6 @@ defmodule Number42.Refactors.Ex.RemoveTrivialElseClause do
     end)
   end
 
-  defp render_with_no_else(head_clauses, do_body) do
-    with_meta = [do: [line: 1], end: [line: 1]]
-    with_ast = {:with, with_meta, head_clauses ++ [[{{:__block__, [], [:do]}, do_body}]]}
-    Sourceror.to_string(with_ast)
-  end
-
-  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
-
-  defp apply_patches({:error, _}, source), do: source
-
-  defp split_off_keyword(kw, clauses) when is_list(kw) do
-    {kw, clauses |> Enum.drop(-1)}
-  end
-
-  defp split_off_keyword(_, clauses), do: {[], clauses}
-
-  defp else_clauses_or_default({:ok, clauses}) when is_list(clauses) do
-    {:ok, clauses}
-  end
-
-  defp else_clauses_or_default(:error), do: {:ok, []}
-
-  defp else_clauses_or_default(_), do: :error
-
-  defp patch_or_passthrough([], source), do: source
-
-  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
+  defp trivial_arm?({:->, _, [[pattern], body]}), do: strip_meta(pattern) == strip_meta(body)
+  defp trivial_arm?(_), do: false
 end

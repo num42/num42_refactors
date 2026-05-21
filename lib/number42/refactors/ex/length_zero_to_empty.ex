@@ -65,10 +65,6 @@ defmodule Number42.Refactors.Ex.LengthZeroToEmpty do
 
   @impl Number42.Refactors.Refactor
   def description, do: "length/Enum.count == 0 / > 0 -> Enum.empty?/Enum.any?"
-
-  @impl Number42.Refactors.Refactor
-  def priority, do: 130
-
   @impl Number42.Refactors.Refactor
   def explanation do
     """
@@ -85,10 +81,13 @@ defmodule Number42.Refactors.Ex.LengthZeroToEmpty do
   end
 
   @impl Number42.Refactors.Refactor
+  def priority, do: 130
+  @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
-
   @impl Number42.Refactors.Refactor
   def transform(source, _opts), do: Sourceror.parse_string(source) |> apply_patches(source)
+  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
+  defp apply_patches({:error, _}, source), do: source
 
   defp build_patches(ast) do
     guard_nodes = collect_guard_nodes(ast)
@@ -98,64 +97,25 @@ defmodule Number42.Refactors.Ex.LengthZeroToEmpty do
     |> Enum.flat_map(&maybe_patch(&1, guard_nodes))
   end
 
-  # Collect every node that lives inside a `when` guard. Guards have
-  # different rewrite rules (Enum.empty? not allowed). We mark all
-  # descendants of the guard subtree as "in-guard".
-  defp collect_guard_nodes(ast) do
-    ast
-    |> Macro.prewalker()
-    |> Enum.flat_map(fn
-      {:when, _, [_inner, guard]} ->
-        guard |> Macro.prewalker() |> Enum.to_list()
+  defp call_info({:length, _, [coll]}), do: {:length, coll}
 
-      _ ->
-        []
-    end)
-    |> MapSet.new()
-  end
+  defp call_info({{:., _, [{:__aliases__, _, [:Enum]}, :count]}, _, [coll]}),
+    do: {:enum_count, coll}
 
-  defp maybe_patch({op, _, [lhs, rhs]} = node, guard_nodes)
-       when op in [:==, :!=, :>, :<] do
-    in_guard? = MapSet.member?(guard_nodes, node)
+  defp call_info({{:., _, [{:__aliases__, _, [:Enum]}, :count]}, _, [coll, fun]}),
+    do: {:enum_count_with_fun, coll, fun}
 
-    classify(op, lhs, rhs)
-    |> dispatch_rewrite(node, in_guard?)
-  end
+  defp call_info({:|>, _, [coll, {:length, _, []}]}),
+    do: {:length, {:__pipe__, coll}}
 
-  defp maybe_patch(_, _), do: []
+  defp call_info({:|>, _, [coll, {{:., _, [{:__aliases__, _, [:Enum]}, :count]}, _, []}]}),
+    do: {:enum_count, {:__pipe__, coll}}
 
-  # In a guard, only `length`-shaped comparisons can be rewritten —
-  # `Enum.count` isn't even callable there, but if someone wrote it
-  # the compiler will reject it; we should leave it for them to see.
-  # We tag classified results with their source kind so we can filter.
-  defp dispatch_rewrite({:empty, coll, :length}, node, true),
-    do: [Patch.replace(node, "#{unwrap_coll_text(coll)} == []")]
+  defp call_info({:|>, _, [coll, {{:., _, [{:__aliases__, _, [:Enum]}, :count]}, _, [fun]}]}),
+    do: {:enum_count_with_fun, {:__pipe__, coll}, fun}
 
-  defp dispatch_rewrite({:nonempty, coll, :length}, node, true) do
-    coll_text = unwrap_coll_text(coll)
-    [Patch.replace(node, "is_list(#{coll_text}) and #{coll_text} != []")]
-  end
+  defp call_info(_), do: :skip
 
-  defp dispatch_rewrite({_, _, _}, _node, true), do: []
-  defp dispatch_rewrite({_, _, _, _}, _node, true), do: []
-
-  defp dispatch_rewrite({:empty, coll, _}, node, false),
-    do: [Patch.replace(node, render_empty(coll))]
-
-  defp dispatch_rewrite({:nonempty, coll, _}, node, false),
-    do: [Patch.replace(node, render_nonempty(coll))]
-
-  defp dispatch_rewrite({:any, coll, fun, _}, node, false),
-    do: [Patch.replace(node, render_any(coll, fun))]
-
-  defp dispatch_rewrite({:none, coll, fun, _}, node, false),
-    do: [Patch.replace(node, render_none(coll, fun))]
-
-  defp dispatch_rewrite(:skip, _node, _in_guard?), do: []
-
-  # `==` / `!=` are symmetric in their operands; `>` and `<` aren't.
-  # `count > 0` and `0 < count` both mean "non-empty"; `count < 0` and
-  # `0 > count` are nonsensical and we leave them alone.
   defp classify(:==, lhs, rhs) do
     cond do
       zero?(rhs) and call_info(lhs) != :skip -> empty_classify(call_info(lhs))
@@ -188,50 +148,61 @@ defmodule Number42.Refactors.Ex.LengthZeroToEmpty do
     end
   end
 
+  defp collect_guard_nodes(ast) do
+    ast
+    |> Macro.prewalker()
+    |> Enum.flat_map(fn
+      {:when, _, [_inner, guard]} ->
+        guard |> Macro.prewalker() |> Enum.to_list()
+
+      _ ->
+        []
+    end)
+    |> MapSet.new()
+  end
+
+  defp dispatch_rewrite({:empty, coll, :length}, node, true),
+    do: [Patch.replace(node, "#{unwrap_coll_text(coll)} == []")]
+
+  defp dispatch_rewrite({:nonempty, coll, :length}, node, true) do
+    coll_text = unwrap_coll_text(coll)
+    [Patch.replace(node, "is_list(#{coll_text}) and #{coll_text} != []")]
+  end
+
+  defp dispatch_rewrite({_, _, _}, _node, true), do: []
+  defp dispatch_rewrite({_, _, _, _}, _node, true), do: []
+
+  defp dispatch_rewrite({:empty, coll, _}, node, false),
+    do: [Patch.replace(node, render_empty(coll))]
+
+  defp dispatch_rewrite({:nonempty, coll, _}, node, false),
+    do: [Patch.replace(node, render_nonempty(coll))]
+
+  defp dispatch_rewrite({:any, coll, fun, _}, node, false),
+    do: [Patch.replace(node, render_any(coll, fun))]
+
+  defp dispatch_rewrite({:none, coll, fun, _}, node, false),
+    do: [Patch.replace(node, render_none(coll, fun))]
+
+  defp dispatch_rewrite(:skip, _node, _in_guard?), do: []
   defp empty_classify({:length, coll}), do: {:empty, coll, :length}
   defp empty_classify({:enum_count, coll}), do: {:empty, coll, :enum_count}
   defp empty_classify({:enum_count_with_fun, coll, fun}), do: {:none, coll, fun, :enum_count}
 
+  defp maybe_patch({op, _, [lhs, rhs]} = node, guard_nodes)
+       when op in [:==, :!=, :>, :<] do
+    in_guard? = MapSet.member?(guard_nodes, node)
+
+    classify(op, lhs, rhs)
+    |> dispatch_rewrite(node, in_guard?)
+  end
+
+  defp maybe_patch(_, _), do: []
   defp nonempty_classify({:length, coll}), do: {:nonempty, coll, :length}
   defp nonempty_classify({:enum_count, coll}), do: {:nonempty, coll, :enum_count}
   defp nonempty_classify({:enum_count_with_fun, coll, fun}), do: {:any, coll, fun, :enum_count}
-
-  # Identify the AST shapes we care about as the "size side" of the
-  # comparison: `length(x)`, `Enum.count(x)`, `Enum.count(x, fun)`,
-  # plus all three in pipe form.
-  defp call_info({:length, _, [coll]}), do: {:length, coll}
-
-  defp call_info({{:., _, [{:__aliases__, _, [:Enum]}, :count]}, _, [coll]}),
-    do: {:enum_count, coll}
-
-  defp call_info({{:., _, [{:__aliases__, _, [:Enum]}, :count]}, _, [coll, fun]}),
-    do: {:enum_count_with_fun, coll, fun}
-
-  # Pipe forms: the left side of `|>` is the collection.
-  defp call_info({:|>, _, [coll, {:length, _, []}]}),
-    do: {:length, {:__pipe__, coll}}
-
-  defp call_info({:|>, _, [coll, {{:., _, [{:__aliases__, _, [:Enum]}, :count]}, _, []}]}),
-    do: {:enum_count, {:__pipe__, coll}}
-
-  defp call_info({:|>, _, [coll, {{:., _, [{:__aliases__, _, [:Enum]}, :count]}, _, [fun]}]}),
-    do: {:enum_count_with_fun, {:__pipe__, coll}, fun}
-
-  defp call_info(_), do: :skip
-
-  defp zero?({:__block__, _, [0]}), do: true
-  defp zero?(0), do: true
-  defp zero?(_), do: false
-
-  # `coll` is either an AST node, or `{:__pipe__, lhs}` marking the
-  # collection as the LHS of a pipe stage we need to reconstruct.
-  defp render_empty({:__pipe__, lhs}), do: "#{Sourceror.to_string(lhs)} |> Enum.empty?()"
-
-  defp render_empty(coll), do: "Enum.empty?(#{Sourceror.to_string(coll)})"
-
-  defp render_nonempty({:__pipe__, lhs}), do: "not (#{Sourceror.to_string(lhs)} |> Enum.empty?())"
-
-  defp render_nonempty(coll), do: "not Enum.empty?(#{Sourceror.to_string(coll)})"
+  defp patch_or_passthrough([], source), do: source
+  defp patch_or_passthrough(patches, source), do: Sourceror.patch_string(source, patches)
 
   defp render_any({:__pipe__, lhs}, fun),
     do: "#{Sourceror.to_string(lhs)} |> Enum.any?(#{Sourceror.to_string(fun)})"
@@ -239,19 +210,20 @@ defmodule Number42.Refactors.Ex.LengthZeroToEmpty do
   defp render_any(coll, fun),
     do: "Enum.any?(#{Sourceror.to_string(coll)}, #{Sourceror.to_string(fun)})"
 
+  defp render_empty({:__pipe__, lhs}), do: "#{Sourceror.to_string(lhs)} |> Enum.empty?()"
+  defp render_empty(coll), do: "Enum.empty?(#{Sourceror.to_string(coll)})"
+
   defp render_none({:__pipe__, lhs}, fun),
     do: "not (#{Sourceror.to_string(lhs)} |> Enum.any?(#{Sourceror.to_string(fun)}))"
 
   defp render_none(coll, fun),
     do: "not Enum.any?(#{Sourceror.to_string(coll)}, #{Sourceror.to_string(fun)})"
 
+  defp render_nonempty({:__pipe__, lhs}), do: "not (#{Sourceror.to_string(lhs)} |> Enum.empty?())"
+  defp render_nonempty(coll), do: "not Enum.empty?(#{Sourceror.to_string(coll)})"
   defp unwrap_coll_text({:__pipe__, lhs}), do: Sourceror.to_string(lhs)
   defp unwrap_coll_text(coll), do: Sourceror.to_string(coll)
-
-  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
-
-  defp apply_patches({:error, _}, source), do: source
-
-  defp patch_or_passthrough([], source), do: source
-  defp patch_or_passthrough(patches, source), do: Sourceror.patch_string(source, patches)
+  defp zero?({:__block__, _, [0]}), do: true
+  defp zero?(0), do: true
+  defp zero?(_), do: false
 end

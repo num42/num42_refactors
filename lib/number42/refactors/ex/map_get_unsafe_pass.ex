@@ -40,10 +40,6 @@ defmodule Number42.Refactors.Ex.MapGetUnsafePass do
 
   @impl Number42.Refactors.Refactor
   def description, do: "Map.get(x, k, nil) -> Map.get(x, k) (also Keyword.get)"
-
-  @impl Number42.Refactors.Refactor
-  def priority, do: 130
-
   @impl Number42.Refactors.Refactor
   def explanation do
     """
@@ -55,10 +51,13 @@ defmodule Number42.Refactors.Ex.MapGetUnsafePass do
   end
 
   @impl Number42.Refactors.Refactor
+  def priority, do: 130
+  @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
-
   @impl Number42.Refactors.Refactor
   def transform(source, _opts), do: Sourceror.parse_string(source) |> apply_patches(source)
+  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
+  defp apply_patches({:error, _}, source), do: source
 
   defp build_patches(ast),
     do:
@@ -66,7 +65,6 @@ defmodule Number42.Refactors.Ex.MapGetUnsafePass do
       |> Macro.prewalker()
       |> Enum.flat_map(&maybe_patch/1)
 
-  # Direct call: Map.get(x, k, nil)
   defp maybe_patch({{:., dm, [{:__aliases__, am, [mod]}, :get]}, cm, [coll, key, default]} = node)
        when mod in [:Map, :Keyword] do
     if nil_literal?(default) do
@@ -77,7 +75,6 @@ defmodule Number42.Refactors.Ex.MapGetUnsafePass do
     end
   end
 
-  # Pipe stage: x |> Map.get(k, nil)
   defp maybe_patch(
          {:|>, _,
           [
@@ -98,15 +95,11 @@ defmodule Number42.Refactors.Ex.MapGetUnsafePass do
   end
 
   defp maybe_patch(_), do: []
-
   defp nil_literal?({:__block__, _, [nil]}), do: true
   defp nil_literal?(nil), do: true
   defp nil_literal?(_), do: false
-
-  # `Sourceror.to_string/1` re-emits comments stored in node meta
-  # (`:leading_comments` / `:trailing_comments`). When we patch a
-  # subrange that already includes those comments in the source, the
-  # comments would get duplicated. Strip them before rendering.
+  defp patch_or_passthrough([], source), do: source
+  defp patch_or_passthrough(patches, source), do: Sourceror.patch_string(source, patches)
   defp render_clean(ast), do: ast |> strip_comments() |> Sourceror.to_string()
 
   defp strip_comments(ast) do
@@ -119,11 +112,4 @@ defmodule Number42.Refactors.Ex.MapGetUnsafePass do
         other
     end)
   end
-
-  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
-
-  defp apply_patches({:error, _}, source), do: source
-
-  defp patch_or_passthrough([], source), do: source
-  defp patch_or_passthrough(patches, source), do: Sourceror.patch_string(source, patches)
 end

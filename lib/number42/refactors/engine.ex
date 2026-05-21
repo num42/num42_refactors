@@ -65,17 +65,6 @@ defmodule Number42.Refactors.Engine do
     apply_refactor(module, source, with_prepared(module, module_opts))
   end
 
-  defp build_module_opts(module, opts) do
-    configured = Keyword.get(opts, :configured_modules, [])
-    dry_run? = Keyword.get(opts, :dry_run, false)
-    project_config = Keyword.get(opts, :project_config, %{})
-
-    configured
-    |> Keyword.get(module, [])
-    |> Keyword.put(:dry_run, dry_run?)
-    |> Keyword.put(:project_config, project_config)
-  end
-
   @doc """
   The resolved, ordered module list for the given opts, after `:only_modules`
   and `:skipped_modules` filtering.
@@ -166,94 +155,37 @@ defmodule Number42.Refactors.Engine do
     end
   end
 
-  # Per-refactor opt: `skip_in_modules: [Mod, ...]` tells the engine to
-  # leave a source file alone if it defines any of the listed modules.
-  # Useful for refactors whose heuristics misfire on specific modules
-  # (e.g. `ExpandShortFormBindings` rewriting math single-letter names
-  # in `MyApp.Color`). Generic — any refactor can configure it via
-  # its entry in `configured_modules`.
-  #
-  # Matched by literal `defmodule X.Y.Z` text, which is faster than
-  # parsing the AST and good enough for this filter (false matches in
-  # comments or strings are vanishingly rare in practice).
+  defp build_module_opts(module, opts) do
+    configured = Keyword.get(opts, :configured_modules, [])
+    dry_run? = Keyword.get(opts, :dry_run, false)
+    project_config = Keyword.get(opts, :project_config, %{})
+
+    configured
+    |> Keyword.get(module, [])
+    |> Keyword.put(:dry_run, dry_run?)
+    |> Keyword.put(:project_config, project_config)
+  end
+
+  defp filter_only(modules, []), do: modules
+  defp filter_only(modules, only), do: modules |> Enum.filter(&(&1 in only))
+
   defp skip_for_source?(opts, source),
     do: Keyword.get(opts, :skip_in_modules, []) |> skip_for_source_get(source)
 
-  defp source_defines_module?(source, mod) when is_atom(mod) do
-    needle = "defmodule " <> trim_elixir_prefix(Atom.to_string(mod))
+  defp sort_by_priority(modules, configured),
+    do: modules |> Enum.sort_by(&(-priority_for(&1, configured)))
+
+  defp source_defines_module?(source, module) when is_atom(module) do
+    needle = "defmodule " <> trim_elixir_prefix(Atom.to_string(module))
     String.contains?(source, needle)
   end
 
   defp trim_elixir_prefix("Elixir." <> rest), do: rest
   defp trim_elixir_prefix(other), do: other
 
-  defp filter_only(modules, []), do: modules
-  defp filter_only(modules, only), do: modules |> Enum.filter(&(&1 in only))
-
-  # Stable sort: higher priority first, alphabetical within ties. The
-  # incoming `modules` list is already alphabetical (from `refactors/0`),
-  # so `Enum.sort_by/3` with a single negative-priority key preserves
-  # that order for ties.
-  defp sort_by_priority(modules, configured),
-    do: modules |> Enum.sort_by(&(-priority_for(&1, configured)))
-
   # Per-module priority resolution. Config wins, module callback is the
   # fallback, default is 100.
   @default_priority 100
-  defp priority_for(module, configured) do
-    case configured |> Keyword.get(module, []) |> Keyword.fetch(:priority) do
-      {:ok, value} when is_integer(value) ->
-        value
-
-      _ ->
-        if Code.ensure_loaded?(module) and function_exported?(module, :priority, 0) do
-          module.priority()
-        else
-          @default_priority
-        end
-    end
-  end
-
-  # If the refactor implements `prepare/1`, run it once and inject the
-  # cached value under `opts[:prepared]`. Refactors that don't implement
-  # the optional callback get their opts unchanged.
-  #
-  # Cached in :persistent_term keyed by `{__MODULE__, module, opts}`.
-  # Mix task layer iterates `apply_one` per file — without the cache,
-  # `prepare/1` would re-run (and re-read every lib file for the
-  # schema-field collector) once per source file, turning a O(n) walk
-  # into O(n²). The cache makes the first call do the work and every
-  # subsequent call a constant-time lookup.
-  defp with_prepared(module, opts) do
-    cond do
-      not Code.ensure_loaded?(module) ->
-        opts
-
-      not function_exported?(module, :prepare, 1) ->
-        opts
-
-      true ->
-        case prepared_for(module, opts) do
-          {:ok, value} -> Keyword.put(opts, :prepared, value)
-          :no_cache -> opts
-        end
-    end
-  end
-
-  defp prepared_for(module, opts) do
-    key = {__MODULE__, :prepared, module, opts}
-
-    case :persistent_term.get(key, :__miss__) do
-      :__miss__ ->
-        result = module.prepare(opts)
-        :persistent_term.put(key, result)
-        result
-
-      cached ->
-        cached
-    end
-  end
-
   @doc """
   Drop every `:persistent_term` plan cached by `with_prepared/2`.
 
@@ -276,9 +208,46 @@ defmodule Number42.Refactors.Engine do
     end)
   end
 
+  defp prepared_for(module, opts) do
+    key = {__MODULE__, :prepared, module, opts}
+
+    case :persistent_term.get(key, :__miss__) do
+      :__miss__ ->
+        result = module.prepare(opts)
+        :persistent_term.put(key, result)
+        result
+
+      cached ->
+        cached
+    end
+  end
+
+  defp priority_for(module, configured) do
+    case configured |> Keyword.get(module, []) |> Keyword.fetch(:priority) do
+      {:ok, value} when is_integer(value) ->
+        value
+
+      _ ->
+        if Code.ensure_loaded?(module) and function_exported?(module, :priority, 0) do
+          module.priority()
+        else
+          @default_priority
+        end
+    end
+  end
+
   defp refactor?(module) when is_atom(module) do
     Code.ensure_loaded(module) |> refactor_ensure_loaded(module)
   end
+
+  defp refactor_ensure_loaded({:module, _}, module),
+    do:
+      module.__info__(:attributes)
+      |> Keyword.get_values(:is_refactor)
+      |> List.flatten()
+      |> Enum.any?(&(&1 == true))
+
+  defp refactor_ensure_loaded(_, _module), do: false
 
   defp reformat_after?(module),
     do: function_exported?(module, :reformat_after?, 0) and module.reformat_after?()
@@ -308,17 +277,24 @@ defmodule Number42.Refactors.Engine do
     end
   end
 
-  defp refactor_ensure_loaded({:module, _}, module),
-    do:
-      module.__info__(:attributes)
-      |> Keyword.get_values(:is_refactor)
-      |> List.flatten()
-      |> Enum.any?(&(&1 == true))
-
-  defp refactor_ensure_loaded(_, _module), do: false
-
   defp skip_for_source_get([], _source), do: false
 
   defp skip_for_source_get(mods, source),
     do: mods |> Enum.any?(&source_defines_module?(source, &1))
+
+  defp with_prepared(module, opts) do
+    cond do
+      not Code.ensure_loaded?(module) ->
+        opts
+
+      not function_exported?(module, :prepare, 1) ->
+        opts
+
+      true ->
+        case prepared_for(module, opts) do
+          {:ok, value} -> Keyword.put(opts, :prepared, value)
+          :no_cache -> opts
+        end
+    end
+  end
 end

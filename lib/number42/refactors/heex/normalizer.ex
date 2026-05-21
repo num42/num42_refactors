@@ -33,32 +33,6 @@ defmodule Number42.Refactors.Heex.Normalizer do
   @class_placeholder {:string, "__class__"}
   @attrs_placeholder []
 
-  @doc "Normalize a single attribute list for the given mode."
-  @spec normalize_attrs([{String.t(), term()}], mode()) :: [{String.t(), term()}]
-  def normalize_attrs(_attrs, :attrs_stripped), do: @attrs_placeholder
-
-  def normalize_attrs(attrs, :class_stripped) do
-    attrs
-    |> Enum.map(fn {name, value} ->
-      if MapSet.member?(@class_attrs, name) do
-        {name, @class_placeholder}
-      else
-        {name, value}
-      end
-    end)
-    |> Enum.sort()
-  end
-
-  def normalize_attrs(attrs, :exact), do: attrs |> Enum.sort()
-
-  @doc "Whitespace-canonicalize an EEx code fragment."
-  @spec normalize_eex(String.t()) :: String.t()
-  def normalize_eex(code) when is_binary(code) do
-    code
-    |> String.replace(~r/\s+/, " ")
-    |> String.trim()
-  end
-
   @doc """
   Normalize a list of nodes (or a single node) for the given mode.
   Returns a structure of plain tuples/lists/strings — no maps with
@@ -77,6 +51,29 @@ defmodule Number42.Refactors.Heex.Normalizer do
     do: {:eex_block, normalize_eex(header), children |> Enum.map(&normalize(&1, mode))}
 
   def normalize({:eex_expr, code, _meta}, _mode), do: {:eex_expr, normalize_eex(code)}
-
   def normalize({:text, text, _meta}, _mode), do: {:text, text}
+  @doc "Normalize a single attribute list for the given mode."
+  @spec normalize_attrs([{String.t(), term()}], mode()) :: [{String.t(), term()}]
+  def normalize_attrs(_attrs, :attrs_stripped), do: @attrs_placeholder
+
+  def normalize_attrs(attrs, :class_stripped) do
+    attrs
+    |> Enum.map(fn {name, value} ->
+      if MapSet.member?(@class_attrs, name) do
+        {name, @class_placeholder}
+      else
+        {name, value}
+      end
+    end)
+    |> Enum.sort()
+  end
+
+  def normalize_attrs(attrs, :exact), do: attrs |> Enum.sort()
+  @doc "Whitespace-canonicalize an EEx code fragment."
+  @spec normalize_eex(String.t()) :: String.t()
+  def normalize_eex(code) when is_binary(code) do
+    code
+    |> String.replace(~r/\s+/, " ")
+    |> String.trim()
+  end
 end

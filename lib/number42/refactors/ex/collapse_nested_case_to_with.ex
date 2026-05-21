@@ -74,10 +74,6 @@ defmodule Number42.Refactors.Ex.CollapseNestedCaseToWith do
 
   @impl Number42.Refactors.Refactor
   def description, do: "Collapse nested {:ok,_}/{:error,_} cases into a `with` chain"
-
-  @impl Number42.Refactors.Refactor
-  def priority, do: 120
-
   @impl Number42.Refactors.Refactor
   def explanation do
     """
@@ -91,10 +87,13 @@ defmodule Number42.Refactors.Ex.CollapseNestedCaseToWith do
   end
 
   @impl Number42.Refactors.Refactor
+  def priority, do: 120
+  @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
-
   @impl Number42.Refactors.Refactor
   def transform(source, _opts), do: Sourceror.parse_string(source) |> apply_patches(source)
+  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
+  defp apply_patches({:error, _}, source), do: source
 
   defp build_patches(ast),
     do:
@@ -102,9 +101,47 @@ defmodule Number42.Refactors.Ex.CollapseNestedCaseToWith do
       |> Macro.prewalker()
       |> Enum.flat_map(&maybe_patch/1)
 
-  defp maybe_patch({:case, _, _} = node), do: unwrap_pyramid(node, []) |> with_patch_or_skip(node)
+  defp classify_success({:->, _, [[pattern], body]}) do
+    if happy_path?(pattern) do
+      {:ok, pattern, body}
+    else
+      :skip
+    end
+  end
 
+  defp classify_success(_), do: :skip
+
+  defp error_passthrough?({:->, _, [[pattern], body]}),
+    do: strip_meta(pattern) == strip_meta(body)
+
+  defp error_passthrough?(_), do: false
+  defp happy_path?({:__block__, _, [{{:__block__, _, [:ok]}, _val}]}), do: true
+  defp happy_path?({:__block__, _, [:ok]}), do: true
+  defp happy_path?(:ok), do: true
+  defp happy_path?(_), do: false
+  defp maybe_patch({:case, _, _} = node), do: unwrap_pyramid(node, []) |> with_patch_or_skip(node)
   defp maybe_patch(_), do: []
+  defp patch_or_passthrough([], source), do: source
+  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
+
+  defp render_with(clauses, body) do
+    arrow_clauses =
+      clauses
+      |> Enum.map(fn {pattern, scrutinee} ->
+        {:<-, [], [pattern, scrutinee]}
+      end)
+
+    with_meta = [do: [line: 1], end: [line: 1]]
+    with_ast = {:with, with_meta, arrow_clauses ++ [[{{:__block__, [], [:do]}, body}]]}
+    Sourceror.to_string(with_ast)
+  end
+
+  defp strip_meta(ast) do
+    Macro.prewalk(ast, fn
+      {form, _meta, args} -> {form, [], args}
+      other -> other
+    end)
+  end
 
   defp unwrap_pyramid({:case, _, [scrutinee, [{_do_key, [success_arm, error_arm]}]]}, acc) do
     with {:ok, success_pattern, success_body} <- classify_success(success_arm),
@@ -125,55 +162,8 @@ defmodule Number42.Refactors.Ex.CollapseNestedCaseToWith do
 
   defp unwrap_pyramid(_, _), do: :skip
 
-  defp classify_success({:->, _, [[pattern], body]}) do
-    if happy_path?(pattern) do
-      {:ok, pattern, body}
-    else
-      :skip
-    end
-  end
-
-  defp classify_success(_), do: :skip
-
-  defp happy_path?({:__block__, _, [{{:__block__, _, [:ok]}, _val}]}), do: true
-  defp happy_path?({:__block__, _, [:ok]}), do: true
-  defp happy_path?(:ok), do: true
-  defp happy_path?(_), do: false
-
-  defp error_passthrough?({:->, _, [[pattern], body]}),
-    do: strip_meta(pattern) == strip_meta(body)
-
-  defp error_passthrough?(_), do: false
-
-  defp strip_meta(ast) do
-    Macro.prewalk(ast, fn
-      {form, _meta, args} -> {form, [], args}
-      other -> other
-    end)
-  end
-
-  defp render_with(clauses, body) do
-    arrow_clauses =
-      clauses
-      |> Enum.map(fn {pattern, scrutinee} ->
-        {:<-, [], [pattern, scrutinee]}
-      end)
-
-    with_meta = [do: [line: 1], end: [line: 1]]
-    with_ast = {:with, with_meta, arrow_clauses ++ [[{{:__block__, [], [:do]}, body}]]}
-    Sourceror.to_string(with_ast)
-  end
-
-  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
-
-  defp apply_patches({:error, _}, source), do: source
-
   defp with_patch_or_skip({:ok, [_, _ | _] = clauses, body}, node),
     do: [Patch.replace(node, render_with(clauses |> Enum.reverse(), body))]
 
   defp with_patch_or_skip(_, _node), do: []
-
-  defp patch_or_passthrough([], source), do: source
-
-  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
 end

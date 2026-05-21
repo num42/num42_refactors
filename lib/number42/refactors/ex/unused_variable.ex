@@ -109,9 +109,20 @@ defmodule Number42.Refactors.Ex.UnusedVariable do
 
   defp all_clauses(args), do: List.last(args) |> all_clauses_last()
 
+  defp all_clauses_last(kw) when is_list(kw) do
+    kw
+    |> fetch_keyword(:do)
+    |> List.wrap()
+  end
+
+  defp all_clauses_last(_), do: []
+
+  defp apply_patches({:ok, ast}, source, whitelist),
+    do: build_patches(ast, whitelist) |> patch_or_passthrough(source)
+
+  defp apply_patches({:error, _}, source, _whitelist), do: source
   defp bindings_in({:^, _, [_pinned]}), do: []
   defp bindings_in({:@, _, _}), do: []
-
   defp bindings_in({:"::", _, [lhs, _type_spec]}), do: lhs |> bindings_in()
 
   defp bindings_in({name, _meta, ctx} = node)
@@ -144,15 +155,25 @@ defmodule Number42.Refactors.Ex.UnusedVariable do
   end
 
   defp branch_patches(_, _), do: []
-
   defp build_patches(ast, whitelist), do: ast |> walk_for_patches(whitelist)
-
   defp call_args({_name, _meta, args}) when is_list(args), do: args
   defp call_args(_), do: []
   defp children_of({_form, _meta, args}) when is_list(args), do: args
   defp children_of(_), do: []
-
   defp collect_bindings(args), do: args |> Enum.flat_map(&bindings_in/1)
+
+  defp collect_def_body(body_kw) do
+    blocks =
+      [:do, :rescue, :catch, :after, :else]
+      |> Enum.map(&fetch_keyword(body_kw, &1))
+      |> Enum.reject(&is_nil/1)
+
+    case blocks do
+      [] -> nil
+      [single] -> single
+      many -> {:__block__, [], many}
+    end
+  end
 
   defp collect_uses(nil), do: MapSet.new()
 
@@ -209,23 +230,13 @@ defmodule Number42.Refactors.Ex.UnusedVariable do
 
   defp node_patches(_, _), do: []
 
-  # A `def` may carry `rescue:` / `catch:` / `after:` / `else:` blocks
-  # in addition to `do:` — all share the function-arg scope, so a name
-  # referenced from any of them counts as a use. Bundle every block we
-  # find into a single synthetic node so `collect_uses/1`'s prewalker
-  # sees them all.
-  defp collect_def_body(body_kw) do
-    blocks =
-      [:do, :rescue, :catch, :after, :else]
-      |> Enum.map(&fetch_keyword(body_kw, &1))
-      |> Enum.reject(&is_nil/1)
-
-    case blocks do
-      [] -> nil
-      [single] -> single
-      many -> {:__block__, [], many}
-    end
+  defp node_patches_last(kw, whitelist) when is_list(kw) do
+    fetch_keyword(kw, :else) |> patches_for_clauses_or_skip(whitelist)
   end
+
+  defp node_patches_last(_, _whitelist), do: []
+  defp patch_or_passthrough([], source), do: source
+  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
 
   defp patches_for(patterns, guard, body, whitelist) do
     collected_binding = collect_bindings(patterns)
@@ -254,6 +265,11 @@ defmodule Number42.Refactors.Ex.UnusedVariable do
     end)
     |> Enum.map(fn {_name, node} -> rename_patch(node) end)
   end
+
+  defp patches_for_clauses_or_skip(nil, _whitelist), do: []
+
+  defp patches_for_clauses_or_skip(clauses, whitelist),
+    do: clauses |> List.wrap() |> Enum.flat_map(&branch_patches(&1, whitelist))
 
   defp rename_patch({name, _meta, _ctx} = node),
     do: node |> Patch.replace("_" <> Atom.to_string(name))
@@ -284,32 +300,4 @@ defmodule Number42.Refactors.Ex.UnusedVariable do
     do: walk_for_patches(left, whitelist) ++ walk_for_patches(right, whitelist)
 
   defp walk_for_patches(_, _), do: []
-
-  defp apply_patches({:ok, ast}, source, whitelist),
-    do: build_patches(ast, whitelist) |> patch_or_passthrough(source)
-
-  defp apply_patches({:error, _}, source, _whitelist), do: source
-
-  defp all_clauses_last(kw) when is_list(kw) do
-    kw
-    |> fetch_keyword(:do)
-    |> List.wrap()
-  end
-
-  defp all_clauses_last(_), do: []
-
-  defp node_patches_last(kw, whitelist) when is_list(kw) do
-    fetch_keyword(kw, :else) |> patches_for_clauses_or_skip(whitelist)
-  end
-
-  defp node_patches_last(_, _whitelist), do: []
-
-  defp patch_or_passthrough([], source), do: source
-
-  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
-
-  defp patches_for_clauses_or_skip(nil, _whitelist), do: []
-
-  defp patches_for_clauses_or_skip(clauses, whitelist),
-    do: clauses |> List.wrap() |> Enum.flat_map(&branch_patches(&1, whitelist))
 end

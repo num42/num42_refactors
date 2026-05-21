@@ -65,10 +65,6 @@ defmodule Number42.Refactors.Ex.ExpandShortFormParams do
 
   @impl Number42.Refactors.Refactor
   def description, do: "Expand short-form parameter names to long forms"
-
-  @impl Number42.Refactors.Refactor
-  def priority, do: 250
-
   @impl Number42.Refactors.Refactor
   def explanation do
     """
@@ -83,6 +79,8 @@ defmodule Number42.Refactors.Ex.ExpandShortFormParams do
   end
 
   @impl Number42.Refactors.Refactor
+  def priority, do: 250
+  @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
 
   # Whitelist and known mapping live in `.refactor.exs` — single
@@ -91,13 +89,6 @@ defmodule Number42.Refactors.Ex.ExpandShortFormParams do
   @default_whitelist MapSet.new()
 
   @known %{}
-
-  @impl Number42.Refactors.Refactor
-  def transform(source, opts) do
-    ctx = build_ctx(opts)
-
-    Sourceror.parse_string(source) |> apply_patches(ctx, source)
-  end
 
   @doc """
   Collects every field name declared by an `Ecto.Schema` module under
@@ -124,6 +115,13 @@ defmodule Number42.Refactors.Ex.ExpandShortFormParams do
     {:ok, %{schema_fields: MapSet.new(fields), schema_subtokens: subtokens}}
   end
 
+  @impl Number42.Refactors.Refactor
+  def transform(source, opts) do
+    ctx = build_ctx(opts)
+
+    Sourceror.parse_string(source) |> apply_patches(ctx, source)
+  end
+
   defp build_ctx(opts) do
     prepared = Keyword.get(opts, :prepared, %{})
     extra_whitelist = opts |> Keyword.get(:whitelist, []) |> Enum.map(&to_atom/1) |> MapSet.new()
@@ -137,12 +135,6 @@ defmodule Number42.Refactors.Ex.ExpandShortFormParams do
     }
   end
 
-  defp to_atom(a) when is_atom(a), do: a
-  defp to_atom(s) when is_binary(s), do: String.to_atom(s)
-
-  # Walks `lib/**/*.ex`, parses each file, collects field declarations
-  # from modules that `use Ecto.Schema`. Tolerant: a parse failure on
-  # any single file just yields `[]` for that file.
   defp collect_schema_fields,
     do:
       "lib/**/*.ex"
@@ -151,8 +143,9 @@ defmodule Number42.Refactors.Ex.ExpandShortFormParams do
       |> Enum.uniq()
 
   defp fields_in_file(patch), do: File.read(patch) |> parse_schema_file()
-
   defp fields_in_source(source), do: Code.string_to_quoted(source) |> extract_fields_from_quoted()
+  defp to_atom(a) when is_atom(a), do: a
+  defp to_atom(s) when is_binary(s), do: String.to_atom(s)
 
   defp uses_ecto_schema?(ast) do
     ast
@@ -167,22 +160,54 @@ defmodule Number42.Refactors.Ex.ExpandShortFormParams do
   # name. `field/2` and `field/3` both fit `field :name, ...`.
   @schema_decls ~w(field belongs_to has_many has_one many_to_many embeds_one embeds_many)a
 
-  defp extract_field_names(ast) do
-    ast
-    |> Macro.prewalker()
-    |> Enum.flat_map(fn
-      {decl, _, [name | _]} when decl in @schema_decls and is_atom(name) ->
-        [Atom.to_string(name)]
+  defp analyze_param({:\\, _, [inner, _default]}), do: analyze_param(inner)
+  defp analyze_param({:^, _, _}), do: nil
 
-      # `timestamps` and `timestamps(opts)` produce `inserted_at` and
-      # `updated_at` fields universally. Always include them.
-      {:timestamps, _, _} ->
-        ["inserted_at", "updated_at"]
+  defp analyze_param({:=, _, [a, b]}) do
+    case {analyze_param(a), analyze_param(b)} do
+      {%{name: name_a} = info_a, %{struct: s}}
+      when not is_nil(name_a) and not is_nil(s) ->
+        %{info_a | struct: s}
+
+      {%{struct: s}, %{name: name_b} = info_b}
+      when not is_nil(name_b) and not is_nil(s) ->
+        %{info_b | struct: s}
+
+      {%{name: name_a} = info, _} when not is_nil(name_a) ->
+        info
+
+      {_, %{name: name_b} = info} when not is_nil(name_b) ->
+        info
 
       _ ->
-        []
-    end)
+        nil
+    end
   end
+
+  defp analyze_param({:%, _, [struct_ast, {:%{}, _, _}]}),
+    do: struct_compound(struct_ast) |> param_compound_or_default()
+
+  defp analyze_param({name, _meta, ctx} = node) when is_atom(name) and is_atom(ctx) do
+    string = Atom.to_string(name)
+
+    if String.starts_with?(string, "_") or name in [:__MODULE__, :__CALLER__, :__ENV__] do
+      nil
+    else
+      %{name: name, node: node, struct: nil}
+    end
+  end
+
+  defp analyze_param(_), do: nil
+
+  defp apply_patches({:ok, ast}, ctx, source),
+    do: build_patches(ast, ctx) |> patch_or_passthrough(source)
+
+  defp apply_patches({:error, _}, _ctx, source), do: source
+
+  defp apply_pp_or_keep_singular({:ok, pp}, tail_compound),
+    do: [pp, tail_compound] |> Enum.join("_")
+
+  defp apply_pp_or_keep_singular(:skip, tail_compound), do: tail_compound
 
   defp build_patches(ast, ctx) do
     ast
@@ -193,48 +218,15 @@ defmodule Number42.Refactors.Ex.ExpandShortFormParams do
     end)
   end
 
-  defp patches_for_module({:defmodule, _, [name_ast, [{_, body}]]}, ctx) do
-    module_compounds = module_name_compounds(name_ast)
-    body_exprs = body_to_exprs(body)
-    alias_compounds = collect_alias_compounds(body_exprs)
-    import_compounds = collect_import_compounds(body_exprs)
+  defp build_target(subtokens, n, ctx) do
+    {head, tail} = subtokens |> Enum.split(-n)
+    singularized = tail |> List.last() |> singularize()
+    tail_compound = (Enum.drop(tail, -1) ++ [singularized]) |> Enum.join("_")
 
-    def_groups = collect_def_groups(body_exprs)
-
-    def_groups
-    |> Enum.flat_map(fn
-      {{_name, _arity}, [single_clause]} ->
-        patches_for_clause(single_clause, %{
-          aliases: alias_compounds,
-          ctx: ctx,
-          imports: import_compounds,
-          module: module_compounds
-        })
-
-      _ ->
-        []
-    end)
+    maybe_past_participle(head, tail, singularized, ctx.pp_verbs)
+    |> apply_pp_or_keep_singular(tail_compound)
   end
 
-  defp patches_for_module(_, _), do: []
-
-  defp module_name_compounds({:__aliases__, _, parts}) when is_list(parts) do
-    parts
-    |> Enum.map(fn p -> p |> Atom.to_string() |> Macro.underscore() end)
-    |> Enum.map(&strip_test_suffix/1)
-    |> Enum.reject(&(&1 == ""))
-  end
-
-  defp module_name_compounds(_), do: []
-
-  # `FooTest` and `FooLiveTest` shouldn't seed `view → view_test` or
-  # `live_view → live_view_test` matches. Drop the trailing `_test`
-  # subtoken from any module-name compound that has it.
-  defp strip_test_suffix(compound), do: String.split(compound, "_") |> drop_test_suffix(compound)
-
-  # `alias Foo.Bar.Baz` → "baz" (Macro.underscore on the last segment).
-  # `alias Foo.{Bar, Baz}` → ["bar", "baz"].
-  # `alias Foo, as: F` → skip (the user already chose a short alias).
   defp collect_alias_compounds(exprs) do
     exprs
     |> Enum.flat_map(fn
@@ -257,21 +249,19 @@ defmodule Number42.Refactors.Ex.ExpandShortFormParams do
     |> Enum.uniq()
   end
 
-  defp collect_import_compounds(exprs) do
-    exprs
+  defp collect_body_bindings(body) do
+    body
+    |> Macro.prewalker()
     |> Enum.flat_map(fn
-      {:import, _, [{:__aliases__, _, parts} | _]} when is_list(parts) ->
-        [parts |> List.last() |> Atom.to_string() |> Macro.underscore() |> strip_test_suffix()]
+      {:=, _, [{name, _, ctx}, _rhs]} when is_atom(name) and is_atom(ctx) ->
+        [name]
 
       _ ->
         []
     end)
     |> Enum.uniq()
-    |> Enum.reject(&(&1 == ""))
   end
 
-  # Group `def`/`defp`/... by `{name, arity}` so we can detect
-  # multi-clause functions and skip them wholesale.
   defp collect_def_groups(exprs) do
     exprs
     |> Enum.flat_map(fn
@@ -287,6 +277,129 @@ defmodule Number42.Refactors.Ex.ExpandShortFormParams do
     end)
     |> Enum.group_by(fn {key, _} -> key end, fn {_, node} -> node end)
   end
+
+  defp collect_import_compounds(exprs) do
+    exprs
+    |> Enum.flat_map(fn
+      {:import, _, [{:__aliases__, _, parts} | _]} when is_list(parts) ->
+        [parts |> List.last() |> Atom.to_string() |> Macro.underscore() |> strip_test_suffix()]
+
+      _ ->
+        []
+    end)
+    |> Enum.uniq()
+    |> Enum.reject(&(&1 == ""))
+  end
+
+  defp drop_test_suffix([], compound), do: compound
+  defp drop_test_suffix([_], compound), do: compound
+
+  defp drop_test_suffix([_, _ | _] = tokens, compound),
+    do: List.last(tokens) |> pop_test_suffix_from_tokens(compound, tokens)
+
+  defp drop_test_suffix(_, compound), do: compound
+
+  defp extract_field_names(ast) do
+    ast
+    |> Macro.prewalker()
+    |> Enum.flat_map(fn
+      {decl, _, [name | _]} when decl in @schema_decls and is_atom(name) ->
+        [Atom.to_string(name)]
+
+      # `timestamps` and `timestamps(opts)` produce `inserted_at` and
+      # `updated_at` fields universally. Always include them.
+      {:timestamps, _, _} ->
+        ["inserted_at", "updated_at"]
+
+      _ ->
+        []
+    end)
+  end
+
+  defp extract_fields_from_quoted({:ok, ast}) do
+    if uses_ecto_schema?(ast) do
+      extract_field_names(ast)
+    else
+      []
+    end
+  end
+
+  defp extract_fields_from_quoted({:error, _}), do: []
+  defp head_guard({:when, _, [_inner, guard]}), do: guard
+  defp head_guard(_), do: nil
+
+  defp heex_patches(body, resolutions) do
+    body
+    |> Macro.prewalker()
+    |> Enum.flat_map(fn
+      {:sigil_H, meta, [{:<<>>, _, [content]}, _]} = node when is_binary(content) ->
+        new_content = patch_heex_var_content(content, resolutions)
+
+        if new_content == content do
+          []
+        else
+          delim = Keyword.get(meta, :delimiter, "\"")
+          prefix = if delim in ["\"\"\"", "'''"], do: "\n", else: ""
+          new_text = "~H#{delim}#{prefix}#{new_content}#{delim}"
+          [Patch.new(Sourceror.get_range(node), new_text)]
+        end
+
+      _ ->
+        []
+    end)
+  end
+
+  defp long?(name, ctx), do: not short?(name, ctx)
+
+  defp match_compound(short, compound, ctx) do
+    subtokens = String.split(compound, "_", trim: true)
+
+    latch_match(short, subtokens) |> score_latch_result(ctx, short, subtokens)
+  end
+
+  defp maybe_plural_resolve(string, context_compounds, context_compound) do
+    if String.ends_with?(string, "s") and String.length(string) >= 3 do
+      singular = String.slice(string, 0..-2//1)
+      # The plural form `string` itself often appears in context (it's
+      # the param name); a self-match would just turn `cts` into the
+      # singular `ct`, which isn't a resolution. Drop both `string`
+      # and `singular` from candidates so we only consider real
+      # external compounds.
+      compounds = context_compounds |> Enum.reject(&(&1 == string or &1 == singular))
+
+      case resolve_via_compounds(singular, compounds, context_compound) do
+        {:ok, long} -> {:ok, pluralize_compound(long)}
+        :skip -> :skip
+      end
+    else
+      :skip
+    end
+  end
+
+  defp module_name_compounds({:__aliases__, _, parts}) when is_list(parts) do
+    parts
+    |> Enum.map(fn p -> p |> Atom.to_string() |> Macro.underscore() end)
+    |> Enum.map(&strip_test_suffix/1)
+    |> Enum.reject(&(&1 == ""))
+  end
+
+  defp module_name_compounds(_), do: []
+  defp param_compound_or_default(nil), do: nil
+  defp param_compound_or_default(compound), do: %{name: nil, node: nil, struct: compound}
+  defp parse_schema_file({:ok, source}), do: source |> fields_in_source()
+  defp parse_schema_file(_), do: []
+
+  defp patch_heex_var_content(content, resolutions) do
+    resolutions
+    |> Enum.reduce(content, fn {old, new}, acc ->
+      old_re = old |> Atom.to_string() |> Regex.escape()
+      new_str = Atom.to_string(new)
+      String.replace(acc, ~r/(?<![A-Za-z0-9_])#{old_re}(?![A-Za-z0-9_])/, new_str)
+    end)
+  end
+
+  defp patch_or_passthrough([], source), do: source
+  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
 
   defp patches_for_clause({_kind, _meta, [head, body_kw]}, env) do
     {fn_name, params} = extract_fn_signature(head)
@@ -394,126 +507,49 @@ defmodule Number42.Refactors.Ex.ExpandShortFormParams do
     end
   end
 
-  defp head_guard({:when, _, [_inner, guard]}), do: guard
-  defp head_guard(_), do: nil
+  defp patches_for_module({:defmodule, _, [name_ast, [{_, body}]]}, ctx) do
+    module_compounds = module_name_compounds(name_ast)
+    body_exprs = body_to_exprs(body)
+    alias_compounds = collect_alias_compounds(body_exprs)
+    import_compounds = collect_import_compounds(body_exprs)
 
-  # When a renamed param is referenced inside a `~H` sigil — `{dep.x}`,
-  # `<input value={dep}>`, `&dep.method/1` — the AST walker can't see
-  # those references (the sigil body is an opaque binary). Patch the
-  # sigil text directly with a word-boundary regex so the rename stays
-  # consistent across AST and HEEx, mirroring the same fix landed in
-  # ExpandShortFormFunctions (commit 9bab5c07).
-  defp heex_patches(body, resolutions) do
-    body
-    |> Macro.prewalker()
+    def_groups = collect_def_groups(body_exprs)
+
+    def_groups
     |> Enum.flat_map(fn
-      {:sigil_H, meta, [{:<<>>, _, [content]}, _]} = node when is_binary(content) ->
-        new_content = patch_heex_var_content(content, resolutions)
-
-        if new_content == content do
-          []
-        else
-          delim = Keyword.get(meta, :delimiter, "\"")
-          prefix = if delim in ["\"\"\"", "'''"], do: "\n", else: ""
-          new_text = "~H#{delim}#{prefix}#{new_content}#{delim}"
-          [Patch.new(Sourceror.get_range(node), new_text)]
-        end
+      {{_name, _arity}, [single_clause]} ->
+        patches_for_clause(single_clause, %{
+          aliases: alias_compounds,
+          ctx: ctx,
+          imports: import_compounds,
+          module: module_compounds
+        })
 
       _ ->
         []
     end)
   end
 
-  defp patch_heex_var_content(content, resolutions) do
-    resolutions
-    |> Enum.reduce(content, fn {old, new}, acc ->
-      old_re = old |> Atom.to_string() |> Regex.escape()
-      new_str = Atom.to_string(new)
-      String.replace(acc, ~r/(?<![A-Za-z0-9_])#{old_re}(?![A-Za-z0-9_])/, new_str)
-    end)
+  defp patches_for_module(_, _), do: []
+
+  defp pop_test_suffix_from_tokens("test", _compound, tokens),
+    do: tokens |> Enum.drop(-1) |> Enum.join("_")
+
+  defp pop_test_suffix_from_tokens(_, compound, _tokens), do: compound
+
+  defp pp_promotable?(subtokens, ctx) do
+    {head, [last]} = subtokens |> Enum.split(-1)
+
+    List.last(head) |> pp_target_for_last_token(ctx, last)
   end
 
-  # Strip pattern wrappers and recover the parameter's bare-var atom
-  # plus any struct hint. Returns nil for shapes that can't be
-  # renamed (literals, full destructuring, pin).
-  defp analyze_param({:\\, _, [inner, _default]}), do: analyze_param(inner)
-  defp analyze_param({:^, _, _}), do: nil
+  defp pp_target_for_last_token(nil, _ctx, _last), do: false
 
-  defp analyze_param({:=, _, [a, b]}) do
-    case {analyze_param(a), analyze_param(b)} do
-      {%{name: name_a} = info_a, %{struct: s}}
-      when not is_nil(name_a) and not is_nil(s) ->
-        %{info_a | struct: s}
+  defp pp_target_for_last_token(verb, ctx, last),
+    do:
+      MapSet.member?(ctx.pp_verbs, verb) and String.ends_with?(verb, "e") and
+        singularize(last) != last
 
-      {%{struct: s}, %{name: name_b} = info_b}
-      when not is_nil(name_b) and not is_nil(s) ->
-        %{info_b | struct: s}
-
-      {%{name: name_a} = info, _} when not is_nil(name_a) ->
-        info
-
-      {_, %{name: name_b} = info} when not is_nil(name_b) ->
-        info
-
-      _ ->
-        nil
-    end
-  end
-
-  defp analyze_param({:%, _, [struct_ast, {:%{}, _, _}]}),
-    do: struct_compound(struct_ast) |> param_compound_or_default()
-
-  defp analyze_param({name, _meta, ctx} = node) when is_atom(name) and is_atom(ctx) do
-    string = Atom.to_string(name)
-
-    if String.starts_with?(string, "_") or name in [:__MODULE__, :__CALLER__, :__ENV__] do
-      nil
-    else
-      %{name: name, node: node, struct: nil}
-    end
-  end
-
-  defp analyze_param(_), do: nil
-
-  defp struct_compound({:__aliases__, _, parts}) when is_list(parts) and parts != [] do
-    parts |> List.last() |> Atom.to_string() |> Macro.underscore()
-  end
-
-  defp struct_compound(_), do: nil
-
-  defp collect_body_bindings(body) do
-    body
-    |> Macro.prewalker()
-    |> Enum.flat_map(fn
-      {:=, _, [{name, _, ctx}, _rhs]} when is_atom(name) and is_atom(ctx) ->
-        [name]
-
-      _ ->
-        []
-    end)
-    |> Enum.uniq()
-  end
-
-  # Schema-defined names (`oz_fragment`, `parent`, `item_positions`)
-  # are project identifiers, not shorts. Skip those before falling
-  # through to the shared `short_name?/2` heuristic.
-  defp short?(name, ctx) do
-    string = Atom.to_string(name)
-
-    if MapSet.member?(ctx.schema_fields, string) do
-      false
-    else
-      short_name?(name, ctx)
-    end
-  end
-
-  defp long?(name, ctx), do: not short?(name, ctx)
-
-  # Resolve order:
-  # 1. Known table
-  # 2. Struct pattern (%X{} = name)
-  # 3. Plural -s rule (param ends in `s` → resolve singular, pluralize)
-  # 4. Compound-context match
   defp resolve_param(%{name: name} = info, context_compounds, ctx) do
     string = Atom.to_string(name)
 
@@ -538,33 +574,6 @@ defmodule Number42.Refactors.Ex.ExpandShortFormParams do
 
   defp resolve_param(_, _, _), do: :skip
 
-  # If the param ends in `s` and is long enough that the trailing `s`
-  # is plausibly a plural marker (>= 3 chars total — `xs` is too short
-  # for a real signal), try resolving the singular form. On success,
-  # pluralize the result.
-  defp maybe_plural_resolve(string, context_compounds, ctx) do
-    if String.ends_with?(string, "s") and String.length(string) >= 3 do
-      singular = String.slice(string, 0..-2//1)
-      # The plural form `string` itself often appears in context (it's
-      # the param name); a self-match would just turn `cts` into the
-      # singular `ct`, which isn't a resolution. Drop both `string`
-      # and `singular` from candidates so we only consider real
-      # external compounds.
-      compounds = context_compounds |> Enum.reject(&(&1 == string or &1 == singular))
-
-      case resolve_via_compounds(singular, compounds, ctx) do
-        {:ok, long} -> {:ok, pluralize_compound(long)}
-        :skip -> :skip
-      end
-    else
-      :skip
-    end
-  end
-
-  # Single-char shorts can't be resolved via compound matching: any
-  # subtoken starting with that char would latch with score 100, giving
-  # silent false positives across the codebase. Single chars must come
-  # from `known` or struct hints if they're going to be renamed at all.
   defp resolve_via_compounds(short, _context_compounds, _ctx) when byte_size(short) < 2,
     do: :skip
 
@@ -588,69 +597,6 @@ defmodule Number42.Refactors.Ex.ExpandShortFormParams do
     end
   end
 
-  # Match `short` against `compound` using the latch-on-subtoken
-  # algorithm. Returns `{:ok, target, score}` or `:error`.
-  #
-  # Score:
-  # - 100 when ALL short chars are subtoken initials (a clean acronym).
-  # - 80 when only the first short char is a subtoken initial and the
-  #   rest fit as a subsequence inside that subtoken.
-  # - 0 otherwise (we return :error).
-  defp match_compound(short, compound, ctx) do
-    subtokens = String.split(compound, "_", trim: true)
-
-    latch_match(short, subtokens) |> score_latch_result(ctx, short, subtokens)
-  end
-
-  # Would shifting head=[verb], tail=[last] produce a valid PP? Only
-  # then is it worth giving up the full-tail interpretation.
-  defp pp_promotable?(subtokens, ctx) do
-    {head, [last]} = subtokens |> Enum.split(-1)
-
-    List.last(head) |> pp_target_for_last_token(ctx, last)
-  end
-
-  defp build_target(subtokens, n, ctx) do
-    {head, tail} = subtokens |> Enum.split(-n)
-    singularized = tail |> List.last() |> singularize()
-    tail_compound = (Enum.drop(tail, -1) ++ [singularized]) |> Enum.join("_")
-
-    maybe_past_participle(head, tail, singularized, ctx.pp_verbs)
-    |> apply_pp_or_keep_singular(tail_compound)
-  end
-
-  defp apply_patches({:ok, ast}, ctx, source),
-    do: build_patches(ast, ctx) |> patch_or_passthrough(source)
-
-  defp apply_patches({:error, _}, _ctx, source), do: source
-
-  defp parse_schema_file({:ok, source}), do: source |> fields_in_source()
-
-  defp parse_schema_file(_), do: []
-
-  defp extract_fields_from_quoted({:ok, ast}) do
-    if uses_ecto_schema?(ast) do
-      extract_field_names(ast)
-    else
-      []
-    end
-  end
-
-  defp extract_fields_from_quoted({:error, _}), do: []
-
-  defp drop_test_suffix([], compound), do: compound
-
-  defp drop_test_suffix([_], compound), do: compound
-
-  defp drop_test_suffix([_, _ | _] = tokens, compound),
-    do: List.last(tokens) |> pop_test_suffix_from_tokens(compound, tokens)
-
-  defp drop_test_suffix(_, compound), do: compound
-
-  defp param_compound_or_default(nil), do: nil
-
-  defp param_compound_or_default(compound), do: %{name: nil, node: nil, struct: compound}
-
   defp score_latch_result({:ok, start_idx, starts_hit}, ctx, short, subtokens) do
     effective_start =
       if start_idx == 0 and String.length(short) > 1 and length(subtokens) > 1 and
@@ -668,24 +614,21 @@ defmodule Number42.Refactors.Ex.ExpandShortFormParams do
 
   defp score_latch_result(:error, _ctx, _short, _subtokens), do: :error
 
-  defp pp_target_for_last_token(nil, _ctx, _last), do: false
+  defp short?(name, ctx) do
+    string = Atom.to_string(name)
 
-  defp pp_target_for_last_token(verb, ctx, last),
-    do:
-      MapSet.member?(ctx.pp_verbs, verb) and String.ends_with?(verb, "e") and
-        singularize(last) != last
+    if MapSet.member?(ctx.schema_fields, string) do
+      false
+    else
+      short_name?(name, ctx)
+    end
+  end
 
-  defp apply_pp_or_keep_singular({:ok, pp}, tail_compound),
-    do: [pp, tail_compound] |> Enum.join("_")
+  defp strip_test_suffix(compound), do: String.split(compound, "_") |> drop_test_suffix(compound)
 
-  defp apply_pp_or_keep_singular(:skip, tail_compound), do: tail_compound
+  defp struct_compound({:__aliases__, _, parts}) when is_list(parts) and parts != [] do
+    parts |> List.last() |> Atom.to_string() |> Macro.underscore()
+  end
 
-  defp patch_or_passthrough([], source), do: source
-
-  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
-
-  defp pop_test_suffix_from_tokens("test", _compound, tokens),
-    do: tokens |> Enum.drop(-1) |> Enum.join("_")
-
-  defp pop_test_suffix_from_tokens(_, compound, _tokens), do: compound
+  defp struct_compound(_), do: nil
 end

@@ -82,10 +82,6 @@ defmodule Number42.Refactors.Ex.LiftWithIntoPipeline do
 
   @impl Number42.Refactors.Refactor
   def description, do: "Lift single-clause `with` with a transformation body into a pipe"
-
-  @impl Number42.Refactors.Refactor
-  def priority, do: 150
-
   @impl Number42.Refactors.Refactor
   def explanation do
     """
@@ -99,16 +95,34 @@ defmodule Number42.Refactors.Ex.LiftWithIntoPipeline do
   end
 
   @impl Number42.Refactors.Refactor
+  def priority, do: 150
+  @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
-
   @impl Number42.Refactors.Refactor
   def transform(source, _opts), do: Sourceror.parse_string(source) |> apply_patches(source)
+  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
+  defp apply_patches({:error, _}, source), do: source
+
+  defp body_uses_pattern_var?(pattern, body) do
+    pattern_vars = pattern_var_names(pattern) |> MapSet.new()
+    used = used_var_names(body)
+    not MapSet.disjoint?(pattern_vars, used)
+  end
 
   defp build_patches(ast),
     do:
       ast
       |> Macro.prewalker()
       |> Enum.flat_map(&maybe_patch/1)
+
+  defp fetch_keyword(keyword, key) do
+    keyword
+    |> Enum.find_value(:error, fn
+      {{:__block__, _, [^key]}, value} -> {:ok, value}
+      {^key, value} -> {:ok, value}
+      _ -> nil
+    end)
+  end
 
   defp maybe_patch({:with, _meta, clauses} = node) when is_list(clauses) do
     {kw, head_clauses} = split_keyword(clauses)
@@ -126,40 +140,8 @@ defmodule Number42.Refactors.Ex.LiftWithIntoPipeline do
   end
 
   defp maybe_patch(_), do: []
-
-  defp split_keyword(clauses), do: List.last(clauses) |> split_keyword_last(clauses)
-
-  defp fetch_keyword(keyword, key) do
-    keyword
-    |> Enum.find_value(:error, fn
-      {{:__block__, _, [^key]}, value} -> {:ok, value}
-      {^key, value} -> {:ok, value}
-      _ -> nil
-    end)
-  end
-
-  defp single_expr?({:__block__, _, exprs}) when length(exprs) > 1, do: false
-  defp single_expr?(_), do: true
-
-  defp body_uses_pattern_var?(pattern, body) do
-    pattern_vars = pattern_var_names(pattern) |> MapSet.new()
-    used = used_var_names(body)
-    not MapSet.disjoint?(pattern_vars, used)
-  end
-
-  defp split_call({name, _, _}) when is_atom(name) and pipe_unsafe_op?(name), do: :error
-
-  defp split_call({name, _, args}) when is_atom(name) and is_list(args) and args != [] do
-    [head | rest] = args
-    {:ok, head, {name, [], rest}}
-  end
-
-  defp split_call({{:., _, _} = remote, _, args}) when is_list(args) and args != [] do
-    [head | rest] = args
-    {:ok, head, {remote, [], rest}}
-  end
-
-  defp split_call(_), do: :error
+  defp patch_or_passthrough([], source), do: source
+  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
 
   defp render_pipe_via_case(head, call_with_rest_args, pattern, body) do
     success_arm = {:->, [], [[pattern], body]}
@@ -179,17 +161,26 @@ defmodule Number42.Refactors.Ex.LiftWithIntoPipeline do
     Sourceror.to_string(pipe_ast)
   end
 
-  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
+  defp single_expr?({:__block__, _, exprs}) when length(exprs) > 1, do: false
+  defp single_expr?(_), do: true
+  defp split_call({name, _, _}) when is_atom(name) and pipe_unsafe_op?(name), do: :error
 
-  defp apply_patches({:error, _}, source), do: source
+  defp split_call({name, _, args}) when is_atom(name) and is_list(args) and args != [] do
+    [head | rest] = args
+    {:ok, head, {name, [], rest}}
+  end
+
+  defp split_call({{:., _, _} = remote, _, args}) when is_list(args) and args != [] do
+    [head | rest] = args
+    {:ok, head, {remote, [], rest}}
+  end
+
+  defp split_call(_), do: :error
+  defp split_keyword(clauses), do: List.last(clauses) |> split_keyword_last(clauses)
 
   defp split_keyword_last(kw, clauses) when is_list(kw) do
     {kw, clauses |> Enum.drop(-1)}
   end
 
   defp split_keyword_last(_, clauses), do: {[], clauses}
-
-  defp patch_or_passthrough([], source), do: source
-
-  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
 end

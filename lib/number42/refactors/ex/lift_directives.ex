@@ -45,10 +45,6 @@ defmodule Number42.Refactors.Ex.LiftDirectives do
 
   @impl Number42.Refactors.Refactor
   def description, do: "Lift function-local alias/import/require directives to the module level"
-
-  @impl Number42.Refactors.Refactor
-  def priority, do: 220
-
   @impl Number42.Refactors.Refactor
   def explanation do
     """
@@ -62,9 +58,13 @@ defmodule Number42.Refactors.Ex.LiftDirectives do
   end
 
   @impl Number42.Refactors.Refactor
+  def priority, do: 220
+  @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
   @impl Number42.Refactors.Refactor
   def transform(source, _opts), do: Sourceror.parse_string(source) |> apply_patches(source)
+  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
+  defp apply_patches({:error, _}, source), do: source
 
   defp build_insert_patch(directives, insert_at_line) do
     text =
@@ -110,6 +110,39 @@ defmodule Number42.Refactors.Ex.LiftDirectives do
     }
   end
 
+  defp directive_patches_or_skip(nil), do: []
+
+  defp directive_patches_or_skip({body_exprs, insert_at_line}) do
+    existing = collect_module_level_directives(body_exprs)
+
+    local_directives =
+      body_exprs
+      |> Enum.flat_map(&collect_local_directives/1)
+
+    case local_directives do
+      [] ->
+        []
+
+      _ ->
+        delete_patches = local_directives |> Enum.map(&delete_patch/1)
+
+        new_directives =
+          local_directives
+          |> Enum.map(& &1.normalized)
+          |> Enum.uniq()
+          |> Enum.reject(&(&1 in existing))
+
+        case new_directives do
+          [] ->
+            delete_patches
+
+          _ ->
+            insert_patch = build_insert_patch(new_directives, insert_at_line)
+            [insert_patch | delete_patches]
+        end
+    end
+  end
+
   defp directive_to_string(node),
     do:
       node
@@ -148,6 +181,8 @@ defmodule Number42.Refactors.Ex.LiftDirectives do
     end)
   end
 
+  defp patch_or_passthrough([], source), do: source
+  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
   defp prefix_node?({:@, _, _}), do: true
   defp prefix_node?({:use, _, _}), do: true
   defp prefix_node?({:require, _, _}), do: true
@@ -165,45 +200,4 @@ defmodule Number42.Refactors.Ex.LiftDirectives do
   defp walk_body({left, right}), do: walk_body(left) ++ walk_body(right)
   defp walk_body(list) when is_list(list), do: list |> Enum.flat_map(&walk_body/1)
   defp walk_body(_leaf), do: []
-
-  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
-
-  defp apply_patches({:error, _}, source), do: source
-
-  defp directive_patches_or_skip(nil), do: []
-
-  defp directive_patches_or_skip({body_exprs, insert_at_line}) do
-    existing = collect_module_level_directives(body_exprs)
-
-    local_directives =
-      body_exprs
-      |> Enum.flat_map(&collect_local_directives/1)
-
-    case local_directives do
-      [] ->
-        []
-
-      _ ->
-        delete_patches = local_directives |> Enum.map(&delete_patch/1)
-
-        new_directives =
-          local_directives
-          |> Enum.map(& &1.normalized)
-          |> Enum.uniq()
-          |> Enum.reject(&(&1 in existing))
-
-        case new_directives do
-          [] ->
-            delete_patches
-
-          _ ->
-            insert_patch = build_insert_patch(new_directives, insert_at_line)
-            [insert_patch | delete_patches]
-        end
-    end
-  end
-
-  defp patch_or_passthrough([], source), do: source
-
-  defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
 end

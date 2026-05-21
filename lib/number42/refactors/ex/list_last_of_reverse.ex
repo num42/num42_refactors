@@ -8,10 +8,9 @@ defmodule Number42.Refactors.Ex.ListLastOfReverse do
   want, which it always is here).
 
   Mirrors the spirit of `ExSlop.Check.Refactor.ListLast`, but narrows
-  the rewrite to the one case where the replacement is unambiguously
-  semantics-preserving. Bare `List.last(x)` calls without the reverse
-  wrapper need a human to restructure the data flow and are left
-  alone.
+  the rewrite to the one shape where the replacement is mechanically
+  obvious. Bare `List.last(x)` calls without the reverse wrapper need
+  a human to restructure the data flow and are left alone.
 
   Source emission goes through `Sourceror.to_string/1`; `mix format`
   re-pipes after the refactor runs.
@@ -23,10 +22,6 @@ defmodule Number42.Refactors.Ex.ListLastOfReverse do
 
   @impl Number42.Refactors.Refactor
   def description, do: "List.last(Enum.reverse(list)) -> List.first(list)"
-
-  @impl Number42.Refactors.Refactor
-  def priority, do: 130
-
   @impl Number42.Refactors.Refactor
   def explanation do
     """
@@ -40,10 +35,13 @@ defmodule Number42.Refactors.Ex.ListLastOfReverse do
   end
 
   @impl Number42.Refactors.Refactor
+  def priority, do: 130
+  @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
-
   @impl Number42.Refactors.Refactor
   def transform(source, _opts), do: Sourceror.parse_string(source) |> apply_patches(source)
+  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
+  defp apply_patches({:error, _}, source), do: source
 
   defp build_patches(ast),
     do:
@@ -51,15 +49,12 @@ defmodule Number42.Refactors.Ex.ListLastOfReverse do
       |> Macro.prewalker()
       |> Enum.flat_map(&maybe_patch/1)
 
-  # Direct nested form: List.last(Enum.reverse(list))
   defp maybe_patch(
          {{:., _, [{:__aliases__, _, [:List]}, :last]}, _,
           [{{:., _, [{:__aliases__, _, [:Enum]}, :reverse]}, _, [list]}]} = node
        ),
        do: [Patch.replace(node, "List.first(#{Sourceror.to_string(list)})")]
 
-  # Pipe form: list |> Enum.reverse() |> List.last()
-  # AST: {:|>, _, [{:|>, _, [list, Enum.reverse_call]}, List.last_call]}
   defp maybe_patch(
          {:|>, _,
           [
@@ -70,12 +65,6 @@ defmodule Number42.Refactors.Ex.ListLastOfReverse do
        do: [Patch.replace(node, "List.first(#{Sourceror.to_string(list)})")]
 
   defp maybe_patch(_), do: []
-
-  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
-
-  defp apply_patches({:error, _}, source), do: source
-
   defp patch_or_passthrough([], source), do: source
-
   defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
 end

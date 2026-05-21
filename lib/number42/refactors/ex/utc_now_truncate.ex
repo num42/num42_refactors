@@ -47,10 +47,6 @@ defmodule Number42.Refactors.Ex.UtcNowTruncate do
 
   @impl Number42.Refactors.Refactor
   def description, do: "DateTime.utc_now() |> DateTime.truncate(p) -> DateTime.utc_now(p)"
-
-  @impl Number42.Refactors.Refactor
-  def priority, do: 130
-
   @impl Number42.Refactors.Refactor
   def explanation do
     """
@@ -64,12 +60,16 @@ defmodule Number42.Refactors.Ex.UtcNowTruncate do
   end
 
   @impl Number42.Refactors.Refactor
+  def priority, do: 130
+  @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
-
   @impl Number42.Refactors.Refactor
   def transform(source, _opts), do: Sourceror.parse_string(source) |> apply_patches(source)
 
   @date_modules [:DateTime, :NaiveDateTime]
+
+  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
+  defp apply_patches({:error, _}, source), do: source
 
   defp build_patches(ast),
     do:
@@ -77,7 +77,9 @@ defmodule Number42.Refactors.Ex.UtcNowTruncate do
       |> Macro.prewalker()
       |> Enum.flat_map(&maybe_patch/1)
 
-  # Pipe form: DateTime.utc_now() |> DateTime.truncate(precision)
+  defp build_utc_now(am, mod, dm, cm, precision),
+    do: {{:., dm, [{:__aliases__, am, [mod]}, :utc_now]}, cm, [precision]}
+
   defp maybe_patch(
          {:|>, _,
           [
@@ -90,7 +92,6 @@ defmodule Number42.Refactors.Ex.UtcNowTruncate do
     [Patch.replace(node, render_clean(replacement))]
   end
 
-  # Nested form: DateTime.truncate(DateTime.utc_now(), precision)
   defp maybe_patch(
          {{:., dm, [{:__aliases__, am, [mod2]}, :truncate]}, cm,
           [
@@ -104,14 +105,8 @@ defmodule Number42.Refactors.Ex.UtcNowTruncate do
   end
 
   defp maybe_patch(_), do: []
-
-  defp build_utc_now(am, mod, dm, cm, precision),
-    do: {{:., dm, [{:__aliases__, am, [mod]}, :utc_now]}, cm, [precision]}
-
-  # `Sourceror.to_string/1` re-emits comments stored in node meta
-  # (`:leading_comments` / `:trailing_comments`). When we patch a
-  # subrange that already includes those comments in the source, the
-  # comments would get duplicated. Strip them before rendering.
+  defp patch_or_passthrough([], source), do: source
+  defp patch_or_passthrough(patches, source), do: Sourceror.patch_string(source, patches)
   defp render_clean(ast), do: ast |> strip_comments() |> Sourceror.to_string()
 
   defp strip_comments(ast) do
@@ -124,11 +119,4 @@ defmodule Number42.Refactors.Ex.UtcNowTruncate do
         other
     end)
   end
-
-  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
-
-  defp apply_patches({:error, _}, source), do: source
-
-  defp patch_or_passthrough([], source), do: source
-  defp patch_or_passthrough(patches, source), do: Sourceror.patch_string(source, patches)
 end

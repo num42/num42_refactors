@@ -25,10 +25,6 @@ defmodule Number42.Refactors.Ex.EnumIntoToMapNew do
 
   @impl Number42.Refactors.Refactor
   def description, do: "Enum.into(coll, %{}) -> Map.new(coll)"
-
-  @impl Number42.Refactors.Refactor
-  def priority, do: 140
-
   @impl Number42.Refactors.Refactor
   def explanation do
     """
@@ -42,10 +38,13 @@ defmodule Number42.Refactors.Ex.EnumIntoToMapNew do
   end
 
   @impl Number42.Refactors.Refactor
+  def priority, do: 140
+  @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
-
   @impl Number42.Refactors.Refactor
   def transform(source, _opts), do: Sourceror.parse_string(source) |> apply_patches(source)
+  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
+  defp apply_patches({:error, _}, source), do: source
 
   defp build_patches(ast),
     do:
@@ -53,7 +52,9 @@ defmodule Number42.Refactors.Ex.EnumIntoToMapNew do
       |> Macro.prewalker()
       |> Enum.flat_map(&maybe_patch/1)
 
-  # Direct call: Enum.into(coll, %{})
+  defp defers_to_enum_map?({{:., _, [{:__aliases__, _, [:Enum]}, :map]}, _, _}), do: true
+  defp defers_to_enum_map?(_), do: false
+
   defp maybe_patch(
          {{:., _, [{:__aliases__, _, [:Enum]}, :into]}, _, [coll, {:%{}, _, []}]} = node
        ) do
@@ -64,8 +65,6 @@ defmodule Number42.Refactors.Ex.EnumIntoToMapNew do
     end
   end
 
-  # Pipe form: coll |> Enum.into(%{})
-  # AST: {:|>, _, [coll, {Enum.into_call, [], [%{}]}]}
   defp maybe_patch(
          {:|>, _,
           [
@@ -81,16 +80,6 @@ defmodule Number42.Refactors.Ex.EnumIntoToMapNew do
   end
 
   defp maybe_patch(_), do: []
-
-  # Defer to EnumMapIntoToMapNew when coll is `Enum.map(...)`.
-  defp defers_to_enum_map?({{:., _, [{:__aliases__, _, [:Enum]}, :map]}, _, _}), do: true
-  defp defers_to_enum_map?(_), do: false
-
-  defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
-
-  defp apply_patches({:error, _}, source), do: source
-
   defp patch_or_passthrough([], source), do: source
-
   defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
 end

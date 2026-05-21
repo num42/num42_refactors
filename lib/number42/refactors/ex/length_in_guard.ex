@@ -101,9 +101,6 @@ defmodule Number42.Refactors.Ex.LengthInGuard do
     do: "Replace `length/1` guards with explicit pattern clauses + existing catch-all body"
 
   @impl Number42.Refactors.Refactor
-  def priority, do: 120
-
-  @impl Number42.Refactors.Refactor
   def explanation do
     """
     `when length(list) > 0` walks the entire list at runtime just to
@@ -117,15 +114,58 @@ defmodule Number42.Refactors.Ex.LengthInGuard do
   end
 
   @impl Number42.Refactors.Refactor
+  def priority, do: 120
+  @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
   @impl Number42.Refactors.Refactor
   def transform(source, _opts), do: Sourceror.parse_string(source) |> apply_patches(source)
+
+  defp apply_patches({:ok, ast}, source),
+    do: build_patches(ast, source) |> apply_patches_to_source(source)
+
+  defp apply_patches({:error, _}, source), do: source
+  defp apply_patches_to_source([], source), do: source
+  defp apply_patches_to_source(patches, source), do: source |> Sourceror.patch_string(patches)
+  defp arg_text_or_fallback({:ok, text}, _arg), do: text
+  defp arg_text_or_fallback(:error, arg), do: arg |> Sourceror.to_string()
+
+  defp arm_patch_or_nil(
+         :skip,
+         _arm_node,
+         _catch_all_body_ast,
+         _head_pat,
+         _source
+       ),
+       do: nil
+
+  defp arm_patch_or_nil(
+         {:ok, var_path, op, n, remaining_guard},
+         arm_node,
+         catch_all_body_ast,
+         head_pat,
+         source
+       ) do
+    sizes = fallback_sizes(op, n) |> Enum.to_list()
+
+    rendered =
+      render_arm_split(arm_node, head_pat, var_path, sizes, catch_all_body_ast,
+        op: op,
+        n: n,
+        remaining_guard: remaining_guard,
+        source: source
+      )
+
+    Patch.replace(arm_node, rendered)
+  end
 
   defp bare_or_underscore?({name, _, ctx}) when is_atom(name) and is_atom(ctx), do: true
   defp bare_or_underscore?(_), do: false
 
   defp body_text(body_ast, source),
     do: slice_node(source, body_ast) |> body_text_or_fallback(body_ast)
+
+  defp body_text_or_fallback({:ok, text}, _body_ast), do: text
+  defp body_text_or_fallback(:error, body_ast), do: body_ast |> Sourceror.to_string()
 
   defp build_patches(ast, source),
     do:
@@ -140,6 +180,31 @@ defmodule Number42.Refactors.Ex.LengthInGuard do
 
   defp case_clause_list_patches({tag, _meta, args}, source),
     do: extract_clauses(tag, args) |> clause_list_patches_or_skip(source)
+
+  defp classify_arm_guard_with_conjunct(:skip, _head_pat), do: :skip
+
+  defp classify_arm_guard_with_conjunct(
+         {:ok, var, op, n, remaining_guard},
+         head_pat
+       ) do
+    with {:ok, path} <- find_var_in_pattern(head_pat, var),
+         true <- supported?(op, n) do
+      {:ok, path, op, n, remaining_guard}
+    else
+      _ -> :skip
+    end
+  end
+
+  defp classify_def_guard_with_conjunct(:skip, _fn_args), do: :skip
+
+  defp classify_def_guard_with_conjunct({:ok, var, op, n, remaining_guard}, fn_args) do
+    with {:ok, idx} <- find_var_arg(fn_args, var),
+         true <- supported?(op, n) do
+      {:ok, idx, op, n, remaining_guard}
+    else
+      _ -> :skip
+    end
+  end
 
   defp classify_guard(fn_args, guard),
     do: extract_length_conjunct(guard) |> classify_def_guard_with_conjunct(fn_args)
@@ -163,6 +228,64 @@ defmodule Number42.Refactors.Ex.LengthInGuard do
     end
   end
 
+  defp clause_list_patches_or_skip(:no, _source), do: []
+
+  defp clause_list_patches_or_skip({:ok, _do_arg, clauses}, source),
+    do: clauses |> clause_list_patches(source)
+
+  defp combine_lhs_extract({:ok, var, op, n, nil}, _lhs, rhs), do: {:ok, var, op, n, rhs}
+
+  defp combine_lhs_extract({:ok, var, op, n, lhs_rest}, _lhs, rhs),
+    do: {:ok, var, op, n, {:and, [], [lhs_rest, rhs]}}
+
+  defp combine_lhs_extract(:skip, lhs, rhs), do: do_extract(rhs) |> combine_with_lhs(lhs)
+  defp combine_with_lhs({:ok, var, op, n, nil}, lhs), do: {:ok, var, op, n, lhs}
+
+  defp combine_with_lhs({:ok, var, op, n, rhs_rest}, lhs),
+    do: {:ok, var, op, n, {:and, [], [lhs, rhs_rest]}}
+
+  defp combine_with_lhs(:skip, _lhs), do: :skip
+
+  defp def_clause_patch_or_nil(
+         :skip,
+         _catch_all_body_ast,
+         _catch_all_kind,
+         _def_kind,
+         _do_kw,
+         _fn_args,
+         _name,
+         _node,
+         _source
+       ),
+       do: nil
+
+  defp def_clause_patch_or_nil(
+         {:ok, var_index, op, n, remaining_guard},
+         catch_all_body_ast,
+         catch_all_kind,
+         def_kind,
+         do_kw,
+         fn_args,
+         name,
+         node,
+         source
+       ) do
+    sizes = fallback_sizes(op, n) |> Enum.to_list()
+
+    rendered =
+      render_def_split(node, def_kind, name, fn_args, var_index, sizes,
+        op: op,
+        n: n,
+        remaining_guard: remaining_guard,
+        catch_all_kind: catch_all_kind,
+        catch_all_body_ast: catch_all_body_ast,
+        do_kw: do_kw,
+        source: source
+      )
+
+    Patch.replace(node, rendered)
+  end
+
   defp def_signature({def_kind, _, [{:when, _, [{name, _, args}, _g]} | _]})
        when def_kind?(def_kind) and is_atom(name) and is_list(args),
        do: {def_kind, name, length(args)}
@@ -172,7 +295,6 @@ defmodule Number42.Refactors.Ex.LengthInGuard do
        do: {def_kind, name, length(args)}
 
   defp def_signature(_), do: nil
-
   defp do_extract({:and, _, [lhs, rhs]}), do: do_extract(lhs) |> combine_lhs_extract(lhs, rhs)
 
   defp do_extract({op, _, [{:length, _, [{var, _, ctx}]}, rhs]})
@@ -282,6 +404,8 @@ defmodule Number42.Refactors.Ex.LengthInGuard do
     do: find_var_in_pattern(lhs, var) |> find_var_or_recurse_rhs(rhs, var)
 
   defp find_var_in_pattern(_, _), do: :skip
+  defp find_var_or_recurse_rhs({:ok, _} = ok, _rhs, _var), do: ok
+  defp find_var_or_recurse_rhs(:skip, rhs, var), do: rhs |> find_var_in_pattern(var)
 
   defp fn_clause_list_patches({:fn, _meta, clauses}, source),
     do: clauses |> clause_list_patches(source)
@@ -398,6 +522,28 @@ defmodule Number42.Refactors.Ex.LengthInGuard do
 
   defp node_patches({:fn, _, _} = node, source), do: fn_clause_list_patches(node, source)
   defp node_patches(_, _), do: []
+
+  defp pair_with_shape_if_match({:ok, atom}, key_ast, _pair, shape, target_atom)
+       when atom == target_atom do
+    {key_ast, shape}
+  end
+
+  defp pair_with_shape_if_match(_, _key_ast, pair, _shape, _target_atom), do: pair
+
+  defp pair_with_shape_keeping_binding(
+         {:ok, atom},
+         key_ast,
+         _pair,
+         shape,
+         target_atom,
+         var_node
+       )
+       when atom == target_atom do
+    {key_ast, {:=, [], [shape, var_node]}}
+  end
+
+  defp pair_with_shape_keeping_binding(_, _key_ast, pair, _shape, _target_atom, _var_node),
+    do: pair
 
   defp process_def_group(clauses, def_kind, name, arity, source) do
     catch_all = find_def_catch_all(clauses)
@@ -577,7 +723,6 @@ defmodule Number42.Refactors.Ex.LengthInGuard do
   defp rhs_int(n) when is_integer(n), do: {:ok, n}
   defp rhs_int({:__block__, _, [n]}) when is_integer(n), do: {:ok, n}
   defp rhs_int(_), do: :skip
-
   defp supported?(:>, n) when n >= 0 and n <= @max_n - 1, do: true
   defp supported?(:>=, n) when n >= 1 and n <= @max_n, do: true
   defp supported?(_, _), do: false
@@ -585,163 +730,6 @@ defmodule Number42.Refactors.Ex.LengthInGuard do
   defp var_node_text({name, _, ctx}) when is_atom(name) and is_atom(ctx),
     do: Atom.to_string(name)
 
-  defp apply_patches({:ok, ast}, source),
-    do: build_patches(ast, source) |> apply_patches_to_source(source)
-
-  defp apply_patches({:error, _}, source), do: source
-
-  defp body_text_or_fallback({:ok, text}, _body_ast), do: text
-
-  defp body_text_or_fallback(:error, body_ast), do: body_ast |> Sourceror.to_string()
-
-  defp clause_list_patches_or_skip(:no, _source), do: []
-
-  defp clause_list_patches_or_skip({:ok, _do_arg, clauses}, source),
-    do: clauses |> clause_list_patches(source)
-
-  defp classify_def_guard_with_conjunct(:skip, _fn_args), do: :skip
-
-  defp classify_def_guard_with_conjunct({:ok, var, op, n, remaining_guard}, fn_args) do
-    with {:ok, idx} <- find_var_arg(fn_args, var),
-         true <- supported?(op, n) do
-      {:ok, idx, op, n, remaining_guard}
-    else
-      _ -> :skip
-    end
-  end
-
-  defp classify_arm_guard_with_conjunct(:skip, _head_pat), do: :skip
-
-  defp classify_arm_guard_with_conjunct(
-         {:ok, var, op, n, remaining_guard},
-         head_pat
-       ) do
-    with {:ok, path} <- find_var_in_pattern(head_pat, var),
-         true <- supported?(op, n) do
-      {:ok, path, op, n, remaining_guard}
-    else
-      _ -> :skip
-    end
-  end
-
-  defp combine_lhs_extract({:ok, var, op, n, nil}, _lhs, rhs), do: {:ok, var, op, n, rhs}
-
-  defp combine_lhs_extract({:ok, var, op, n, lhs_rest}, _lhs, rhs),
-    do: {:ok, var, op, n, {:and, [], [lhs_rest, rhs]}}
-
-  defp combine_lhs_extract(:skip, lhs, rhs), do: do_extract(rhs) |> combine_with_lhs(lhs)
-
   defp wrap_extract_with_int({:ok, n}, op, var), do: {:ok, var, op, n, nil}
-
   defp wrap_extract_with_int(:skip, _op, _var), do: :skip
-
-  defp find_var_or_recurse_rhs({:ok, _} = ok, _rhs, _var), do: ok
-
-  defp find_var_or_recurse_rhs(:skip, rhs, var), do: rhs |> find_var_in_pattern(var)
-
-  defp arm_patch_or_nil(
-         :skip,
-         _arm_node,
-         _catch_all_body_ast,
-         _head_pat,
-         _source
-       ),
-       do: nil
-
-  defp arm_patch_or_nil(
-         {:ok, var_path, op, n, remaining_guard},
-         arm_node,
-         catch_all_body_ast,
-         head_pat,
-         source
-       ) do
-    sizes = fallback_sizes(op, n) |> Enum.to_list()
-
-    rendered =
-      render_arm_split(arm_node, head_pat, var_path, sizes, catch_all_body_ast,
-        op: op,
-        n: n,
-        remaining_guard: remaining_guard,
-        source: source
-      )
-
-    Patch.replace(arm_node, rendered)
-  end
-
-  defp def_clause_patch_or_nil(
-         :skip,
-         _catch_all_body_ast,
-         _catch_all_kind,
-         _def_kind,
-         _do_kw,
-         _fn_args,
-         _name,
-         _node,
-         _source
-       ),
-       do: nil
-
-  defp def_clause_patch_or_nil(
-         {:ok, var_index, op, n, remaining_guard},
-         catch_all_body_ast,
-         catch_all_kind,
-         def_kind,
-         do_kw,
-         fn_args,
-         name,
-         node,
-         source
-       ) do
-    sizes = fallback_sizes(op, n) |> Enum.to_list()
-
-    rendered =
-      render_def_split(node, def_kind, name, fn_args, var_index, sizes,
-        op: op,
-        n: n,
-        remaining_guard: remaining_guard,
-        catch_all_kind: catch_all_kind,
-        catch_all_body_ast: catch_all_body_ast,
-        do_kw: do_kw,
-        source: source
-      )
-
-    Patch.replace(node, rendered)
-  end
-
-  defp arg_text_or_fallback({:ok, text}, _arg), do: text
-
-  defp arg_text_or_fallback(:error, arg), do: arg |> Sourceror.to_string()
-
-  defp pair_with_shape_if_match({:ok, atom}, key_ast, _pair, shape, target_atom)
-       when atom == target_atom do
-    {key_ast, shape}
-  end
-
-  defp pair_with_shape_if_match(_, _key_ast, pair, _shape, _target_atom), do: pair
-
-  defp pair_with_shape_keeping_binding(
-         {:ok, atom},
-         key_ast,
-         _pair,
-         shape,
-         target_atom,
-         var_node
-       )
-       when atom == target_atom do
-    {key_ast, {:=, [], [shape, var_node]}}
-  end
-
-  defp pair_with_shape_keeping_binding(_, _key_ast, pair, _shape, _target_atom, _var_node),
-    do: pair
-
-  defp apply_patches_to_source([], source), do: source
-
-  defp apply_patches_to_source(patches, source), do: source |> Sourceror.patch_string(patches)
-
-  defp combine_with_lhs({:ok, var, op, n, nil}, lhs), do: {:ok, var, op, n, lhs}
-
-  defp combine_with_lhs({:ok, var, op, n, rhs_rest}, lhs),
-    do: {:ok, var, op, n, {:and, [], [lhs, rhs_rest]}}
-
-  defp combine_with_lhs(:skip, _lhs), do: :skip
 end
