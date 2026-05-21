@@ -557,6 +557,49 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctionsTest do
     end
   end
 
+  describe "regression: weak-signal module-subtoken matches" do
+    test "does not pluralize a subtoken just because the module name's last token is its plural" do
+      # Regression from position-db: `defp build_item_row/...` in
+      # module `PositionDbWeb.PriceListLive.ReviewRows` was renamed to
+      # `build_item_rows/...`. The `row` subtoken latched on `rows` in
+      # the module's last segment — but a function literally called
+      # `*_row` building a single row should not become `*_rows`. The
+      # module-name-tail compound is too weak a signal when it differs
+      # from the short by exactly a singular/plural flip: it
+      # systematically inverts the cardinality the author chose.
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule PositionDbWeb.PriceListLive.ReviewRows do
+          defp build_item_row(item), do: item
+        end
+        '''
+      )
+    end
+
+    test "does not blow up a name when the expansion already appears in it" do
+      # Regression from position-db: `defp ip_item_component/1` in
+      # module `PositionDbWeb.ReferenceBuildingLive.ItemPickerComponent`
+      # became `defp item_picker_component_item_component/1`. The `ip`
+      # short latched on `ItemPicker…` as initials-of-subtokens → 100
+      # score → expansion `item_picker_component`, which was then
+      # concatenated with the unchanged tail `_item_component`. The
+      # result duplicates the `item_component` segment.
+      #
+      # General rule: if the expansion of a subtoken contains another
+      # subtoken of the same function name, we are about to write
+      # `expansion_<that_subtoken>` — silently duplicating. Skip.
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule PositionDbWeb.ReferenceBuildingLive.ItemPickerComponent do
+          defp ip_item_component(assigns), do: assigns
+        end
+        '''
+      )
+    end
+  end
+
   describe "idempotent" do
     test "running twice equals running once" do
       assert_idempotent(

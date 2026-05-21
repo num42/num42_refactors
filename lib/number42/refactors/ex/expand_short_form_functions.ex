@@ -269,6 +269,7 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
   # AND at least one expansion actually changes the name; otherwise :skip.
   defp resolve_name(name, context_compounds, ctx) do
     parts = name |> Atom.to_string() |> String.split("_")
+    other_parts = MapSet.new(parts)
 
     expanded =
       parts
@@ -295,8 +296,33 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
           # Heuristic: try to compound-resolve against context.
           true ->
             case resolve_subtoken(part, context_compounds) do
-              {:ok, expansion} -> {:cont, [expansion | acc]}
-              :skip -> {:halt, :skip}
+              {:ok, expansion} ->
+                cond do
+                  # Weak singular/plural flip — the expansion is just
+                  # `part`'s plural (`row → rows`) or singular form.
+                  # That's almost certainly a false positive: the
+                  # subtoken latched on a module-name tail whose only
+                  # similarity to the short is cardinality. Changing
+                  # `build_item_row` → `build_item_rows` silently
+                  # flips the semantic the author chose; refuse.
+                  trivial_inflection?(part, expansion) ->
+                    {:halt, :skip}
+
+                  # Overlap with the rest of the function name. The
+                  # expansion's subtokens already appear elsewhere in
+                  # the original name (`ip` → `item_picker_component`
+                  # in `ip_item_component` would duplicate
+                  # `item`/`component`). That's a duplicate, not an
+                  # expansion.
+                  expansion_overlaps_other_parts?(expansion, other_parts, part) ->
+                    {:halt, :skip}
+
+                  true ->
+                    {:cont, [expansion | acc]}
+                end
+
+              :skip ->
+                {:halt, :skip}
             end
         end
       end)
@@ -314,6 +340,30 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
           {:ok, String.to_atom(new_name_string)}
         end
     end
+  end
+
+  # `row` ↔ `rows`, `id` ↔ `ids`: the expansion adds no information,
+  # it just toggles cardinality. The author already picked one form
+  # deliberately; respect that.
+  defp trivial_inflection?(short, expansion) do
+    short_str = to_string(short)
+    expansion_str = to_string(expansion)
+
+    expansion_str == pluralize_word(short_str) or
+      expansion_str == singularize(short_str)
+  end
+
+  # True if any subtoken of `expansion` already appears elsewhere in
+  # the function name (i.e. in `other_parts \ {short}`). When this
+  # fires, splicing the expansion in would produce a name like
+  # `item_picker_component_item_component` — duplicates rather than
+  # disambiguation.
+  defp expansion_overlaps_other_parts?(expansion, other_parts, short) do
+    siblings = MapSet.delete(other_parts, short)
+
+    expansion
+    |> String.split("_", trim: true)
+    |> Enum.any?(&MapSet.member?(siblings, &1))
   end
 
   # Single-char subtokens have no signal strong enough to disambiguate.
