@@ -982,4 +982,90 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindingsTest do
       )
     end
   end
+
+  describe "call-site signal: argument-to-local-function" do
+    test "short binding passed as 1st arg to a local function takes that param's long name" do
+      # When a short-form binding is passed as an argument to a
+      # locally-defined function whose corresponding parameter has a
+      # long, descriptive name, that param name is the strongest
+      # signal we have for the binding's intended long form — stronger
+      # than guessing from module/function tokens.
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def go(bis) do
+            Enum.map(bis, fn bi ->
+              load_brand_item(bi)
+            end)
+          end
+
+          defp load_brand_item(brand_item), do: brand_item
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          def go(bis) do
+            Enum.map(bis, fn brand_item ->
+              load_brand_item(brand_item)
+            end)
+          end
+
+          defp load_brand_item(brand_item), do: brand_item
+        end
+        '''
+      )
+    end
+
+    test "skips when multiple call sites disagree on the param name" do
+      # If `bi` flows into two different local functions whose
+      # respective params disagree (`brand_item` vs `building_item`),
+      # the call-site signal is ambiguous — fall back to other signals
+      # or skip rather than picking one arbitrarily.
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          def go(items) do
+            Enum.map(items, fn bi ->
+              do_one(bi)
+              do_other(bi)
+            end)
+          end
+
+          defp do_one(brand_item), do: brand_item
+          defp do_other(building_item), do: building_item
+        end
+        '''
+      )
+    end
+
+    test "call-site signal works for `=` bindings, not just lambda params" do
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def go(arg) do
+            bi = fetch(arg)
+            load_brand_item(bi)
+          end
+
+          defp fetch(x), do: x
+          defp load_brand_item(brand_item), do: brand_item
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          def go(arg) do
+            brand_item = fetch(arg)
+            load_brand_item(brand_item)
+          end
+
+          defp fetch(x), do: x
+          defp load_brand_item(brand_item), do: brand_item
+        end
+        '''
+      )
+    end
+  end
 end

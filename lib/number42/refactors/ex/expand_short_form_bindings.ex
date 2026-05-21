@@ -123,13 +123,83 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
 
   defp build_patches(ast, ctx) do
     module_tokens = collect_module_tokens(ast)
+    local_param_index = collect_local_param_index(ast, ctx)
 
     ast
     |> collect_def_clauses()
     |> Enum.flat_map(fn {def_node, body} ->
-      patches_for_clause(def_node, body, module_tokens, ctx)
+      patches_for_clause(def_node, body, module_tokens, local_param_index, ctx)
     end)
   end
+
+  # Module-wide index of local function param names. Maps
+  # `{function_name, position}` → long-form param name (string), but
+  # only when:
+  #
+  # - all clauses of that `{name, arity}` agree on the position's
+  #   param name, and
+  # - the chosen name is "long" (not itself a short-form abbreviation),
+  #   so we don't propagate one short into another.
+  #
+  # The index lets `patches_for_clause` answer "if I'm passing `bi`
+  # as 1st arg to `load_brand_item/1`, what's the param called there?"
+  # That is the strongest contextual signal we have for the binding's
+  # intended long form — stronger than module-name latching.
+  defp collect_local_param_index(ast, ctx) do
+    ast
+    |> Macro.prewalker()
+    |> Enum.flat_map(fn
+      {kind, _, [head, _body]} when def_or_macro_kind?(kind) ->
+        case extract_fn_signature(head) do
+          {name, params} ->
+            params
+            |> Enum.with_index()
+            |> Enum.flat_map(fn {param, idx} ->
+              case param_simple_name(param) do
+                {:ok, atom} -> [{{name, length(params), idx}, atom}]
+                :error -> []
+              end
+            end)
+
+          :error ->
+            []
+        end
+
+      _ ->
+        []
+    end)
+    |> Enum.group_by(fn {key, _} -> key end, fn {_, atom} -> atom end)
+    |> Enum.flat_map(fn {{name, arity, idx}, atoms} ->
+      case Enum.uniq(atoms) do
+        [single] ->
+          if long?(single, ctx),
+            do: [{{name, arity, idx}, Atom.to_string(single)}],
+            else: []
+
+        _ ->
+          []
+      end
+    end)
+    |> Map.new()
+  end
+
+  # A param is "simple" when it's a bare variable (possibly with
+  # default `\\` or struct annotation). Destructuring patterns,
+  # pinned vars, and literals are not useful as call-site signals.
+  defp param_simple_name({:\\, _, [inner, _]}), do: param_simple_name(inner)
+
+  defp param_simple_name({:=, _, [a, b]}),
+    do: param_simple_name(a) |> or_else(fn -> param_simple_name(b) end)
+
+  defp param_simple_name({name, _, c}) when is_atom(name) and is_atom(c) do
+    string = Atom.to_string(name)
+    if String.starts_with?(string, "_"), do: :error, else: {:ok, name}
+  end
+
+  defp param_simple_name(_), do: :error
+
+  defp or_else({:ok, _} = ok, _fallback), do: ok
+  defp or_else(:error, fallback), do: fallback.()
 
   defp call_name_string_or_nil({:ok, name}) when is_atom(name) do
     name |> Atom.to_string() |> String.trim_trailing("!") |> String.trim_trailing("?")
@@ -231,7 +301,7 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
   defp patch_or_passthrough([], source), do: source
   defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
 
-  defp patches_for_clause(head, body, module_compounds, context_compound) do
+  defp patches_for_clause(head, body, module_compounds, local_param_index, context_compound) do
     {fn_name, params} = head_signature(head)
     fn_compound = Atom.to_string(fn_name)
     param_names = params |> Enum.flat_map(&pattern_var_names/1)
@@ -277,12 +347,30 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
     short_bindings =
       collected_binding |> Enum.filter(fn {name, _, _} -> short_name?(name, context_compound) end)
 
+    # Call-site resolutions per short name — see
+    # `resolve_via_call_sites/3`. Per name we get either a single
+    # agreed-upon long form (`{:ok, "brand_item"}`), an explicit
+    # disagreement (`:conflict`, treat as ambiguous → no signal AND
+    # don't fall through to weaker signals), or `:none` (no call
+    # sites). Disagreement on call sites is *informative*: it means
+    # the binding has multiple plausible names. Refuse to rewrite
+    # rather than pick from weaker context signals.
+    short_names_set = short_bindings |> Enum.map(fn {name, _, _} -> name end) |> MapSet.new()
+    call_site_signals = resolve_via_call_sites(body, short_names_set, local_param_index)
+
     # Resolve: short-name → long-name (atom) per binding.
     resolutions =
       short_bindings
       |> Enum.reject(fn {name, _node, _rhs} -> MapSet.member?(rebound, name) end)
       |> Enum.flat_map(fn {name, _node, rhs} ->
-        case resolve_long(name, rhs, context_compounds, context_compound) do
+        result =
+          case Map.fetch(call_site_signals, name) do
+            {:ok, {:ok, long}} -> {:ok, long}
+            {:ok, :conflict} -> :skip
+            :error -> resolve_long(name, rhs, context_compounds, context_compound)
+          end
+
+        case result do
           {:ok, long} ->
             long_atom = String.to_atom(long)
             if MapSet.member?(occupied, long_atom), do: [], else: [{name, long_atom}]
@@ -349,6 +437,80 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
         end
     end
   end
+
+  # Walk the function body and collect, for each short name in
+  # `short_names`, every call-site where that name appears as an
+  # argument to a local function whose corresponding parameter is in
+  # `local_param_index`. Pipe head + Pipe arg are both treated as
+  # call positions (`bi |> load_brand_item()` puts `bi` at position 0).
+  #
+  # Returns `%{short_name => {:ok, long} | :conflict}` — only short
+  # names that had at least one local-call observation. Disagreement
+  # between observations collapses to `:conflict` so the caller can
+  # refuse rather than guess.
+  defp resolve_via_call_sites(body, short_names, local_param_index) do
+    body
+    |> Macro.prewalker()
+    |> Enum.flat_map(&call_site_observations(&1, short_names, local_param_index))
+    |> Enum.group_by(fn {name, _} -> name end, fn {_, long} -> long end)
+    |> Enum.map(fn {name, longs} ->
+      case Enum.uniq(longs) do
+        [single] -> {name, {:ok, single}}
+        _ -> {name, :conflict}
+      end
+    end)
+    |> Map.new()
+  end
+
+  # Direct call: `load_brand_item(bi, other)`. Each short-named arg
+  # contributes one observation if the callee's param-name for that
+  # position is in `local_param_index`.
+  defp call_site_observations({name, _, args}, short_names, local_param_index)
+       when is_atom(name) and is_list(args) do
+    arity = length(args)
+
+    args
+    |> Enum.with_index()
+    |> Enum.flat_map(fn {arg, position} ->
+      observe_arg(arg, short_names, local_param_index, name, arity, position)
+    end)
+  end
+
+  # Pipe: `bi |> load_brand_item(other)` is sugar for
+  # `load_brand_item(bi, other)` — `bi` is position 0, every explicit
+  # arg shifts right by one. We handle the pipe shape here so the
+  # signal isn't lost when the author wrote idiomatic Elixir.
+  defp call_site_observations(
+         {:|>, _, [lhs, {name, _, args}]},
+         short_names,
+         local_param_index
+       )
+       when is_atom(name) and is_list(args) do
+    arity = length(args) + 1
+
+    observe_arg(lhs, short_names, local_param_index, name, arity, 0) ++
+      (args
+       |> Enum.with_index()
+       |> Enum.flat_map(fn {arg, position} ->
+         observe_arg(arg, short_names, local_param_index, name, arity, position + 1)
+       end))
+  end
+
+  defp call_site_observations(_, _short_names, _local_param_index), do: []
+
+  defp observe_arg({short, _, c}, short_names, local_param_index, callee, arity, position)
+       when is_atom(short) and is_atom(c) do
+    if MapSet.member?(short_names, short) do
+      case Map.fetch(local_param_index, {callee, arity, position}) do
+        {:ok, long} -> [{short, long}]
+        :error -> []
+      end
+    else
+      []
+    end
+  end
+
+  defp observe_arg(_arg, _short_names, _local_param_index, _callee, _arity, _position), do: []
 
   defp rhs_function_compound(rhs) do
     name = extract_call_name(rhs) |> call_name_string_or_nil()
