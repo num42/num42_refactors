@@ -99,6 +99,14 @@ defmodule Number42.Refactors.Ex.ExtractNestedBlock do
       {:=, _, [lhs, _rhs]} ->
         pattern_var_names(lhs)
 
+      # `for` and `with` bind names through `<-` generators/clauses.
+      # An extracted `fn` body sitting *inside* a `for bi <- list, do: ...`
+      # or `with {:ok, x} <- ...` references those names as closure
+      # variables — they must be passed into the lifted helper or the
+      # helper sees an undefined variable.
+      {:<-, _, [lhs, _rhs]} ->
+        pattern_var_names(lhs)
+
       # Lambda parameters bind names too. A name introduced by an
       # *outer* `fn` on the path to the extracted node must be passed
       # in as a parameter — otherwise the helper closes over a name

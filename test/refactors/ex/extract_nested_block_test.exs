@@ -103,6 +103,68 @@ defmodule Number42.Refactors.Ex.ExtractNestedBlockTest do
     end
   end
 
+  describe "closure variables from enclosing scope" do
+    test "captures `for`-comprehension generator binding as helper param" do
+      # Regression from position-db: a `for bi <- list, into: %{} do ... end`
+      # binds `bi` via the `<-` generator. An `fn` extracted from inside
+      # the comprehension body that references `bi` must receive it as
+      # a parameter — otherwise the lifted helper sees an undefined
+      # variable and the module fails to compile.
+      before_source = """
+      defmodule Foo do
+        def go(list, by_key) do
+          if list != [] do
+            for bi <- list, into: %{} do
+              grouped =
+                bi.items
+                |> Enum.map(fn item ->
+                  matching = Map.get(by_key, {item.id, bi.brand_id})
+                  %{item: item, matching: matching}
+                end)
+
+              {bi.id, grouped}
+            end
+          end
+        end
+      end
+      """
+
+      result = apply_refactor(@subject, before_source, @opts)
+
+      assert {:ok, _} = Code.string_to_quoted(result),
+             "extracted helper must produce parseable code"
+
+      # The helper must accept `bi` (or whatever Sourceror renames it to)
+      # so the captured closure variable resolves.
+      assert result =~ ~r/defp extracted_\w+\([^)]*\bbi\b/,
+             "extracted helper must take `bi` (the `for` generator binding) as a parameter:\n#{result}"
+    end
+
+    test "captures `with` clause binding as helper param" do
+      before_source = """
+      defmodule Foo do
+        def go(list, by_key) do
+          with {:ok, prefix} <- fetch_prefix() do
+            Enum.map(list, fn x ->
+              Enum.map(x.items, fn i ->
+                key = prefix <> i.name
+                %{key: key, x: x}
+              end)
+            end)
+          end
+        end
+      end
+      """
+
+      result = apply_refactor(@subject, before_source, @opts)
+
+      assert {:ok, _} = Code.string_to_quoted(result)
+
+      assert result =~ ~r/defp extracted_\w+\([^)]*\bprefix\b/,
+             "extracted helper must take `prefix` (the `with`-clause binding) as a parameter:\n#{result}"
+    end
+  end
+
   describe "idempotent" do
     test "running twice equals running once" do
       source = """
