@@ -72,6 +72,97 @@ defmodule Number42.Refactors.Ex.SortFunctionsTest do
     end
   end
 
+  describe "attached attributes travel with their function" do
+    test "@impl true stays glued to its def when the def moves" do
+      # `@impl true` is meaningful relative to the def directly
+      # below it — moving the def without the attribute would
+      # silently re-target the `@impl` at whatever happens to land
+      # next, which is a silent compile-time warning at best and a
+      # semantic regression at worst.
+      before_source = """
+      defmodule M do
+        use GenServer
+
+        @impl true
+        def init(state), do: {:ok, state}
+
+        def helper(x), do: x
+
+        @impl true
+        def handle_call(_msg, _from, state), do: {:reply, :ok, state}
+      end
+      """
+
+      result = apply_refactor(@subject, before_source)
+
+      # Each @impl true must end up directly above its original def.
+      assert result =~ ~r/@impl true\s*\n\s*def handle_call/
+      assert result =~ ~r/@impl true\s*\n\s*def init/
+
+      # `helper` carries no @impl and must NOT acquire one.
+      refute result =~ ~r/@impl true\s*\n\s*def helper/
+    end
+
+    test "@doc and @spec travel together with the def" do
+      before_source = """
+      defmodule M do
+        @doc "beta docs"
+        @spec beta() :: :b
+        def beta, do: :b
+
+        @doc "alpha docs"
+        @spec alpha() :: :a
+        def alpha, do: :a
+      end
+      """
+
+      result = apply_refactor(@subject, before_source)
+
+      a_idx = :binary.match(result, "def alpha") |> elem(0)
+      b_idx = :binary.match(result, "def beta") |> elem(0)
+      assert a_idx < b_idx
+
+      # Each def's @doc and @spec must sit directly above it,
+      # preserving original block contents byte-for-byte aside from
+      # block ordering.
+      assert result =~ ~r/@doc "alpha docs"\s*\n\s*@spec alpha\(\)\s*::\s*:a\s*\n\s*def alpha/
+      assert result =~ ~r/@doc "beta docs"\s*\n\s*@spec beta\(\)\s*::\s*:b\s*\n\s*def beta/
+    end
+
+    test "helper without @impl between two @impl defs lands in alphabetical position cleanly" do
+      # Order in source: init, helper, handle_call.
+      # Alphabetical order: handle_call, helper, init.
+      # The two @impl true attributes must follow their original
+      # defs, not the def that happens to take their slot.
+      before_source = """
+      defmodule M do
+        @impl true
+        def init(state), do: {:ok, state}
+
+        def helper(x), do: x
+
+        @impl true
+        def handle_call(_msg, _from, state), do: {:reply, :ok, state}
+      end
+      """
+
+      result = apply_refactor(@subject, before_source)
+
+      # Final order must be handle_call < helper < init.
+      hc_idx = :binary.match(result, "def handle_call") |> elem(0)
+      h_idx = :binary.match(result, "def helper") |> elem(0)
+      i_idx = :binary.match(result, "def init") |> elem(0)
+      assert hc_idx < h_idx
+      assert h_idx < i_idx
+
+      # Each @impl must still be directly above the def it was
+      # originally attached to.
+      assert result =~ ~r/@impl true\s*\n\s*def handle_call/
+      assert result =~ ~r/@impl true\s*\n\s*def init/
+      refute result =~ ~r/@impl true\s*\n\s*def helper/
+    end
+  end
+
   describe "idempotent" do
     test "running twice equals running once" do
       assert_idempotent(@subject, """
