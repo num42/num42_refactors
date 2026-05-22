@@ -371,16 +371,36 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
     short_names_set = short_bindings |> Enum.map(fn {name, _, _} -> name end) |> MapSet.new()
     call_site_signals = resolve_via_call_sites(body, short_names_set, local_param_index)
 
+    # `from(bi in BrandItem, ...)` is an explicit, local statement
+    # that `bi` represents a `BrandItem` row. That's the strongest
+    # signal we can get for the binding's intended long form —
+    # stronger than param-name latching, RHS-based matching, or any
+    # compound-context heuristic.
+    from_schema_signals = resolve_via_from_schemas(body, short_names_set)
+
     # Resolve: short-name → long-name (atom) per binding.
+    # Priority: from-schema > call-site > RHS/compound heuristics.
+    # `:conflict` at a higher tier short-circuits to `:skip` instead
+    # of falling through to weaker signals — disagreement is itself
+    # information, not absence.
     resolutions =
       short_bindings
       |> Enum.reject(fn {name, _node, _rhs} -> MapSet.member?(rebound, name) end)
       |> Enum.flat_map(fn {name, _node, rhs} ->
         result =
-          case Map.fetch(call_site_signals, name) do
-            {:ok, {:ok, long}} -> {:ok, long}
-            {:ok, :conflict} -> :skip
-            :error -> resolve_long(name, rhs, context_compounds, context_compound)
+          case Map.fetch(from_schema_signals, name) do
+            {:ok, {:ok, long}} ->
+              {:ok, long}
+
+            {:ok, :conflict} ->
+              :skip
+
+            :error ->
+              case Map.fetch(call_site_signals, name) do
+                {:ok, {:ok, long}} -> {:ok, long}
+                {:ok, :conflict} -> :skip
+                :error -> resolve_long(name, rhs, context_compounds, context_compound)
+              end
           end
 
         case result do
@@ -475,6 +495,29 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
     |> Map.new()
   end
 
+  # Walk the body for Ecto `from`-style bindings: `from(short in Schema, ...)`,
+  # also covered by named subqueries like `join: x in assoc(...)` /
+  # `join: x in Schema`. For each short name in `short_names`, take
+  # the schema-alias's last segment, underscore it, and use that as
+  # the long form. Multiple observations of the same short name must
+  # agree on the schema; otherwise `:conflict`.
+  #
+  # Returns `%{short_name => {:ok, long} | :conflict}` — only short
+  # names with at least one schema observation.
+  defp resolve_via_from_schemas(body, short_names) do
+    body
+    |> Macro.prewalker()
+    |> Enum.flat_map(&from_schema_observations(&1, short_names))
+    |> Enum.group_by(fn {name, _} -> name end, fn {_, long} -> long end)
+    |> Enum.map(fn {name, longs} ->
+      case Enum.uniq(longs) do
+        [single] -> {name, {:ok, single}}
+        _ -> {name, :conflict}
+      end
+    end)
+    |> Map.new()
+  end
+
   # Direct call: `load_brand_item(bi, other)`. Each short-named arg
   # contributes one observation if the callee's param-name for that
   # position is in `local_param_index`.
@@ -510,6 +553,36 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
   end
 
   defp call_site_observations(_, _short_names, _local_param_index), do: []
+
+  # `from(short in Schema, ...)` and `join: short in Schema` /
+  # `join: short in assoc(parent, :field)`. We accept both the
+  # top-level `from`/`join` shapes and any nested `in`-expression
+  # whose LHS is a bare var — Ecto's macros normalize these.
+  defp from_schema_observations({:in, _, [{short, _, c}, schema_ast]}, short_names)
+       when is_atom(short) and is_atom(c) do
+    if MapSet.member?(short_names, short) do
+      case schema_long_form(schema_ast) do
+        {:ok, long} -> [{short, long}]
+        :error -> []
+      end
+    else
+      []
+    end
+  end
+
+  defp from_schema_observations(_, _short_names), do: []
+
+  # Extract the long form from an Ecto query source. Schemas are
+  # `__aliases__` nodes whose last segment is the human-readable
+  # name (e.g. `BrandItem` → `brand_item`). Anything else (raw
+  # strings, dynamic queries, `assoc/2` joins) yields `:error` and
+  # leaves the binding alone — those don't carry a name signal.
+  defp schema_long_form({:__aliases__, _, parts}) when is_list(parts) and parts != [] do
+    last = List.last(parts)
+    if is_atom(last), do: {:ok, camel_to_snake(last)}, else: :error
+  end
+
+  defp schema_long_form(_), do: :error
 
   defp observe_arg({short, _, c}, short_names, local_param_index, callee, arity, position)
        when is_atom(short) and is_atom(c) do

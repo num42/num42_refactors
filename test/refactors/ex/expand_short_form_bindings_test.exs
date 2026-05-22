@@ -983,6 +983,69 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindingsTest do
     end
   end
 
+  describe "Ecto from/in binding: schema is the strongest signal" do
+    test "from(bi in BrandItem, ...) renames bi to brand_item across the body" do
+      # The author's `from(bi in BrandItem, ...)` is an explicit
+      # statement that `bi` represents a `BrandItem` row. That's the
+      # strongest local signal we can get — stronger than function
+      # parameters or module tokens. So `bi` becomes `brand_item`
+      # everywhere in the body, including inside the `from()` macro
+      # and any downstream lambda that re-binds it.
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def load(item_ids, brand_ids) do
+            from(bi in BrandItem,
+              where: bi.item_id in ^item_ids and bi.brand_id in ^brand_ids
+            )
+            |> Repo.all()
+            |> Map.new(fn bi -> {{bi.item_id, bi.brand_id}, bi} end)
+          end
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          def load(item_ids, brand_ids) do
+            from(brand_item in BrandItem,
+              where: brand_item.item_id in ^item_ids and brand_item.brand_id in ^brand_ids
+            )
+            |> Repo.all()
+            |> Map.new(fn brand_item -> {{brand_item.item_id, brand_item.brand_id}, brand_item} end)
+          end
+        end
+        '''
+      )
+    end
+
+    test "from-schema beats a conflicting function-param signal" do
+      # Without the from/in signal, the `bi`-initials-match against
+      # the `brand_ids` parameter would steer the rename to
+      # `brand_id`. With the schema present, the schema wins.
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def load(brand_ids) do
+            from(bi in BrandItem, where: bi.brand_id in ^brand_ids)
+            |> Repo.all()
+            |> Enum.map(fn bi -> bi.id end)
+          end
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          def load(brand_ids) do
+            from(brand_item in BrandItem, where: brand_item.brand_id in ^brand_ids)
+            |> Repo.all()
+            |> Enum.map(fn brand_item -> brand_item.id end)
+          end
+        end
+        '''
+      )
+    end
+  end
+
   describe "call-site signal: argument-to-local-function" do
     test "short binding passed as 1st arg to a local function takes that param's long name" do
       # When a short-form binding is passed as an argument to a
