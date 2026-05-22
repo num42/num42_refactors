@@ -152,21 +152,30 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
 
   defp patches_for_module({:defmodule, _, [name_ast, [{_, body}]]}, ctx) do
     body_exprs = body_to_exprs(body)
-    module_compounds = module_name_compounds(name_ast)
-    alias_compounds = collect_alias_compounds(body_exprs)
-    import_compounds = collect_import_compounds(body_exprs)
 
-    context_compounds =
-      (module_compounds ++ alias_compounds ++ import_compounds)
-      |> Enum.uniq()
-      |> Enum.reject(&(&1 == ""))
+    candidates =
+      tagged_candidates(
+        module_name_compounds(name_ast),
+        collect_alias_compounds(body_exprs),
+        collect_import_compounds(body_exprs)
+      )
 
     {private_groups, occupied_names} = collect_private_def_groups(body_exprs)
+    all_def_subtokens_by_name = collect_def_subtokens_by_name(body_exprs)
 
     resolutions =
       private_groups
       |> Enum.flat_map(fn {{name, _arity}, _nodes} ->
-        case resolve_name(name, context_compounds, ctx) do
+        # standalone-word demotion: include subtokens from every def
+        # EXCEPT the one currently being resolved. Otherwise a self-
+        # subtoken (`cs` in `fetch_cs`) would block its own expansion.
+        module_subtokens =
+          all_def_subtokens_by_name
+          |> Map.delete(name)
+          |> Map.values()
+          |> Enum.reduce(MapSet.new(), &MapSet.union/2)
+
+        case resolve_name(name, candidates, module_subtokens, ctx) do
           {:ok, new_name_atom} ->
             cond do
               new_name_atom == name -> []
@@ -188,6 +197,35 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
   end
 
   defp patches_for_module(_, _), do: []
+
+  defp tagged_candidates(module_compounds, alias_compounds, import_compounds) do
+    (Enum.map(module_compounds, &{&1, :module_name}) ++
+       Enum.map(alias_compounds, &{&1, :alias}) ++
+       Enum.map(import_compounds, &{&1, :import}))
+    |> Enum.uniq_by(fn {compound, _} -> compound end)
+    |> Enum.reject(fn {compound, _} -> compound == "" end)
+  end
+
+  defp collect_def_subtokens_by_name(exprs) do
+    exprs
+    |> Enum.flat_map(fn
+      {kind, _, [head, _body]} when kind in [:def, :defp, :defmacro, :defmacrop] ->
+        case extract_fn_signature(head) do
+          {name, _params} ->
+            subs = name |> Atom.to_string() |> String.split("_", trim: true) |> MapSet.new()
+            [{name, subs}]
+
+          :error ->
+            []
+        end
+
+      _ ->
+        []
+    end)
+    |> Enum.reduce(%{}, fn {name, subs}, acc ->
+      Map.update(acc, name, subs, &MapSet.union(&1, subs))
+    end)
+  end
 
   defp module_name_compounds({:__aliases__, _, parts}) when is_list(parts) do
     parts
@@ -267,63 +305,23 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
   # Try to expand each short non-whitelisted subtoken of the function
   # name. Returns {:ok, new_atom} when EVERY short subtoken resolves
   # AND at least one expansion actually changes the name; otherwise :skip.
-  defp resolve_name(name, context_compounds, ctx) do
-    parts = name |> Atom.to_string() |> String.split("_")
+  defp resolve_name(name, candidates, module_subtokens, ctx) do
+    self = Atom.to_string(name)
+    parts = String.split(self, "_")
     other_parts = MapSet.new(parts)
+
+    resolve_opts = build_resolve_opts(self, module_subtokens, ctx)
 
     expanded =
       parts
       |> Enum.reduce_while([], fn part, acc ->
         cond do
-          # Long enough or whitelisted: keep as-is.
+          # Long enough: keep as-is.
           String.length(part) > 3 ->
             {:cont, [part | acc]}
 
-          MapSet.member?(ctx.whitelist, String.to_atom(part)) ->
-            {:cont, [part | acc]}
-
-          # Hard-coded stop list of English function words. Refusing
-          # before the `known` check is intentional — a misconfigured
-          # `known: %{"key" => ...}` must not be able to silently
-          # rewrite identifiers where the token is meaningful.
-          MapSet.member?(@stop_words, String.to_atom(part)) ->
-            {:cont, [part | acc]}
-
-          # Project mapping wins.
-          Map.has_key?(ctx.known, part) ->
-            {:cont, [Map.fetch!(ctx.known, part) | acc]}
-
-          # Heuristic: try to compound-resolve against context.
           true ->
-            case resolve_subtoken(part, context_compounds) do
-              {:ok, expansion} ->
-                cond do
-                  # Weak singular/plural flip — the expansion is just
-                  # `part`'s plural (`row → rows`) or singular form.
-                  # That's almost certainly a false positive: the
-                  # subtoken latched on a module-name tail whose only
-                  # similarity to the short is cardinality. Changing
-                  # `build_item_row` → `build_item_rows` silently
-                  # flips the semantic the author chose; refuse.
-                  trivial_inflection?(part, expansion) ->
-                    {:halt, :skip}
-
-                  # Overlap with the rest of the function name. The
-                  # expansion's subtokens already appear elsewhere in
-                  # the original name (`ip` → `item_picker_component`
-                  # in `ip_item_component` would duplicate
-                  # `item`/`component`). That's a duplicate, not an
-                  # expansion.
-                  expansion_overlaps_other_parts?(expansion, other_parts, part) ->
-                    {:halt, :skip}
-
-                  true ->
-                    {:cont, [expansion | acc]}
-                end
-
-              :skip ->
-                {:halt, :skip}
-            end
+            resolve_part(part, candidates, resolve_opts, other_parts, acc)
         end
       end)
 
@@ -334,10 +332,62 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
       reversed_parts ->
         new_name_string = reversed_parts |> Enum.reverse() |> Enum.join("_")
 
-        if new_name_string == Atom.to_string(name) do
+        if new_name_string == self do
           :skip
         else
           {:ok, String.to_atom(new_name_string)}
+        end
+    end
+  end
+
+  defp build_resolve_opts(self, module_subtokens, ctx) do
+    %{
+      self: self,
+      module_subtokens: module_subtokens,
+      whitelist: ctx.whitelist,
+      stop_words: @stop_words,
+      known: ctx.known,
+      min_score: 80
+    }
+  end
+
+  defp resolve_part(part, candidates, resolve_opts, other_parts, acc) do
+    case Number42.Refactors.IdentifierExpansion.resolve(part, candidates, resolve_opts) do
+      {:ok, expansion} ->
+        cond do
+          # Weak singular/plural flip — the expansion is just
+          # `part`'s plural (`row → rows`) or singular form.
+          # That's almost certainly a false positive: the
+          # subtoken latched on a module-name tail whose only
+          # similarity to the short is cardinality. Changing
+          # `build_item_row` → `build_item_rows` silently
+          # flips the semantic the author chose; refuse.
+          trivial_inflection?(part, expansion) ->
+            {:halt, :skip}
+
+          # Overlap with the rest of the function name. The
+          # expansion's subtokens already appear elsewhere in
+          # the original name (`ip` → `item_picker_component`
+          # in `ip_item_component` would duplicate
+          # `item`/`component`). That's a duplicate, not an
+          # expansion.
+          expansion_overlaps_other_parts?(expansion, other_parts, part) ->
+            {:halt, :skip}
+
+          true ->
+            {:cont, [expansion | acc]}
+        end
+
+      :skip ->
+        # If the part itself is whitelisted or stop-word, IdentifierExpansion
+        # returns :skip — but for those we want to keep the part verbatim,
+        # not abandon the whole name. Disambiguate.
+        part_atom = String.to_atom(part)
+
+        cond do
+          MapSet.member?(resolve_opts.whitelist, part_atom) -> {:cont, [part | acc]}
+          MapSet.member?(resolve_opts.stop_words, part_atom) -> {:cont, [part | acc]}
+          true -> {:halt, :skip}
         end
     end
   end
@@ -364,35 +414,6 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
     expansion
     |> String.split("_", trim: true)
     |> Enum.any?(&MapSet.member?(siblings, &1))
-  end
-
-  # Single-char subtokens have no signal strong enough to disambiguate.
-  defp resolve_subtoken(short, _) when byte_size(short) < 2, do: :skip
-
-  defp resolve_subtoken(short, context_compounds) do
-    candidates =
-      context_compounds
-      |> Enum.reject(&(&1 == short))
-      |> Enum.flat_map(fn compound ->
-        case match_subtoken(short, compound) do
-          {:ok, target, score} -> [{target, score}]
-          :error -> []
-        end
-      end)
-      |> Enum.sort_by(fn {_target, score} -> -score end)
-
-    case candidates do
-      [] -> :skip
-      [{target, _}] -> {:ok, target}
-      [{target, s1}, {_, s2} | _] when s1 > s2 -> {:ok, target}
-      _ -> :skip
-    end
-  end
-
-  defp match_subtoken(short, compound) do
-    subtokens = String.split(compound, "_", trim: true)
-
-    latch_match(short, subtokens) |> scored_target_or_skip(short, subtokens)
   end
 
   # Walk the entire module body, patching every reference to a
@@ -494,27 +515,6 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
     do: build_patches(ast, ctx) |> patch_or_passthrough(source)
 
   defp apply_patches({:error, _}, _ctx, source), do: source
-
-  defp scored_target_or_skip({:ok, start_idx, starts_hit}, short, subtokens) do
-    n = length(subtokens) - start_idx
-    {_head, tail} = subtokens |> Enum.split(-n)
-    target = tail |> Enum.join("_")
-
-    # Reentrance guard: if the target contains the short as one of
-    # its subtokens (typically as the first one), running the
-    # refactor again would expand it again — `db` → `db_web` →
-    # `db_web_web` → ... Skip these matches; they're the gier
-    # cases where the heuristic latched on the leading subtoken
-    # without absorbing it.
-    if short in String.split(target, "_") do
-      :error
-    else
-      score = if starts_hit == String.length(short), do: 100, else: 80
-      {:ok, target, score}
-    end
-  end
-
-  defp scored_target_or_skip(:error, _short, _subtokens), do: :error
 
   defp name_patch_or_skip({:ok, new_atom}, meta, name), do: meta |> name_patch(name, new_atom)
 
