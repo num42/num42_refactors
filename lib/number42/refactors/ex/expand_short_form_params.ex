@@ -204,11 +204,6 @@ defmodule Number42.Refactors.Ex.ExpandShortFormParams do
 
   defp apply_patches({:error, _}, _ctx, source), do: source
 
-  defp apply_pp_or_keep_singular({:ok, pp}, tail_compound),
-    do: [pp, tail_compound] |> Enum.join("_")
-
-  defp apply_pp_or_keep_singular(:skip, tail_compound), do: tail_compound
-
   defp build_patches(ast, ctx) do
     ast
     |> Macro.prewalker()
@@ -216,15 +211,6 @@ defmodule Number42.Refactors.Ex.ExpandShortFormParams do
       {:defmodule, _, _} = mod_node -> patches_for_module(mod_node, ctx)
       _ -> []
     end)
-  end
-
-  defp build_target(subtokens, n, ctx) do
-    {head, tail} = subtokens |> Enum.split(-n)
-    singularized = tail |> List.last() |> singularize()
-    tail_compound = (Enum.drop(tail, -1) ++ [singularized]) |> Enum.join("_")
-
-    maybe_past_participle(head, tail, singularized, ctx.pp_verbs)
-    |> apply_pp_or_keep_singular(tail_compound)
   end
 
   defp collect_alias_compounds(exprs) do
@@ -351,13 +337,7 @@ defmodule Number42.Refactors.Ex.ExpandShortFormParams do
 
   defp long?(name, ctx), do: not short?(name, ctx)
 
-  defp match_compound(short, compound, ctx) do
-    subtokens = String.split(compound, "_", trim: true)
-
-    latch_match(short, subtokens) |> score_latch_result(ctx, short, subtokens)
-  end
-
-  defp maybe_plural_resolve(string, context_compounds, context_compound) do
+  defp maybe_plural_resolve(string, candidates, fn_compound, ctx) do
     if String.ends_with?(string, "s") and String.length(string) >= 3 do
       singular = String.slice(string, 0..-2//1)
       # The plural form `string` itself often appears in context (it's
@@ -365,9 +345,10 @@ defmodule Number42.Refactors.Ex.ExpandShortFormParams do
       # singular `ct`, which isn't a resolution. Drop both `string`
       # and `singular` from candidates so we only consider real
       # external compounds.
-      compounds = context_compounds |> Enum.reject(&(&1 == string or &1 == singular))
+      filtered =
+        candidates |> Enum.reject(fn {c, _} -> c == string or c == singular end)
 
-      case resolve_via_compounds(singular, compounds, context_compound) do
+      case resolve_via_identifier_expansion(singular, filtered, fn_compound, ctx) do
         {:ok, long} -> {:ok, pluralize_compound(long)}
         :skip -> :skip
       end
@@ -432,17 +413,21 @@ defmodule Number42.Refactors.Ex.ExpandShortFormParams do
 
       occupied = MapSet.new(param_atoms ++ body_bindings)
 
-      context_compounds =
-        ([fn_compound] ++
-           env.aliases ++ env.imports ++ env.module ++ param_compounds ++ body_long_compounds)
-        |> Enum.uniq()
-        |> Enum.reject(&(&1 == ""))
+      candidates =
+        tagged_candidates(
+          [{fn_compound, :enclosing_fn}],
+          env.aliases,
+          env.imports,
+          env.module,
+          param_compounds,
+          body_long_compounds
+        )
 
       resolutions =
         param_infos
         |> Enum.filter(&short?(&1.name, env.ctx))
         |> Enum.flat_map(fn info ->
-          case resolve_param(info, context_compounds, env.ctx) do
+          case resolve_param(info, candidates, fn_compound, env.ctx) do
             {:ok, long} ->
               long_atom = String.to_atom(long)
               short_string = Atom.to_string(info.name)
@@ -537,20 +522,7 @@ defmodule Number42.Refactors.Ex.ExpandShortFormParams do
 
   defp pop_test_suffix_from_tokens(_, compound, _tokens), do: compound
 
-  defp pp_promotable?(subtokens, ctx) do
-    {head, [last]} = subtokens |> Enum.split(-1)
-
-    List.last(head) |> pp_target_for_last_token(ctx, last)
-  end
-
-  defp pp_target_for_last_token(nil, _ctx, _last), do: false
-
-  defp pp_target_for_last_token(verb, ctx, last),
-    do:
-      MapSet.member?(ctx.pp_verbs, verb) and String.ends_with?(verb, "e") and
-        singularize(last) != last
-
-  defp resolve_param(%{name: name} = info, context_compounds, ctx) do
+  defp resolve_param(%{name: name} = info, candidates, fn_compound, ctx) do
     string = Atom.to_string(name)
 
     cond do
@@ -565,54 +537,33 @@ defmodule Number42.Refactors.Ex.ExpandShortFormParams do
       # silently singularize (`cts ↔ formula_picker_components` →
       # `component`), losing the plurality the author chose.
       String.ends_with?(string, "s") and String.length(string) >= 3 ->
-        maybe_plural_resolve(string, context_compounds, ctx)
+        maybe_plural_resolve(string, candidates, fn_compound, ctx)
 
       true ->
-        resolve_via_compounds(string, context_compounds, ctx)
+        resolve_via_identifier_expansion(string, candidates, fn_compound, ctx)
     end
   end
 
-  defp resolve_param(_, _, _), do: :skip
+  defp resolve_param(_, _, _, _), do: :skip
 
-  defp resolve_via_compounds(short, _context_compounds, _ctx) when byte_size(short) < 2,
-    do: :skip
+  defp resolve_via_identifier_expansion(short, _candidates, _fn_compound, _ctx)
+       when byte_size(short) < 2,
+       do: :skip
 
-  defp resolve_via_compounds(short, context_compounds, ctx) do
-    candidates =
-      context_compounds
-      |> Enum.reject(&(&1 == short))
-      |> Enum.flat_map(fn compound ->
-        case match_compound(short, compound, ctx) do
-          {:ok, target, score} -> [{target, score}]
-          :error -> []
-        end
-      end)
-      |> Enum.sort_by(fn {_target, score} -> -score end)
+  defp resolve_via_identifier_expansion(short, candidates, fn_compound, ctx) do
+    opts = %{
+      self: fn_compound,
+      whitelist: ctx.whitelist,
+      known: %{},
+      pp_verbs: ctx.pp_verbs,
+      min_score: 80
+    }
 
-    case candidates do
-      [] -> :skip
-      [{target, _}] -> {:ok, target}
-      [{target, s1}, {_, s2} | _] when s1 > s2 -> {:ok, target}
-      _ -> :skip
+    case Number42.Refactors.IdentifierExpansion.resolve(short, candidates, opts) do
+      {:ok, long} -> {:ok, long}
+      :skip -> :skip
     end
   end
-
-  defp score_latch_result({:ok, start_idx, starts_hit}, ctx, short, subtokens) do
-    effective_start =
-      if start_idx == 0 and String.length(short) > 1 and length(subtokens) > 1 and
-           pp_promotable?(subtokens, ctx) do
-        length(subtokens) - 1
-      else
-        start_idx
-      end
-
-    n = length(subtokens) - effective_start
-    target = build_target(subtokens, n, ctx)
-    score = if starts_hit == String.length(short), do: 100, else: 80
-    {:ok, target, score}
-  end
-
-  defp score_latch_result(:error, _ctx, _short, _subtokens), do: :error
 
   defp short?(name, ctx) do
     string = Atom.to_string(name)
@@ -631,4 +582,25 @@ defmodule Number42.Refactors.Ex.ExpandShortFormParams do
   end
 
   defp struct_compound(_), do: nil
+
+  # Build the typed candidate list IdentifierExpansion expects.
+  # Order matters only for stability when scores tie — earlier sources
+  # win the tie-break.
+  defp tagged_candidates(
+         enclosing_pairs,
+         aliases,
+         imports,
+         module_compounds,
+         param_compounds,
+         body_long_compounds
+       ) do
+    (enclosing_pairs ++
+       Enum.map(aliases, &{&1, :alias}) ++
+       Enum.map(imports, &{&1, :import}) ++
+       Enum.map(module_compounds, &{&1, :module_name}) ++
+       Enum.map(param_compounds, &{&1, :param}) ++
+       Enum.map(body_long_compounds, &{&1, :body_binding}))
+    |> Enum.uniq_by(fn {compound, _} -> compound end)
+    |> Enum.reject(fn {compound, _} -> compound == "" end)
+  end
 end

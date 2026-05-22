@@ -358,6 +358,33 @@ defmodule Number42.Refactors.IdentifierExpansionTest do
   end
 
   # -------------------------------------------------------------------
+  # PP-Promotion (past-participle) — used by Params and Bindings
+  # -------------------------------------------------------------------
+
+  describe "resolve/3 — PP promotion" do
+    test "nk ↔ normalize_keys with PP verbs → normalized_key" do
+      candidates = [{"normalize_keys", :enclosing_fn}]
+      opts = %{default_opts() | pp_verbs: MapSet.new(["normalize", "validate"])}
+      assert {:ok, "normalized_key"} = IdentifierExpansion.resolve("nk", candidates, opts)
+    end
+
+    test "without pp_verbs configured → no PP, plain singularization" do
+      candidates = [{"normalize_keys", :enclosing_fn}]
+      opts = default_opts()
+      # `nk ↔ [normalize, keys]`: 2 initials → 100. build_long = normalize_key.
+      assert {:ok, "normalize_key"} = IdentifierExpansion.resolve("nk", candidates, opts)
+    end
+
+    test "PP verb but last token not plural → no PP" do
+      candidates = [{"normalize_key", :enclosing_fn}]
+      opts = %{default_opts() | pp_verbs: MapSet.new(["normalize"])}
+      # `nk ↔ [normalize, key]`: 2 initials → 100. last `key` not plural,
+      # no PP fires. build_long = normalize_key.
+      assert {:ok, "normalize_key"} = IdentifierExpansion.resolve("nk", candidates, opts)
+    end
+  end
+
+  # -------------------------------------------------------------------
   # Helpers
   # -------------------------------------------------------------------
 
@@ -369,6 +396,7 @@ defmodule Number42.Refactors.IdentifierExpansionTest do
       whitelist: MapSet.new(),
       stop_words: MapSet.new([:do, :if, :is, :in, :it, :for, :and, :or, :not]),
       known: %{},
+      pp_verbs: MapSet.new(),
       min_score: 80
     }
   end

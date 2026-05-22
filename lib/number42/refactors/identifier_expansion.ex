@@ -54,7 +54,14 @@ defmodule Number42.Refactors.IdentifierExpansion do
   alias Number42.Refactors.AstHelpers
 
   @type source_kind ::
-          :alias | :import | :module_name | :local_def | :body_binding | :param | :rhs_call
+          :alias
+          | :import
+          | :module_name
+          | :enclosing_fn
+          | :rhs_call
+          | :local_def
+          | :body_binding
+          | :param
   @type candidate :: {String.t(), source_kind()}
 
   @type opts :: %{
@@ -67,7 +74,7 @@ defmodule Number42.Refactors.IdentifierExpansion do
           optional(:min_score) => integer()
         }
 
-  @strong_sources [:alias, :import, :module_name, :rhs_call]
+  @strong_sources [:alias, :import, :module_name, :enclosing_fn, :rhs_call]
 
   @doc """
   Try to expand `short` against the given `candidates`.
@@ -130,9 +137,9 @@ defmodule Number42.Refactors.IdentifierExpansion do
         []
 
       {:ok, _, _} = ok ->
-        long = build_long(ok, subtokens)
+        long = build_long(ok, subtokens, opts)
         base = score_latch(ok, short, subtokens, source)
-        penalized = apply_self_gates(base, long, opts)
+        penalized = apply_self_gates(base, long, source, opts)
 
         cond do
           penalized == :reject -> []
@@ -142,12 +149,18 @@ defmodule Number42.Refactors.IdentifierExpansion do
     end
   end
 
-  defp apply_self_gates(score, _long, %{self: nil}), do: score
+  defp apply_self_gates(score, _long, _source, %{self: nil}), do: score
 
-  defp apply_self_gates(score, long, %{self: self} = opts) do
+  defp apply_self_gates(score, long, source, %{self: self} = opts) do
     cond do
       inflection_variant_of_self?(long, self) ->
         :reject
+
+      # When the candidate IS the enclosing function name, a subtoken
+      # overlap is expected: the param `fb` in `render_formula_builder`
+      # SHOULD resolve to `formula_builder`. No penalty.
+      source == :enclosing_fn ->
+        score
 
       subtoken_overlap_with_self?(long, self) ->
         if MapSet.member?(opts.scope_callables, long), do: :reject, else: score - 20
@@ -175,13 +188,62 @@ defmodule Number42.Refactors.IdentifierExpansion do
     end
   end
 
-  defp build_long({:ok, start_idx, starts_hit}, subtokens) do
-    subtokens
-    |> Enum.drop(start_idx)
-    |> Enum.take(starts_hit)
-    |> singularize_last()
-    |> Enum.join("_")
+  defp build_long({:ok, start_idx, starts_hit}, subtokens, opts) do
+    consumed = subtokens |> Enum.drop(start_idx) |> Enum.take(starts_hit)
+
+    case maybe_pp_transform(start_idx, starts_hit, subtokens, opts) do
+      {:ok, pp_long} ->
+        pp_long
+
+      :skip ->
+        consumed
+        |> singularize_last()
+        |> Enum.join("_")
+    end
   end
+
+  # If the full compound `[verb, ..., plural_noun]` matches a registered
+  # PP-verb head AND the latch consumed everything from start_idx=0,
+  # drop everything except the last token, singularize it, and prefix
+  # the past-participle of the verb. Turns `normalize_keys` ↔ `nk` into
+  # `normalized_key` instead of `normalize_key`.
+  defp maybe_pp_transform(0, starts_hit, subtokens, opts) do
+    cond do
+      MapSet.size(opts.pp_verbs) == 0 ->
+        :skip
+
+      starts_hit < 2 ->
+        :skip
+
+      starts_hit < length(subtokens) ->
+        :skip
+
+      true ->
+        {head, [last]} = Enum.split(subtokens, -1)
+        verb = List.last(head)
+        singular_last = AstHelpers.singularize(last)
+
+        cond do
+          verb == nil ->
+            :skip
+
+          not MapSet.member?(opts.pp_verbs, verb) ->
+            :skip
+
+          singular_last == last ->
+            :skip
+
+          not String.ends_with?(verb, "e") ->
+            :skip
+
+          true ->
+            pp_prefix = AstHelpers.past_participle(verb)
+            {:ok, "#{pp_prefix}_#{singular_last}"}
+        end
+    end
+  end
+
+  defp maybe_pp_transform(_, _, _, _), do: :skip
 
   defp singularize_last([]), do: []
 
@@ -467,6 +529,7 @@ defmodule Number42.Refactors.IdentifierExpansion do
       whitelist: Map.get(opts, :whitelist, MapSet.new()),
       stop_words: Map.get(opts, :stop_words, MapSet.new()),
       known: Map.get(opts, :known, %{}),
+      pp_verbs: Map.get(opts, :pp_verbs, MapSet.new()),
       min_score: Map.get(opts, :min_score, 80)
     }
   end
