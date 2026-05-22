@@ -414,29 +414,76 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
       end)
       |> Map.new()
 
+    # Pre-shadow references: in `x = ...x...` the `x` on the RHS is a
+    # reference to the OUTER (pre-shadow) binding of `x` — typically a
+    # function parameter that this assignment is about to shadow. When
+    # we rename the LHS to a new name, that RHS reference must stay
+    # bound to the outer name, otherwise we synthesize a reference to
+    # an undefined variable. Collect these refs by identity (their
+    # AST nodes) so we can exclude them from the rename walk.
+    pre_shadow_refs = collect_pre_shadow_refs(collected_binding, resolutions)
+
     # Build patches: every reference to a resolved name in the body
-    # becomes the long form.
+    # becomes the long form, EXCEPT pre-shadow refs (see above).
     body
     |> Macro.prewalker()
     |> Enum.flat_map(fn
       {name, _meta, context_compound} = node when is_atom(name) and is_atom(context_compound) ->
-        case Map.fetch(resolutions, name) do
-          {:ok, long_atom} ->
-            replacement = Atom.to_string(long_atom)
-
-            case build_patch(node, replacement) do
-              nil -> []
-              patch -> [patch]
-            end
-
-          :error ->
+        cond do
+          MapSet.member?(pre_shadow_refs, node) ->
             []
+
+          true ->
+            case Map.fetch(resolutions, name) do
+              {:ok, long_atom} ->
+                replacement = Atom.to_string(long_atom)
+
+                case build_patch(node, replacement) do
+                  nil -> []
+                  patch -> [patch]
+                end
+
+              :error ->
+                []
+            end
         end
 
       _ ->
         []
     end)
     |> Enum.reject(&is_nil/1)
+  end
+
+  # For each resolved `=` binding `name = rhs`, return every
+  # var-reference to `name` *inside `rhs`* — those are pre-shadow
+  # references to the outer binding (typically a function parameter
+  # the assignment is about to shadow). Lambda parameters and
+  # comprehension generators don't shadow in the same way (their
+  # binding range starts inside the construct, not at a sequence
+  # point in a body), so we restrict the check to true `=` bindings
+  # where the LHS node is structurally distinct from the RHS.
+  defp collect_pre_shadow_refs(collected_binding, resolutions) do
+    collected_binding
+    |> Enum.flat_map(fn {name, lhs, rhs} ->
+      cond do
+        not Map.has_key?(resolutions, name) -> []
+        lhs == rhs -> []
+        true -> var_refs_to(rhs, name)
+      end
+    end)
+    |> MapSet.new()
+  end
+
+  # Walk an AST and return every `{name, _, ctx}` var-reference node
+  # whose name matches `target`. Variable references are 3-tuples with
+  # both atoms; this filters out function calls and other 3-tuples.
+  defp var_refs_to(ast, target) do
+    ast
+    |> Macro.prewalker()
+    |> Enum.filter(fn
+      {n, _, c} -> is_atom(n) and is_atom(c) and n == target
+      _ -> false
+    end)
   end
 
   defp pluralized?(nil), do: false

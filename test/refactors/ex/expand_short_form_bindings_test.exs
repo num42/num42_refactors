@@ -1005,6 +1005,57 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindingsTest do
       )
     end
 
+    test "rename of a binding that shadows a param keeps the RHS reference intact" do
+      # Regression from position-db's `Items.search_item_positions_excluding`:
+      # the body opens with `search_term = String.trim(search_term)`,
+      # which shadows the function parameter `search_term`. Elsewhere
+      # in the module a local helper takes `str`, so the call-site
+      # signal resolves `search_term` to `str`. Renaming every
+      # occurrence naively produces `str = String.trim(str)` — `str`
+      # is undefined on the RHS, since the parameter is still called
+      # `search_term`. We must rename the LHS plus every reference
+      # *after* the shadow point, leaving the shadowed RHS reference
+      # (and any earlier references) as the original parameter name.
+      #
+      # `str` is whitelisted so that the call-site signal classes
+      # `escape_like/1`'s parameter as a valid long form — that's the
+      # configuration shape that exposed the bug in position-db.
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def search(search_term) do
+            search_term = String.trim(search_term)
+
+            if search_term == "" do
+              []
+            else
+              escape_like(search_term)
+            end
+          end
+
+          defp escape_like(str), do: str
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          def search(search_term) do
+            str = String.trim(search_term)
+
+            if str == "" do
+              []
+            else
+              escape_like(str)
+            end
+          end
+
+          defp escape_like(str), do: str
+        end
+        ''',
+        whitelist: [:str]
+      )
+    end
+
     test "ids = list_of_ids stays put (short matches an unrelated context subtoken)" do
       # Same principle generalized: any compound-context source that
       # already contains `ids` as a subtoken is evidence the author's
