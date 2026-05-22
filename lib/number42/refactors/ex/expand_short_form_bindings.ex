@@ -449,14 +449,23 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
 
   defp resolve_long(name, rhs, context_compounds, context_compound) do
     string = Atom.to_string(name)
+    {rhs_compound, rhs_is_call?} = rhs_function_compound(rhs)
 
     cond do
       Map.has_key?(context_compound.known, string) ->
         {:ok, Map.fetch!(context_compound.known, string)}
 
-      true ->
-        {rhs_compound, rhs_is_call?} = rhs_function_compound(rhs)
+      # Locality safety: if the short name appears verbatim as a
+      # subtoken of any local source (RHS source token, function
+      # parameter, sibling binding, function name, module name), the
+      # author already used that exact form intentionally — it's a
+      # variation, not an abbreviation. Renaming would change the
+      # author's chosen vocabulary (e.g. `ids = ..._ids` → `id`
+      # inverts the cardinality from collection to element). Keep.
+      short_is_subtoken_of_local_source?(string, rhs_compound, context_compounds) ->
+        :skip
 
+      true ->
         compound_candidates =
           score_compound_candidates(string, context_compounds, context_compound)
 
@@ -469,6 +478,24 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
           _ -> choose_winner(compound_candidates)
         end
     end
+  end
+
+  # The short name appears verbatim as one of the underscore-separated
+  # subtokens of any local source. We include the RHS source-token
+  # (`...selected_price_list_ids`) plus all context compounds (params,
+  # sibling bindings, fn name, module name). Subtoken-level match
+  # avoids false matches with longer words that happen to contain the
+  # short as a character substring (e.g. `bid` does not "contain" `id`
+  # under this rule — only `["b", "id"]`-style splits would).
+  defp short_is_subtoken_of_local_source?(short, rhs_compound, context_compounds) do
+    sources =
+      if is_binary(rhs_compound), do: [rhs_compound | context_compounds], else: context_compounds
+
+    Enum.any?(sources, fn compound ->
+      compound
+      |> String.split("_", trim: true)
+      |> Enum.member?(short)
+    end)
   end
 
   # Walk the function body and collect, for each short name in

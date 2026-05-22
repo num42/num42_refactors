@@ -811,25 +811,19 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindingsTest do
       )
     end
 
-    test "strings = parse_shared_strings(x) does NOT become shareded_strings" do
-      # head=[parse, shared]. `shared` already ends in `-ed`. Even if
-      # someone listed it as a verb, the trailing-`-ed` guard prevents
-      # `shareded`. PP must not fire.
-      assert_rewrites(
+    test "strings = parse_shared_strings(x) stays put (short matches RHS subtoken)" do
+      # `strings` appears verbatim as a subtoken of the RHS source
+      # token `parse_shared_strings` — the author already wrote the
+      # binding name from that token. Renaming to `string` would
+      # invert the cardinality. The (now-moot) PP risk on the head
+      # `shared` is also avoided as a side effect.
+      assert_unchanged(
         @subject,
         ~S'''
         defmodule M do
           def go(x) do
             strings = parse_shared_strings(x)
             wrap(strings)
-          end
-        end
-        ''',
-        ~S'''
-        defmodule M do
-          def go(x) do
-            string = parse_shared_strings(x)
-            wrap(string)
           end
         end
         ''',
@@ -978,6 +972,55 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindingsTest do
         end
         ''',
         known: %{"cs" => "changeset"},
+        pp_verbs: @pp_verbs
+      )
+    end
+
+    test "ids = ...selected_price_list_ids stays put (short is a subtoken of RHS)" do
+      # Regression from position-db: `ids` (3 chars, cryptic by length)
+      # was being renamed to `id` because the singularize step on the
+      # `..._ids` RHS produced `id` as a candidate. But the author
+      # already wrote `ids` deliberately as the conventional plural of
+      # the source field `..._ids`. When the short binding appears
+      # verbatim as a subtoken of the RHS source token, that's a clear
+      # signal that the binding is a legitimate variation, not an
+      # abbreviation — keep it.
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          def handle_event(_event, _params, socket) do
+            ids = socket.assigns.selected_price_list_ids
+
+            if some_id in ids do
+              {:noreply, socket}
+            else
+              new_ids = ids ++ [some_id]
+              {:noreply, socket |> assign(:selected_price_list_ids, new_ids)}
+            end
+          end
+        end
+        ''',
+        pp_verbs: @pp_verbs
+      )
+    end
+
+    test "ids = list_of_ids stays put (short matches an unrelated context subtoken)" do
+      # Same principle generalized: any compound-context source that
+      # already contains `ids` as a subtoken is evidence the author's
+      # choice is intentional. Renaming `ids` to `id` would invert the
+      # cardinality (collection → element) — far worse than leaving the
+      # 3-char name alone.
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          def go(payload) do
+            ids = payload.user_ids
+            do_thing(ids)
+          end
+        end
+        ''',
         pp_verbs: @pp_verbs
       )
     end
