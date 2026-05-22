@@ -93,6 +93,19 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
   # config, only the smart matchers (RHS / compound context) fire.
   @known %{}
 
+  # Macro/special-form atoms that look like function calls in the AST
+  # (`{name, meta, args}` with args=list) but aren't runtime functions
+  # we can shadow. Used by `called_function_names/1` to keep the
+  # shadow-detection set free of false positives like `if`, `case`,
+  # binary-op atoms, def-heads.
+  @non_call_atoms ~w(
+    __block__ __aliases__ -> = |> & ^ when
+    if unless case cond with try receive for fn
+    def defp defmacro defmacrop defmodule defstruct
+    quote unquote unquote_splicing
+    -> :: . :: + - * / ++ -- <> == != < > <= >= && || ! not and or in
+  )a
+
   @impl Number42.Refactors.Refactor
   def transform(source, opts) do
     ctx = build_ctx(opts)
@@ -117,7 +130,12 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
     %{
       known: Map.merge(@known, Keyword.get(opts, :known, %{})),
       pp_verbs: opts |> Keyword.get(:pp_verbs, []) |> MapSet.new(),
-      whitelist: MapSet.union(@default_whitelist, extra_whitelist)
+      whitelist: MapSet.union(@default_whitelist, extra_whitelist),
+      # Default: single-letter bindings (r, g, b, a, b, f, i, v, x, y)
+      # are idiomatic — math vars, geometric coordinates, fold-step vars —
+      # and a single letter rarely carries a stable "long form". Opt in
+      # only when the project's style intentionally avoids them.
+      cryptic_includes_single_letters: Keyword.get(opts, :cryptic_includes_single_letters, false)
     }
   end
 
@@ -329,6 +347,13 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
 
     long_compounds_in_body = long_names_in_body |> Enum.map(&Atom.to_string/1)
 
+    # Names invoked as functions in the body. A rename target landing
+    # here would shadow the call — e.g. `r = round(...)` renamed to
+    # `round` makes the subsequent `round(...)` calls resolve to the
+    # local var instead of `Kernel.round/1`. Kernel BIFs are baked in
+    # because they're always callable without explicit reference.
+    called_in_body = called_function_names(body)
+
     # Every var the rename could shadow if it picked that long-form.
     # `bound_in/1` covers every binder shape — `=` LHS, lambda params,
     # case/cond/with patterns, comprehension generators — so we don't
@@ -358,7 +383,9 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
       |> Enum.reject(&(&1 == ""))
 
     short_bindings =
-      collected_binding |> Enum.filter(fn {name, _, _} -> short_name?(name, context_compound) end)
+      collected_binding
+      |> Enum.filter(fn {name, _, _} -> short_name?(name, context_compound) end)
+      |> Enum.reject(fn {name, _, _} -> single_letter_excluded?(name, context_compound) end)
 
     # Call-site resolutions per short name — see
     # `resolve_via_call_sites/3`. Per name we get either a single
@@ -406,7 +433,13 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
         case result do
           {:ok, long} ->
             long_atom = String.to_atom(long)
-            if MapSet.member?(occupied, long_atom), do: [], else: [{name, long_atom}]
+
+            cond do
+              MapSet.member?(occupied, long_atom) -> []
+              MapSet.member?(called_in_body, long_atom) -> []
+              cryptic_target?(long, context_compound) -> []
+              true -> [{name, long_atom}]
+            end
 
           :skip ->
             []
@@ -534,6 +567,93 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
   # avoids false matches with longer words that happen to contain the
   # short as a character substring (e.g. `bid` does not "contain" `id`
   # under this rule — only `["b", "id"]`-style splits would).
+  # Rule 2: collect every name that appears as a *function call* in
+  # the body. A rename target landing in this set would shadow the
+  # call — the rewritten LHS binds a variable with the same name as
+  # a function the body still tries to invoke. Result is undefined
+  # behaviour at best, hard crash at worst (`round = round(...)` →
+  # the next `round(...)` line is a no-arity call on an integer).
+  #
+  # Body-relative on purpose: the BIF `node/0` exists, but if the body
+  # never calls `node()`, picking `node` as a target is harmless. A
+  # broader "all Kernel BIFs" block was tried and overshot — it
+  # rejected legitimate targets like `node` in code that doesn't use
+  # the BIF.
+  #
+  # Special forms (`def`, `defp`, `case`, `if`, etc.) are NOT call
+  # shapes in the runtime sense — they're macros that introduce
+  # bindings — and don't belong in this set. Macro-call shapes
+  # `{name, meta, args}` with `name in @special_forms` slip through
+  # `is_atom(name) and is_list(args)` so we filter them out
+  # explicitly via `@non_call_atoms`.
+  defp called_function_names(body) do
+    body
+    |> Macro.prewalker()
+    |> Enum.flat_map(fn
+      {name, _, args}
+      when is_atom(name) and is_list(args) and name not in @non_call_atoms ->
+        [name]
+
+      _ ->
+        []
+    end)
+    |> MapSet.new()
+  end
+
+  # Rule 4: refuse a rename whose target is itself too short to be
+  # meaningfully clearer than the original. Two failure modes:
+  #
+  # 1. Module-name latching produces nonsense short names. `a = Enum.at(...)`
+  #    would rename `a` to `at` — the RHS subtoken slice. `at` is still
+  #    cryptic (length 2), the rename swaps one short name for another.
+  # 2. Compound expansion leaves a cryptic component: `fb` → `fb_node`
+  #    keeps the original cryptic prefix. If we couldn't fully resolve
+  #    the abbreviation, leave the binding alone rather than ship a
+  #    half-expanded name.
+  #
+  # We use a length-only test (≤ 3) and inspect only the LEADING
+  # subtoken. Trailing short subtokens are idiomatic suffix conventions
+  # (`organization_id`, `normalized_key`, `foreign_key`, `primary_pk`)
+  # and must not disqualify an otherwise good target. Leading short
+  # subtokens are the failure mode this rule catches — `fb_node`,
+  # `bi_summary`, `at` (single-subtoken degenerate case).
+  #
+  # An explicit whitelist entry for the full target wins — the project
+  # has opted into that short form as acceptable (e.g. `str` is
+  # idiomatic in some codebases).
+  #
+  # `consonant_heavy?` is deliberately not used here. It's calibrated
+  # to decide what *needs* expanding (catches `brnd`, `mngr`), but
+  # legit English words like `string`/`script` also trip it.
+  defp cryptic_target?(long, ctx) do
+    cond do
+      MapSet.member?(ctx.whitelist, String.to_atom(long)) ->
+        false
+
+      true ->
+        case long |> String.split("_", trim: true) do
+          [] -> true
+          [first | _] -> String.length(first) <= 3
+        end
+    end
+  end
+
+  # Rule 5 (default-on): refuse to rename a single-letter binding.
+  # Single letters are idiomatic in BEAM/math code (r/g/b for colour
+  # channels, a/b for compare-pair, i/j for indices, f for float, x/y
+  # for coords). Picking a "long form" from RHS or context is almost
+  # always wrong — the name is intentional brevity, not an abbreviation
+  # of a concept the reader needs reminded of.
+  #
+  # A whitelist entry for the single letter still wins (handled
+  # upstream via `short_name?/2` returning `false`). This guard only
+  # fires when the letter is otherwise short, and stays inactive when
+  # the project opts in via `cryptic_includes_single_letters: true`.
+  defp single_letter_excluded?(name, ctx) do
+    not ctx.cryptic_includes_single_letters and
+      name |> Atom.to_string() |> String.length() == 1
+  end
+
   defp short_is_subtoken_of_local_source?(short, rhs_compound, context_compounds) do
     sources =
       if is_binary(rhs_compound), do: [rhs_compound | context_compounds], else: context_compounds

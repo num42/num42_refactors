@@ -91,7 +91,9 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindingsTest do
       )
     end
 
-    test "single-letter via RHS: s = Atom.to_string(name) -> string" do
+    test "single-letter via RHS: s = Atom.to_string(name) -> string (opt-in)" do
+      # Single-letter renames are opt-in (rule 5). With the flag on,
+      # the RHS-call latch turns `s` into `string`.
       assert_rewrites(
         @subject,
         ~S'''
@@ -109,7 +111,8 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindingsTest do
             String.starts_with?(string, "_")
           end
         end
-        '''
+        ''',
+        cryptic_includes_single_letters: true
       )
     end
 
@@ -265,7 +268,8 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindingsTest do
           end
         end
         ''',
-        pp_verbs: ~w(render normalize)
+        pp_verbs: ~w(render normalize),
+        cryptic_includes_single_letters: true
       )
     end
   end
@@ -481,8 +485,8 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindingsTest do
       source = ~S'''
       defmodule MyApp.Other do
         def go(name) do
-          s = Atom.to_string(name)
-          s
+          str = Atom.to_string(name)
+          str
         end
       end
       '''
@@ -874,7 +878,8 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindingsTest do
           end
         end
         ''',
-        pp_verbs: @pp_verbs
+        pp_verbs: @pp_verbs,
+        cryptic_includes_single_letters: true
       )
     end
 
@@ -1254,6 +1259,222 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindingsTest do
         end
         '''
       )
+    end
+  end
+
+  describe "rule 5: single-letter bindings are never renamed by default" do
+    test "r/g/b stay put even when RHS function name latches" do
+      # Regression from position-db's `Color.hsl_to_hex/1`. `r = round(...)`
+      # would be latched to `round` via the RHS call name — shadowing the
+      # `Kernel.round/1` BIF and breaking subsequent `round(...)` calls.
+      assert_unchanged(@subject, ~S'''
+      defmodule M do
+        def hex(r1, g1, b1, m) do
+          r = round((r1 + m) * 255)
+          g = round((g1 + m) * 255)
+          b = round((b1 + m) * 255)
+          "##{hex(r)}#{hex(g)}#{hex(b)}"
+        end
+      end
+      ''')
+    end
+
+    test "a, b stay put in idiomatic median-style code" do
+      # `a = list |> Enum.at(mid - 1)` / `b = list |> Enum.at(mid)` —
+      # classical math vars. Without the opt-in, they must not be touched.
+      assert_unchanged(@subject, ~S'''
+      defmodule M do
+        def median(list, mid) do
+          a = list |> Enum.at(mid - 1)
+          b = list |> Enum.at(mid)
+          a |> Decimal.add(b) |> Decimal.div(Decimal.new(2))
+        end
+      end
+      ''')
+    end
+
+    test "with cryptic_includes_single_letters: true, single letters become eligible" do
+      # Opt-in flag enables single-letter rename via RHS signal.
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def go(name) do
+            s = Atom.to_string(name)
+            wrap(s)
+          end
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          def go(name) do
+            string = Atom.to_string(name)
+            wrap(string)
+          end
+        end
+        ''',
+        cryptic_includes_single_letters: true
+      )
+    end
+  end
+
+  describe "rule 2: never rename to a name that is called as a function" do
+    test "target shadowing a Kernel BIF is rejected" do
+      # `r = round(...)` would rename to `round` via RHS latch. Even if
+      # rule 5 (single-letter skip) were off, this must also be blocked
+      # because `round` is a Kernel BIF actively called in the body.
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          def hex(r1, m) do
+            rv = round((r1 + m) * 255)
+            "#{rv}"
+          end
+        end
+        ''',
+        cryptic_includes_single_letters: true
+      )
+    end
+
+    test "target shadowing a local function called in same body is rejected" do
+      # `helper = build_helper(...)` then `helper(other)` — renaming
+      # something else to `helper` would shadow the function call.
+      assert_unchanged(@subject, ~S'''
+      defmodule M do
+        def go(input) do
+          hp = build_helper(input)
+          result = helper(hp)
+          wrap(result)
+        end
+
+        defp helper(x), do: x
+      end
+      ''')
+    end
+  end
+
+  describe "rule 3: short LHS already a word-boundary subtoken of RHS — keep" do
+    test "ids = ItemCollections.list_item_ids(...) stays as ids" do
+      # Regression from position-db's `ItemLive.MassEdit.mount/3`. The
+      # author already used `ids` (plural) deliberately because the RHS
+      # produces a list. Even when a sibling local function param suggests
+      # a singular rename via the call-site signal, the LHS must stay.
+      assert_unchanged(@subject, ~S'''
+      defmodule M do
+        def mount(collection_id, socket) do
+          ids = list_item_ids(collection_id)
+          mount_with_ids(socket, ids)
+        end
+
+        defp list_item_ids(_id), do: []
+        defp mount_with_ids(socket, id), do: {socket, id}
+      end
+      ''')
+    end
+
+    test "attrs = build_attrs(...) stays as attrs even with downstream callee param `attr`" do
+      assert_unchanged(@subject, ~S'''
+      defmodule M do
+        def go(changeset, state) do
+          attrs = build_attrs(changeset, state)
+          apply_attrs(attrs)
+        end
+
+        defp build_attrs(_cs, _s), do: %{}
+        defp apply_attrs(attr), do: attr
+      end
+      ''')
+    end
+
+    test "ids = socket.assigns.selected_building_ids (map access, no call) stays as ids" do
+      # Regression from position-db's `PriceListLive.New.handle_event`.
+      # RHS is map-access `socket.assigns.selected_building_ids` —
+      # the `ids` subtoken appears inside a nested identifier, not as
+      # the outer call name. Renaming `ids` to `id` would invert
+      # plurality without justification.
+      assert_unchanged(@subject, ~S'''
+      defmodule M do
+        def handle_event(_evt, %{"building-id" => building_id}, socket) do
+          ids = socket.assigns.selected_building_ids
+
+          if building_id in ids do
+            {:noreply, socket}
+          else
+            new_ids = ids ++ [building_id]
+            push(socket, new_ids)
+          end
+        end
+
+        defp push(s, _ids), do: s
+      end
+      ''')
+    end
+  end
+
+  describe "rule 4: target name itself must not be cryptic" do
+    test "a -> at (length-2 cryptic target) is rejected" do
+      # Module-latching would rename `a` to `at` via `Enum.at`, but
+      # `at` is itself cryptic. Without rule 5 (single-letter skip)
+      # this would still need to skip via rule 4.
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          def median(list, mid) do
+            a = list |> Enum.at(mid - 1)
+            wrap(a)
+          end
+        end
+        ''',
+        cryptic_includes_single_letters: true
+      )
+    end
+
+    test "fb -> fb_node would be cryptic-target (fb_node has a cryptic subtoken) — rejected" do
+      # If the only RHS signal would produce `fb_node` (still containing
+      # the cryptic `fb`), the rename adds noise without gaining clarity.
+      assert_unchanged(@subject, ~S'''
+      defmodule M do
+        def go(input) do
+          fb = fb_node(input)
+          wrap(fb)
+        end
+
+        defp fb_node(x), do: x
+      end
+      ''')
+    end
+  end
+
+  describe "rule 1: plural LHS must not be singularized when RHS signals collection" do
+    test "ids = list_thing_ids — would-be `id` rename is blocked" do
+      # Covered by rule 3 as well, but explicit: even if rule 3 weren't
+      # there, a plural-tail LHS combined with a plural-tail RHS must
+      # not collapse to singular.
+      assert_unchanged(@subject, ~S'''
+      defmodule M do
+        def go(scope) do
+          ids = list_thing_ids(scope)
+          wrap(ids)
+        end
+
+        defp list_thing_ids(_s), do: []
+      end
+      ''')
+    end
+
+    test "items = Enum.map(rows, fn r -> r.item end) — stays as items" do
+      # Plural LHS feeding an `Enum.map` is canonical collection-handling.
+      # Renaming to `item` would invert plurality.
+      assert_unchanged(@subject, ~S'''
+      defmodule M do
+        def go(rows) do
+          items = Enum.map(rows, fn r -> r.item end)
+          wrap(items)
+        end
+      end
+      ''')
     end
   end
 end

@@ -650,7 +650,13 @@ defmodule Number42.Refactors.AstHelpers do
     end
   end
 
-  defp cryptic_subtoken?(part) do
+  @doc """
+  Whether an underscore-separated subtoken reads as cryptic on its
+  own — length ≤ 3 (`bi`, `cs`, `fb`) or consonant-heavy (`brnd`,
+  `mngr`). Used to decide whether a name needs expanding and whether
+  a candidate rename target is itself too short to be worth substituting.
+  """
+  def cryptic_subtoken?(part) do
     length = String.length(part)
 
     cond do
