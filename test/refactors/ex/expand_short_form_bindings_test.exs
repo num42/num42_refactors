@@ -1017,6 +1017,37 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindingsTest do
       )
     end
 
+    test "skips multi-clause functions where only the catch-all clause is bare-var" do
+      # Regression from position-db's `Configurator.AST.Humanizer.walk/1`:
+      # multiple clauses with destructuring patterns plus a final
+      # `defp walk(other), do: ...` catch-all. Only the catch-all
+      # clause has a bare-var param, so a naive "all bare-var clauses
+      # agree on `other`" check falsely concludes that position 0 is
+      # always called `other`. That made every caller's `ast` binding
+      # get renamed to `other` — including the literal `ast =
+      # normalize_keys(ast)` whose Fn parameter was also `ast` (only
+      # the body got patched, leaving an undefined-variable error).
+      #
+      # The fix: the index entry only stands when EVERY clause at that
+      # position is a bare var.
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          def go(ast) when is_map(ast) do
+            ast = normalize_keys(ast)
+            walk(ast)
+          end
+
+          defp normalize_keys(%{} = m), do: m
+          defp walk(%{type: :literal, value: v}), do: v
+          defp walk(%{type: :operator} = node), do: node
+          defp walk(other), do: inspect(other)
+        end
+        '''
+      )
+    end
+
     test "skips when multiple call sites disagree on the param name" do
       # If `bi` flows into two different local functions whose
       # respective params disagree (`brand_item` vs `building_item`),

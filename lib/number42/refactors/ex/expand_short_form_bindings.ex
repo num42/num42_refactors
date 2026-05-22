@@ -146,6 +146,14 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
   # That is the strongest contextual signal we have for the binding's
   # intended long form — stronger than module-name latching.
   defp collect_local_param_index(ast, ctx) do
+    # Per clause, emit one entry per parameter position: `{:ok, atom}`
+    # for bare-var params, `:non_simple` otherwise. We keep the
+    # `:non_simple` markers so that a function with even one
+    # destructuring or literal clause at a position is recognised as
+    # heterogeneous — without that marker, a multi-clause function
+    # whose only bare-var clause uses a generic catch-all name (e.g.
+    # `defp walk(other)`) would falsely look like every clause agrees
+    # on `other`.
     ast
     |> Macro.prewalker()
     |> Enum.flat_map(fn
@@ -154,11 +162,8 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
           {name, params} ->
             params
             |> Enum.with_index()
-            |> Enum.flat_map(fn {param, idx} ->
-              case param_simple_name(param) do
-                {:ok, atom} -> [{{name, length(params), idx}, atom}]
-                :error -> []
-              end
+            |> Enum.map(fn {param, idx} ->
+              {{name, length(params), idx}, param_simple_name(param)}
             end)
 
           :error ->
@@ -168,10 +173,18 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
       _ ->
         []
     end)
-    |> Enum.group_by(fn {key, _} -> key end, fn {_, atom} -> atom end)
-    |> Enum.flat_map(fn {{name, arity, idx}, atoms} ->
-      case Enum.uniq(atoms) do
-        [single] ->
+    |> Enum.group_by(fn {key, _} -> key end, fn {_, result} -> result end)
+    |> Enum.flat_map(fn {{name, arity, idx}, results} ->
+      atoms =
+        results
+        |> Enum.flat_map(fn
+          {:ok, atom} -> [atom]
+          :error -> [:__non_simple__]
+        end)
+        |> Enum.uniq()
+
+      case atoms do
+        [single] when single != :__non_simple__ ->
           if long?(single, ctx),
             do: [{{name, arity, idx}, Atom.to_string(single)}],
             else: []
