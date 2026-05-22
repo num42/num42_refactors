@@ -242,11 +242,6 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
     atom |> Atom.to_string() |> Macro.underscore()
   end
 
-  defp choose_winner([]), do: :skip
-  defp choose_winner([{target, _}]), do: {:ok, target}
-  defp choose_winner([{target, s1}, {_other, s2} | _]) when s1 > s2, do: {:ok, target}
-  defp choose_winner(_tie), do: :skip
-
   defp collect_bindings(body) do
     body
     |> Macro.prewalker()
@@ -373,10 +368,18 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
       |> Enum.map(fn {n, _} -> n end)
       |> MapSet.new()
 
-    # Context candidates are FULL underscore-joined compounds, in order
-    # of locality (innermost first wins ties). The smart matcher needs
-    # the whole compound to compute initial-of-each-subtoken matches —
-    # splitting first would lose `formula_builder` as a unit.
+    # Context candidates, tagged with their source kind. Order matters
+    # for tie-breaks (earlier wins): innermost-first locality.
+    context_candidates =
+      tagged_candidates(
+        param_compounds,
+        long_compounds_in_body,
+        fn_compound,
+        module_compounds
+      )
+
+    # Legacy untagged list — still passed to `short_is_subtoken_of_local_source?`
+    # which only needs the raw strings.
     context_compounds =
       (param_compounds ++ long_compounds_in_body ++ [fn_compound] ++ module_compounds)
       |> Enum.uniq()
@@ -424,9 +427,21 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
 
             :error ->
               case Map.fetch(call_site_signals, name) do
-                {:ok, {:ok, long}} -> {:ok, long}
-                {:ok, :conflict} -> :skip
-                :error -> resolve_long(name, rhs, context_compounds, context_compound)
+                {:ok, {:ok, long}} ->
+                  {:ok, long}
+
+                {:ok, :conflict} ->
+                  :skip
+
+                :error ->
+                  resolve_long(
+                    name,
+                    rhs,
+                    context_candidates,
+                    context_compounds,
+                    fn_compound,
+                    context_compound
+                  )
               end
           end
 
@@ -519,15 +534,14 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
     end)
   end
 
-  defp pluralized?(nil), do: false
-  defp pluralized?(last), do: singularize(last) != last
-
-  defp prepend_pp_or_keep({:ok, pp}, tail_compound),
-    do: {:ok, [pp, tail_compound] |> Enum.join("_")}
-
-  defp prepend_pp_or_keep(:skip, tail_compound), do: {:ok, tail_compound}
-
-  defp resolve_long(name, rhs, context_compounds, context_compound) do
+  defp resolve_long(
+         name,
+         rhs,
+         context_candidates,
+         context_compounds,
+         fn_compound,
+         context_compound
+       ) do
     string = Atom.to_string(name)
     {rhs_compound, rhs_is_call?} = rhs_function_compound(rhs)
 
@@ -546,17 +560,36 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
         :skip
 
       true ->
-        compound_candidates =
-          score_compound_candidates(string, context_compounds, context_compound)
+        # RHS source (call name or property access) gets prepended as
+        # a strong candidate when present. PP-promotion in
+        # IdentifierExpansion handles `build_changesets ↔ cs →
+        # built_changeset`, but only fires when `rhs_is_call?` so
+        # property-access RHS just contributes the raw name.
+        candidates_with_rhs =
+          cond do
+            is_binary(rhs_compound) and rhs_is_call? ->
+              [{rhs_compound, :rhs_call} | context_candidates]
 
-        # RHS-match is rated higher than any compound-context match.
-        # If RHS yielded a hit, take its target (the subtoken slice
-        # corresponding to `short`'s initials); otherwise fall back to
-        # compound matches.
-        case rhs_compound && rhs_target(string, rhs_compound, rhs_is_call?, context_compound) do
-          {:ok, target} -> {:ok, target}
-          _ -> choose_winner(compound_candidates)
-        end
+            is_binary(rhs_compound) ->
+              [{rhs_compound, :alias} | context_candidates]
+
+            true ->
+              context_candidates
+          end
+
+        opts = %{
+          self: fn_compound,
+          whitelist: context_compound.whitelist,
+          known: %{},
+          pp_verbs: context_compound.pp_verbs,
+          # A binding lives inside a function whose entire local
+          # vocabulary (params, sibling bindings, fn name, module
+          # tokens) is intentional context. Trust all sources equally.
+          treat_all_as_strong: true,
+          min_score: 80
+        }
+
+        Number42.Refactors.IdentifierExpansion.resolve(string, candidates_with_rhs, opts)
     end
   end
 
@@ -802,102 +835,6 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
   defp rhs_is_call?({name, _, args}) when is_atom(name) and is_list(args), do: true
   defp rhs_is_call?(_), do: false
 
-  defp rhs_target(short, rhs_compound, rhs_is_call?, ctx) do
-    subtokens = String.split(rhs_compound, "_", trim: true)
-
-    latch_match(short, subtokens)
-    |> tail_compound_from_latch(ctx, short, subtokens, rhs_is_call?)
-  end
-
-  defp rhs_target_from_split(subtokens, n, ctx, rhs_is_call?) do
-    {head, tail} = subtokens |> Enum.split(-n)
-    singularized = tail |> List.last() |> singularize()
-    tail_compound = (Enum.drop(tail, -1) ++ [singularized]) |> Enum.join("_")
-
-    pp =
-      if rhs_is_call? do
-        maybe_past_participle(head, tail, singularized, ctx.pp_verbs)
-      else
-        :skip
-      end
-
-    prepend_pp_or_keep(pp, tail_compound)
-  end
-
-  defp score_compound(short, compound, ctx) do
-    subtokens = String.split(compound, "_", trim: true)
-    initials = subtokens |> Enum.map_join("", &String.first/1)
-    n = String.length(short)
-
-    cond do
-      short == initials and n >= 2 ->
-        {100, singularize_compound(subtokens, ctx)}
-
-      String.starts_with?(initials, short) and n >= 2 ->
-        {80, subtokens |> Enum.take(n) |> singularize_compound(ctx)}
-
-      true ->
-        {0, nil}
-    end
-  end
-
-  defp score_compound_candidates(short, context_compounds, context_compound) do
-    context_compounds
-    # Self-match would be a no-op rename; filter early.
-    |> Enum.reject(&(&1 == short))
-    |> Enum.flat_map(fn compound ->
-      case score_compound(short, compound, context_compound) do
-        {score, target} when score > 0 -> [{target, score}]
-        _ -> []
-      end
-    end)
-    |> Enum.sort_by(fn {_target, score} -> -score end)
-  end
-
-  defp singularize_compound(subtokens, _ctx) when is_list(subtokens) do
-    case subtokens |> Enum.split(-1) do
-      {head, [last]} -> (head ++ [singularize(last)]) |> Enum.join("_")
-      {_, []} -> ""
-    end
-  end
-
-  defp tail_compound_from_latch(:error, _ctx, _short, _subtokens, _rhs_is_call?), do: :error
-
-  defp tail_compound_from_latch(
-         {:ok, start_idx, starts_hit},
-         ctx,
-         short,
-         subtokens,
-         rhs_is_call?
-       ) do
-    # When the latch hit every subtoken in order (`full_latch`):
-    # - RHS NOT a call (property access, map-key compound) → keep all.
-    # - RHS IS a call AND tail NOT plural → keep all.
-    # - RHS IS a call AND tail plural → drop head to last hit so PP fires.
-    #
-    # Partial latch starting at 0 (`cs ↔ build_changeset`: 1 hit out of
-    # 2) — leading subtokens are noise; drop everything before the
-    # last hit so the tail captures just the noun.
-    full_latch? = starts_hit == length(subtokens)
-    keep_all? = full_latch? and (not rhs_is_call? or not tail_pluralized?(subtokens))
-
-    effective_start =
-      cond do
-        keep_all? ->
-          start_idx
-
-        start_idx == 0 and String.length(short) > 1 and length(subtokens) > 1 ->
-          length(subtokens) - 1
-
-        true ->
-          start_idx
-      end
-
-    n = length(subtokens) - effective_start
-    rhs_target_from_split(subtokens, n, ctx, rhs_is_call?)
-  end
-
-  defp tail_pluralized?(subtokens), do: List.last(subtokens) |> pluralized?()
   defp to_atom(a) when is_atom(a), do: a
   defp to_atom(s) when is_binary(s), do: String.to_atom(s)
 
@@ -909,4 +846,16 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
     do: top_level_bindings(rhs_pat, rhs)
 
   defp top_level_bindings(_other, _rhs), do: []
+
+  # Build the typed candidate list IdentifierExpansion expects.
+  # Order matters for tie-breaks: innermost (params, body bindings,
+  # enclosing fn) wins over module-level (module name tokens).
+  defp tagged_candidates(param_compounds, body_long_compounds, fn_compound, module_compounds) do
+    (Enum.map(param_compounds, &{&1, :param}) ++
+       Enum.map(body_long_compounds, &{&1, :body_binding}) ++
+       [{fn_compound, :enclosing_fn}] ++
+       Enum.map(module_compounds, &{&1, :module_name}))
+    |> Enum.uniq_by(fn {compound, _} -> compound end)
+    |> Enum.reject(fn {compound, _} -> compound == "" end)
+  end
 end

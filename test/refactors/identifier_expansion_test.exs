@@ -368,11 +368,25 @@ defmodule Number42.Refactors.IdentifierExpansionTest do
       assert {:ok, "normalized_key"} = IdentifierExpansion.resolve("nk", candidates, opts)
     end
 
-    test "without pp_verbs configured → no PP, plain singularization" do
+    test "verb-shaped head fires PP even without pp_verbs config (normalize ends in -ize)" do
       candidates = [{"normalize_keys", :enclosing_fn}]
       opts = default_opts()
-      # `nk ↔ [normalize, keys]`: 2 initials → 100. build_long = normalize_key.
-      assert {:ok, "normalize_key"} = IdentifierExpansion.resolve("nk", candidates, opts)
+      # `normalize` has a verb-shaped suffix (-ize), so PP fires
+      # automatically. AstHelpers.maybe_past_participle/4 covers this.
+      assert {:ok, "normalized_key"} = IdentifierExpansion.resolve("nk", candidates, opts)
+    end
+
+    test "non-verb-shaped head without pp_verbs → no PP, plain singularization" do
+      candidates = [{"fetch_changesets", :rhs_call}]
+      opts = default_opts()
+      # `fetch` doesn't have a verb-shaped suffix → no PP.
+      assert {:ok, "changeset"} = IdentifierExpansion.resolve("cs", candidates, opts)
+    end
+
+    test "merge ends in `e` and is in pp_verbs → PP fires" do
+      candidates = [{"merge_changesets", :rhs_call}]
+      opts = %{default_opts() | pp_verbs: MapSet.new(["merge"])}
+      assert {:ok, "merged_changeset"} = IdentifierExpansion.resolve("cs", candidates, opts)
     end
 
     test "PP verb but last token not plural → no PP" do

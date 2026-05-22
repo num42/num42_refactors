@@ -76,6 +76,17 @@ defmodule Number42.Refactors.IdentifierExpansion do
 
   @strong_sources [:alias, :import, :module_name, :enclosing_fn, :rhs_call]
 
+  # Canonical Elixir abbreviations whose expansion is unambiguous in
+  # any project. These are merged into `opts[:known]` so projects
+  # can still override them, but the default does the right thing
+  # without per-project config.
+  @builtin_known %{
+    "attrs" => "attribute",
+    "args" => "argument",
+    "opts" => "option",
+    "params" => "param"
+  }
+
   @doc """
   Try to expand `short` against the given `candidates`.
 
@@ -107,9 +118,13 @@ defmodule Number42.Refactors.IdentifierExpansion do
       MapSet.member?(opts.stop_words, short_atom) ->
         :skip
 
-      # Known mapping wins over heuristic.
+      # Known mapping wins over heuristic. Project-supplied keys
+      # override the built-in canonical abbreviations.
       Map.has_key?(opts.known, short) ->
         {:ok, Map.fetch!(opts.known, short)}
+
+      Map.has_key?(@builtin_known, short) ->
+        {:ok, Map.fetch!(@builtin_known, short)}
 
       # Standalone-word demotion: `short` is a deliberate subtoken
       # elsewhere in the module → don't expand.
@@ -138,7 +153,7 @@ defmodule Number42.Refactors.IdentifierExpansion do
 
       {:ok, _, _} = ok ->
         long = build_long(ok, subtokens, opts)
-        base = score_latch(ok, short, subtokens, source)
+        base = score_latch(ok, short, subtokens, source, opts)
         penalized = apply_self_gates(base, long, source, opts)
 
         cond do
@@ -189,61 +204,54 @@ defmodule Number42.Refactors.IdentifierExpansion do
   end
 
   defp build_long({:ok, start_idx, starts_hit}, subtokens, opts) do
-    consumed = subtokens |> Enum.drop(start_idx) |> Enum.take(starts_hit)
-
     case maybe_pp_transform(start_idx, starts_hit, subtokens, opts) do
       {:ok, pp_long} ->
         pp_long
 
       :skip ->
-        consumed
+        subtokens
+        |> Enum.drop(start_idx)
+        |> Enum.take(starts_hit)
         |> singularize_last()
         |> Enum.join("_")
     end
   end
 
-  # If the full compound `[verb, ..., plural_noun]` matches a registered
-  # PP-verb head AND the latch consumed everything from start_idx=0,
-  # drop everything except the last token, singularize it, and prefix
-  # the past-participle of the verb. Turns `normalize_keys` ↔ `nk` into
-  # `normalized_key` instead of `normalize_key`.
-  defp maybe_pp_transform(0, starts_hit, subtokens, opts) do
+  # PP-promotion: when the candidate compound is `[verb, ..., plural_noun]`,
+  # build `<past_participle>_<singular_noun>` instead of the plain
+  # singularization. Two firing paths:
+  #
+  # 1. Full latch from idx 0 (`nk ↔ normalize_keys`): the latch
+  #    consumed every subtoken, the verb is the head, the plural is
+  #    the last consumed subtoken.
+  # 2. Partial latch starting at idx > 0 with tail plural and at
+  #    least one verb subtoken before the latch start
+  #    (`cs ↔ build_changesets`: the latch only hit `changesets`, but
+  #    `build` is the verb that explains the compound).
+  #
+  # In either case we ask AstHelpers.maybe_past_participle whether the
+  # verb qualifies (verb-shaped suffix OR explicit pp_verbs entry).
+  defp maybe_pp_transform(start_idx, starts_hit, subtokens, opts) do
     cond do
-      MapSet.size(opts.pp_verbs) == 0 ->
+      starts_hit < 1 ->
         :skip
 
-      starts_hit < 2 ->
-        :skip
-
-      starts_hit < length(subtokens) ->
+      start_idx == 0 and starts_hit < 2 ->
         :skip
 
       true ->
-        {head, [last]} = Enum.split(subtokens, -1)
-        verb = List.last(head)
+        last_idx = start_idx + starts_hit - 1
+        last = Enum.at(subtokens, last_idx)
+        head = Enum.take(subtokens, last_idx)
+
         singular_last = AstHelpers.singularize(last)
 
-        cond do
-          verb == nil ->
-            :skip
-
-          not MapSet.member?(opts.pp_verbs, verb) ->
-            :skip
-
-          singular_last == last ->
-            :skip
-
-          not String.ends_with?(verb, "e") ->
-            :skip
-
-          true ->
-            pp_prefix = AstHelpers.past_participle(verb)
-            {:ok, "#{pp_prefix}_#{singular_last}"}
+        case AstHelpers.maybe_past_participle(head, [last], singular_last, opts.pp_verbs) do
+          {:ok, pp} -> {:ok, "#{pp}_#{singular_last}"}
+          :skip -> :skip
         end
     end
   end
-
-  defp maybe_pp_transform(_, _, _, _), do: :skip
 
   defp singularize_last([]), do: []
 
@@ -461,8 +469,8 @@ defmodule Number42.Refactors.IdentifierExpansion do
         ) :: integer()
   def score_latch(:error, _short, _subtokens, _source), do: 0
 
-  def score_latch({:ok, start_idx, starts_hit}, short, subtokens, source) do
-    trust = source_trust(source)
+  def score_latch({:ok, start_idx, starts_hit}, short, subtokens, source, opts \\ %{}) do
+    trust = source_trust(source, opts)
     short_len = String.length(short)
 
     cond do
@@ -477,8 +485,9 @@ defmodule Number42.Refactors.IdentifierExpansion do
     end
   end
 
-  defp source_trust(source) when source in @strong_sources, do: :strong
-  defp source_trust(_), do: :weak
+  defp source_trust(_source, %{treat_all_as_strong: true}), do: :strong
+  defp source_trust(source, _opts) when source in @strong_sources, do: :strong
+  defp source_trust(_, _), do: :weak
 
   # The last consumed subtoken absorbs 1 initial + all leftover chars
   # of `short`. If that's > 2, we require the contributed chars to be
@@ -530,6 +539,7 @@ defmodule Number42.Refactors.IdentifierExpansion do
       stop_words: Map.get(opts, :stop_words, MapSet.new()),
       known: Map.get(opts, :known, %{}),
       pp_verbs: Map.get(opts, :pp_verbs, MapSet.new()),
+      treat_all_as_strong: Map.get(opts, :treat_all_as_strong, false),
       min_score: Map.get(opts, :min_score, 80)
     }
   end

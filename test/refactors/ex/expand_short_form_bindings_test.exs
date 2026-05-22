@@ -379,27 +379,44 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindingsTest do
       ''')
     end
 
-    test "long form would shadow a lambda param -> skip" do
+    test "RHS call name dominates over lambda param latches (rt → return_type)" do
       # `rt = return_type_for_item(...)` sits inside `fn item -> ... end`.
-      # The RHS-based resolver could pick `item` (it's the lambda
-      # param's own name and a strong locality match), but renaming
-      # `rt` to `item` would shadow the lambda parameter — silently
-      # swallowing the param's value. Lambda params count as occupied
-      # names just like function params and body bindings.
-      assert_unchanged(@subject, ~S'''
-      defmodule M do
-        def go(items, cat, assigns) do
-          items
-          |> Enum.map(fn item ->
-            rt = return_type_for_item(cat, item, assigns)
-            {rt, Map.put(item, :category, cat)}
-          end)
-          |> Enum.sort_by(fn {rt, m} ->
-            {type_sort_key(rt), String.downcase(m.label || "")}
-          end)
+      # The RHS call name latches `rt → return_type` (initials of two
+      # subtokens of `return_type_for_item`); since `return_type` does
+      # not collide with any bound name, the rewrite is safe. Lambda
+      # params (`item`) are still occupied names — `rt` does not
+      # resolve to `item` because the RHS-call signal is stronger.
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def go(items, cat, assigns) do
+            items
+            |> Enum.map(fn item ->
+              rt = return_type_for_item(cat, item, assigns)
+              {rt, Map.put(item, :category, cat)}
+            end)
+            |> Enum.sort_by(fn {rt, m} ->
+              {type_sort_key(rt), String.downcase(m.label || "")}
+            end)
+          end
         end
-      end
-      ''')
+        ''',
+        ~S'''
+        defmodule M do
+          def go(items, cat, assigns) do
+            items
+            |> Enum.map(fn item ->
+              return_type = return_type_for_item(cat, item, assigns)
+              {return_type, Map.put(item, :category, cat)}
+            end)
+            |> Enum.sort_by(fn {return_type, m} ->
+              {type_sort_key(return_type), String.downcase(m.label || "")}
+            end)
+          end
+        end
+        '''
+      )
     end
 
     test "long form already used as parameter -> skip" do
