@@ -600,6 +600,76 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctionsTest do
     end
   end
 
+  describe "regression: re-expansion loop on deliberately-truncated names (#15)" do
+    test "does not re-expand a short that is a contiguous prefix of a context word" do
+      # Regression #15: the heuristic latched `str` against the module
+      # name `Stream` and rewrote `defp str_token/1` to
+      # `stream_token/1`. But `str` is just the first three (contiguous)
+      # characters of `stream` — the author wrote a deliberately
+      # truncated leading word, not an abbreviation that drops internal
+      # letters (`cs → changeset`, `kw → keyword`). Auto-completing a
+      # prefix-truncation fights the author: every run re-expands it,
+      # and after the human renames it back the loop repeats. A short
+      # that is a contiguous prefix of its only-word heuristic expansion
+      # is too weak a signal — leave the compound name alone.
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule StreamView do
+          defp str_token(v), do: v
+
+          def go(v), do: str_token(v)
+        end
+        '''
+      )
+    end
+
+    test "the prefix-truncation name is stable across repeated runs" do
+      # The loop in #15 is observable as a fixpoint failure: applying
+      # the refactor must not keep flipping the name. Here the name is
+      # already the author's deliberate form, so once == twice == the
+      # original.
+      assert_idempotent(
+        @subject,
+        ~S'''
+        defmodule StreamView do
+          defp str_token(v), do: v
+
+          def go(v), do: str_token(v)
+        end
+        '''
+      )
+    end
+
+    test "still expands genuine abbreviations that are not prefixes of the expansion" do
+      # Guard against over-correcting: `cs` is NOT a prefix of
+      # `changeset` (it drops internal letters), so the alias-driven
+      # heuristic must still expand it. Only contiguous prefix-
+      # truncations are treated as deliberate.
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          alias Ecto.Changeset
+
+          defp fetch_cs(arg), do: arg
+
+          def go(x), do: fetch_cs(x)
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          alias Ecto.Changeset
+
+          defp fetch_changeset(arg), do: arg
+
+          def go(x), do: fetch_changeset(x)
+        end
+        '''
+      )
+    end
+  end
+
   describe "idempotent" do
     test "running twice equals running once" do
       assert_idempotent(
