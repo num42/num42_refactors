@@ -1099,6 +1099,96 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindingsTest do
     end
   end
 
+  describe "collision: distinct bindings resolving to the same long form" do
+    test "two distinct shorts that both map to the same long form are both left alone" do
+      # Regression from issue #2: `cs1` and `cs2` are distinct bindings
+      # in the same scope, but both independently resolve to `changeset`.
+      # Committing each rename in isolation produces two `changeset = ...`
+      # lines — the second shadows the first and every later reference
+      # to `cs1` silently becomes the `cs2` value (`merge(changeset,
+      # changeset)`). When the chosen long form collides across distinct
+      # shorts in one scope, skip all colliding shorts.
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          def go(a, b) do
+            cs1 = build_changeset(a)
+            cs2 = build_changeset(b)
+            merge(cs1, cs2)
+          end
+        end
+        ''',
+        known: %{"cs1" => "changeset", "cs2" => "changeset"}
+      )
+    end
+
+    test "a third non-colliding short in the same scope still rewrites" do
+      # Only the colliding group is dropped. `bi` resolves to a distinct
+      # long form (`brand_item`) and must still be expanded.
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def go(a, b, attrs) do
+            cs1 = build_changeset(a)
+            cs2 = build_changeset(b)
+            bi = build_brand_item(attrs)
+            merge(cs1, cs2, bi)
+          end
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          def go(a, b, attrs) do
+            cs1 = build_changeset(a)
+            cs2 = build_changeset(b)
+            brand_item = build_brand_item(attrs)
+            merge(cs1, cs2, brand_item)
+          end
+        end
+        ''',
+        known: %{"cs1" => "changeset", "cs2" => "changeset"}
+      )
+    end
+
+    test "collisions are scoped per clause — same long form in two clauses is fine" do
+      # `cs1` in `one/1` and `cs2` in `two/1` both map to `changeset`,
+      # but they live in different function bodies. No shadowing across
+      # clause boundaries, so each rewrites independently.
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def one(a) do
+            cs1 = build_changeset(a)
+            persist(cs1)
+          end
+
+          def two(b) do
+            cs2 = build_changeset(b)
+            persist(cs2)
+          end
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          def one(a) do
+            changeset = build_changeset(a)
+            persist(changeset)
+          end
+
+          def two(b) do
+            changeset = build_changeset(b)
+            persist(changeset)
+          end
+        end
+        ''',
+        known: %{"cs1" => "changeset", "cs2" => "changeset"}
+      )
+    end
+  end
+
   describe "Ecto from/in binding: schema is the strongest signal" do
     test "from(bi in BrandItem, ...) renames bi to brand_item across the body" do
       # The author's `from(bi in BrandItem, ...)` is an explicit

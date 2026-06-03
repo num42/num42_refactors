@@ -461,6 +461,7 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
         end
       end)
       |> Map.new()
+      |> drop_long_form_collisions()
 
     # Pre-shadow references: in `x = ...x...` the `x` on the RHS is a
     # reference to the OUTER (pre-shadow) binding of `x` — typically a
@@ -500,6 +501,33 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
         []
     end)
     |> Enum.reject(&is_nil/1)
+  end
+
+  # Symmetric `:conflict` collapse, on the other axis. The per-name
+  # resolvers already refuse to rename when ONE short name has
+  # disagreeing long-form observations. This catches the mirror case:
+  # MULTIPLE DISTINCT short names in the same clause that independently
+  # resolve to the SAME long form. Renaming each in isolation would
+  # produce two `value = ...` lines in one scope — the second `=`
+  # shadows the first, so every later reference to the first short
+  # silently picks up the second's value (issue #2: `head_val -
+  # base_val` → `value - value == 0`).
+  #
+  # Group the resolved `%{short => long}` map by long form and drop
+  # every group whose cardinality is > 1. The pre-existing "long form
+  # already a name in scope" guard covers bindings that exist *before*
+  # this pass; this covers the bindings the pass is about to create.
+  defp drop_long_form_collisions(resolutions) do
+    colliding_longs =
+      resolutions
+      |> Enum.frequencies_by(fn {_short, long} -> long end)
+      |> Enum.filter(fn {_long, count} -> count > 1 end)
+      |> Enum.map(fn {long, _count} -> long end)
+      |> MapSet.new()
+
+    resolutions
+    |> Enum.reject(fn {_short, long} -> MapSet.member?(colliding_longs, long) end)
+    |> Map.new()
   end
 
   # For each resolved `=` binding `name = rhs`, return every
