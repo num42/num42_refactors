@@ -71,6 +71,8 @@ defmodule Number42.Refactors.IdentifierExpansion do
           optional(:whitelist) => MapSet.t(atom()),
           optional(:stop_words) => MapSet.t(atom()),
           optional(:known) => %{String.t() => String.t()},
+          optional(:pp_verbs) => MapSet.t(String.t()),
+          optional(:treat_all_as_strong) => boolean(),
           optional(:min_score) => integer()
         }
 
@@ -233,9 +235,6 @@ defmodule Number42.Refactors.IdentifierExpansion do
   # verb qualifies (verb-shaped suffix OR explicit pp_verbs entry).
   defp maybe_pp_transform(start_idx, starts_hit, subtokens, opts) do
     cond do
-      starts_hit < 1 ->
-        :skip
-
       start_idx == 0 and starts_hit < 2 ->
         :skip
 
