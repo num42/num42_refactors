@@ -894,4 +894,202 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone.CrossFileTest do
              "expected rejection on non-literal @-value (System.get_env)"
     end
   end
+
+  describe "lexically-scoped macros in clone body — skipped" do
+    # `__MODULE__`, `__ENV__` and `__CALLER__` resolve against the
+    # *lexical* module they're compiled in. Lifting a clone body that
+    # uses one into a shared module silently rebinds it to the wrong
+    # module — e.g. `%__MODULE__{...}` then refers to the struct-less
+    # `*.Shared` module, which fails to compile. There's no literal
+    # divergence the parametriser could capture, so the only safe move
+    # is to skip the group; manual extraction stays possible.
+
+    defp assert_compiles!(src, label) do
+      mods = Code.compile_string(src)
+      Enum.each(mods, fn {mod, _bin} -> :code.purge(mod) and :code.delete(mod) end)
+      :ok
+    rescue
+      e ->
+        flunk("#{label} did not compile:\n#{src}\n\n#{Exception.message(e)}")
+    end
+
+    test "six `%__MODULE__{}` struct clones → no Shared module written", %{tmp: tmp} do
+      mk = fn name ->
+        """
+        defmodule CodeQA.AST.Nodes.#{name} do
+          alias CodeQA.AST.Enrichment.Node
+          defstruct [:tokens, :line_count, :children, :start_line, :end_line, :label]
+
+          def cast(%Node{} = node) do
+            %__MODULE__{
+              tokens: node.tokens,
+              line_count: node.line_count,
+              children: node.children,
+              start_line: node.start_line,
+              end_line: node.end_line,
+              label: node.label
+            }
+          end
+        end
+        """
+      end
+
+      names = ~w(CodeNode DocNode FunctionNode ImportNode ModuleNode TestNode)
+
+      sources =
+        names
+        |> Enum.map(fn n ->
+          p = Path.join(tmp, "lib/codeqa/ast/nodes/#{Macro.underscore(n)}.ex")
+          src = mk.(n)
+          File.mkdir_p!(Path.dirname(p))
+          File.write!(p, src)
+          {p, src}
+        end)
+
+      plan = prepared(sources, write_root: tmp)
+
+      shared = Path.wildcard(Path.join(tmp, "**/shared.ex"))
+
+      assert shared == [],
+             "expected no Shared module for `%__MODULE__{}` clones, got: #{inspect(shared)}"
+
+      # Every source is left untouched (and still compiles).
+      Enum.each(sources, fn {_p, src} ->
+        assert_unchanged(@subject, src, prepared: plan)
+      end)
+
+      refute Map.has_key?(plan, CodeQA.AST.Nodes.Shared)
+    end
+
+    test "`__ENV__` in clone body → group skipped", %{tmp: tmp} do
+      mk = fn name ->
+        """
+        defmodule MyApp.Items.#{name} do
+          def trace(x) do
+            mod = __ENV__.module
+            {mod, "tag", to_string(x), String.upcase(to_string(x))}
+          end
+        end
+        """
+      end
+
+      sources =
+        ~w(Foo Bar)
+        |> Enum.map(fn n ->
+          p = Path.join(tmp, "lib/my_app/items/#{Macro.underscore(n)}.ex")
+          src = mk.(n)
+          File.mkdir_p!(Path.dirname(p))
+          File.write!(p, src)
+          {p, src}
+        end)
+
+      _plan = prepared(sources, min_mass: 4, write_root: tmp)
+
+      refute File.exists?(Path.join(tmp, "lib/my_app/items/shared.ex")),
+             "expected no Shared module when clone body uses `__ENV__`"
+    end
+
+    test "`__CALLER__` in clone body → group skipped", %{tmp: tmp} do
+      mk = fn name ->
+        """
+        defmodule MyApp.Items.#{name} do
+          defmacro emit(x) do
+            caller = __CALLER__.module
+            quote do
+              {unquote(caller), unquote(x), "lit", to_string(unquote(x))}
+            end
+          end
+        end
+        """
+      end
+
+      sources =
+        ~w(Foo Bar)
+        |> Enum.map(fn n ->
+          p = Path.join(tmp, "lib/my_app/items/#{Macro.underscore(n)}.ex")
+          src = mk.(n)
+          File.mkdir_p!(Path.dirname(p))
+          File.write!(p, src)
+          {p, src}
+        end)
+
+      _plan = prepared(sources, min_mass: 4, write_root: tmp)
+
+      refute File.exists?(Path.join(tmp, "lib/my_app/items/shared.ex")),
+             "expected no Shared module when clone body uses `__CALLER__`"
+    end
+
+    test "a migrated defp helper that uses `__MODULE__` → group skipped", %{tmp: tmp} do
+      # The lexical-macro reference hides inside a transitively-migrated
+      # `defp`, not the clone body itself. The migrated helper would
+      # carry `__MODULE__` into the Shared module just the same.
+      mk = fn name ->
+        """
+        defmodule MyApp.Items.#{name} do
+          def emit(x) do
+            prefix = "p"
+            {prefix, wrap(x)}
+          end
+
+          defp wrap(x) do
+            {__MODULE__, x, to_string(x), String.upcase(to_string(x))}
+          end
+        end
+        """
+      end
+
+      sources =
+        ~w(Foo Bar)
+        |> Enum.map(fn n ->
+          p = Path.join(tmp, "lib/my_app/items/#{Macro.underscore(n)}.ex")
+          src = mk.(n)
+          File.mkdir_p!(Path.dirname(p))
+          File.write!(p, src)
+          {p, src}
+        end)
+
+      _plan = prepared(sources, min_mass: 4, write_root: tmp)
+
+      refute File.exists?(Path.join(tmp, "lib/my_app/items/shared.ex")),
+             "expected no Shared module when a migrated defp uses `__MODULE__`"
+    end
+
+    test "ordinary clone (no lexical macros) still extracts and Shared compiles", %{tmp: tmp} do
+      # Guard against an over-broad skip: a body with no lexical macro
+      # must still be extracted, and the emitted Shared module must
+      # compile.
+      a = """
+      defmodule MyApp.Items.Foo do
+        def emit(t) do
+          "until " <> to_string(t)
+        end
+      end
+      """
+
+      b = """
+      defmodule MyApp.Items.Bar do
+        def emit(t) do
+          "ago " <> to_string(t)
+        end
+      end
+      """
+
+      sources = [
+        {Path.join(tmp, "lib/my_app/items/foo.ex"), a},
+        {Path.join(tmp, "lib/my_app/items/bar.ex"), b}
+      ]
+
+      Enum.each(sources, fn {p, src} ->
+        File.mkdir_p!(Path.dirname(p))
+        File.write!(p, src)
+      end)
+
+      _plan = prepared(sources, min_mass: 4, write_root: tmp)
+
+      shared_path = Path.join(tmp, "lib/my_app/items/shared.ex")
+      assert File.exists?(shared_path), "expected Shared module for ordinary clones"
+
+      assert_compiles!(File.read!(shared_path), "shared module")
+    end
+  end
 end

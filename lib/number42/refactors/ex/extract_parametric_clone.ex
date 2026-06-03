@@ -53,6 +53,15 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
   # "skip this clause".
   @binding_macros [:from]
 
+  # Lexically-scoped compile-time macros: their value depends on the
+  # module they're expanded in, not on any runtime argument. Lifting a
+  # clone body that uses one into a `*.Shared` module silently rebinds
+  # it — e.g. `%__MODULE__{...}` then refers to the struct-less Shared
+  # module and fails to compile. There's no literal divergence the
+  # parametriser could capture, so a clone body (or a migrated helper)
+  # using one is skipped.
+  @lexical_macros [:__MODULE__, :__ENV__, :__CALLER__, :__DIR__, :__STACKTRACE__]
+
   @doc """
   Build a rewrite plan from `[{path, source_string}]` tuples.
 
@@ -340,6 +349,22 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
     found?
   end
 
+  defp ast_uses_lexical_macro?(ast) do
+    {_, found?} =
+      Macro.prewalk(ast, false, fn
+        _node, true ->
+          {:ignore, true}
+
+        {name, _meta, ctx} = node, false when name in @lexical_macros and is_atom(ctx) ->
+          {node, true}
+
+        node, false ->
+          {node, false}
+      end)
+
+    found?
+  end
+
   defp atom_shaped_key?({:__block__, _, [a]}) when is_atom(a), do: true
   defp atom_shaped_key?(a) when is_atom(a), do: true
   defp atom_shaped_key?({:"$hole", _, _}), do: true
@@ -504,6 +529,14 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
                 # time. Skip the clause rather than emit broken code.
                 []
 
+              contains_lexical_macro?(body_kw) ->
+                # `__MODULE__`/`__ENV__`/`__CALLER__`/… resolve against
+                # the lexical module. Lifting them into a `*.Shared`
+                # module silently rebinds them (e.g. `%__MODULE__{}` →
+                # the struct-less Shared module → compile error). No
+                # literal divergence to capture, so skip the clause.
+                []
+
               true ->
                 arg_names = arg_bindings |> Enum.map(fn {:ok, n} -> n end)
                 body_ast = body_kw |> Keyword.values() |> List.first()
@@ -515,8 +548,15 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
                 # is *also* used by a non-clone def, the clone group
                 # gets rejected at emit-time — we record the conflict
                 # via `reject_helpers?`.
-                {migratable_helpers, reject_helpers?} =
+                {migratable_helpers, helpers_conflict?} =
                   reachable_helper_clauses(body_exprs, name, length(args))
+
+                # A migrated `defp` carries its body into the Shared
+                # module too, so a lexical macro hiding in one of them
+                # is just as unsafe as one in the clone body.
+                reject_helpers? =
+                  helpers_conflict? or
+                    Enum.any?(migratable_helpers, &clause_uses_lexical_macro?/1)
 
                 # Module attrs referenced from body or migratable
                 # helpers. A non-literal value or a missing attr
@@ -897,6 +937,17 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
       body_kw
       |> Keyword.values()
       |> Enum.any?(&ast_uses_binding_macro?/1)
+
+  defp contains_lexical_macro?(body_kw),
+    do:
+      body_kw
+      |> Keyword.values()
+      |> Enum.any?(&ast_uses_lexical_macro?/1)
+
+  defp clause_uses_lexical_macro?({_kind, _, [_head, body_kw]}) when is_list(body_kw),
+    do: contains_lexical_macro?(body_kw)
+
+  defp clause_uses_lexical_macro?(_), do: false
 
   defp dedupe_outer_holes(holes) do
     holes
