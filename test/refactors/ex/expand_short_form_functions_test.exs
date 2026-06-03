@@ -600,6 +600,60 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctionsTest do
     end
   end
 
+  describe "macro shadowing via use" do
+    test "does not rename a defp to a name that shadows a use-injected macro" do
+      # Regression from #3: `defp t(content, kind \\ "<ID>")` in a module
+      # with `use ExUnit.Case` was renamed to `defp test/2`, shadowing
+      # `ExUnit.Case.test/2`. The test module then failed to compile:
+      # `cannot invoke def/2 inside function/macro`. The collision set
+      # for renames must include macros injected by `use`, not just the
+      # module's own def names.
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          use ExUnit.Case, async: true
+
+          defp t(content, kind \\ "<ID>"), do: %{kind: kind, content: content}
+
+          test "uses the helper" do
+            assert t("config") == %{kind: "<ID>", content: "config"}
+          end
+        end
+        ''',
+        known: %{"t" => "test"}
+      )
+    end
+
+    test "still renames when the long form is not a use-injected macro" do
+      # Same module shape, but the long form (`keyword`) is not injected
+      # by `use ExUnit.Case`. The guard must be specific to in-scope
+      # macros, not a blanket refusal for `use`-bearing modules.
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          use ExUnit.Case, async: true
+
+          defp fetch_kw(arg), do: arg
+
+          def go(x), do: fetch_kw(x)
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          use ExUnit.Case, async: true
+
+          defp fetch_keyword(arg), do: arg
+
+          def go(x), do: fetch_keyword(x)
+        end
+        ''',
+        known: %{"kw" => "keyword"}
+      )
+    end
+  end
+
   describe "idempotent" do
     test "running twice equals running once" do
       assert_idempotent(
