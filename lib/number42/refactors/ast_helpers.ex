@@ -443,6 +443,43 @@ defmodule Number42.Refactors.AstHelpers do
   end
 
   @doc """
+  Compute the on-disk path for a freshly-emitted module under `lib/`.
+
+  The naive convention `Macro.underscore` each module segment breaks
+  when a namespace doesn't round-trip: `Macro.underscore("CodeQA")` is
+  `"code_qa"`, but a project may lay that namespace out under
+  `lib/codeqa/`. Underscoring blindly would spawn a duplicate top-level
+  `lib/code_qa/` dir and, on a later run, module/path collisions (#9).
+
+  Derivation, most-accurate first:
+
+    1. **Existing layout** — the real top-level `lib/<dir>/` the source
+       files already live in. `source_paths` are the on-disk paths of
+       the files being refactored; their most common `lib/<dir>` prefix
+       is the source of truth. In production every source comes from a
+       real on-disk path (`source_files` / `.refactor.exs` inputs read
+       via `File.read!/1`), so this branch fires whenever it matters.
+    2. **`Macro.underscore`** — fallback that preserves the historical
+       behaviour when no source path reveals a `lib/<dir>` (e.g. tests
+       that pass synthetic `"a.ex"` paths).
+
+  Only the *top-level* segment is layout-derived; nested segments keep
+  the standard `Macro.underscore` mapping (`Items.Positions` →
+  `items/positions`), which is the actual file convention for nested
+  modules.
+  """
+  @spec shared_module_path(module(), Path.t(), [Path.t()]) :: Path.t()
+  def shared_module_path(target_module, write_root, source_paths) do
+    [first | tail] = Module.split(target_module)
+
+    root = lib_top_dir(first, source_paths)
+    rest = Enum.map(tail, &Macro.underscore/1)
+
+    rel = Path.join(["lib", root | rest]) <> ".ex"
+    Path.join(write_root, rel)
+  end
+
+  @doc """
   Decide whether a binding/param/function name is "short" — a candidate
   for the ExpandShortForm refactors.
 
@@ -1413,6 +1450,52 @@ defmodule Number42.Refactors.AstHelpers do
       latch_consume_starts(rest, subtokens, idx + 1, sub, 1)
     else
       :error
+    end
+  end
+
+  # Resolve the real top-level `lib/<dir>` for a namespace's first
+  # segment. Prefer the layout the source files already live in; fall
+  # back to `Macro.underscore` only when no source path reveals it.
+  defp lib_top_dir(first_segment, source_paths) do
+    case top_lib_dir_from_paths(source_paths) do
+      {:ok, dir} -> dir
+      :error -> Macro.underscore(first_segment)
+    end
+  end
+
+  # The most common `lib/<dir>` top-level directory among the on-disk
+  # source paths. Ties pick the first by Enum.max_by ordering; paths
+  # not under any `lib/` segment are ignored.
+  defp top_lib_dir_from_paths(source_paths) do
+    source_paths
+    |> Enum.map(&top_lib_dir_of_path/1)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.frequencies()
+    |> Enum.max_by(fn {_dir, count} -> count end, fn -> nil end)
+    |> case do
+      {dir, _count} -> {:ok, dir}
+      nil -> :error
+    end
+  end
+
+  # The directory immediately following the *last* `lib` segment in the
+  # path. Handles both relative (`lib/codeqa/x.ex`) and absolute
+  # (`/tmp/proj/lib/codeqa/x.ex`) paths, and a `write_root` that itself
+  # contains a `lib` segment (last wins).
+  defp top_lib_dir_of_path(path) do
+    path
+    |> Path.split()
+    |> dir_after_last_lib()
+  end
+
+  defp dir_after_last_lib(segments) do
+    segments
+    |> Enum.with_index()
+    |> Enum.filter(fn {seg, _i} -> seg == "lib" end)
+    |> List.last()
+    |> case do
+      {_lib, i} -> Enum.at(segments, i + 1)
+      nil -> nil
     end
   end
 

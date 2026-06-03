@@ -145,6 +145,10 @@ defmodule Number42.Refactors.Ex.ExtractSharedModule do
     |> do_build_plan(min_mass, write_root, dry_run?)
   end
 
+  # On-disk paths of the (non-excluded) source files, used to derive the
+  # real `lib/<dir>` layout instead of naively underscoring the namespace.
+  defp source_paths(sources), do: sources |> Enum.map(fn {path, _src} -> path end)
+
   @impl Number42.Refactors.Refactor
   def description, do: "Cross-file: extract exact duplicates into a {LCP}.Shared module"
   @impl Number42.Refactors.Refactor
@@ -733,6 +737,8 @@ defmodule Number42.Refactors.Ex.ExtractSharedModule do
   end
 
   defp do_build_plan(sources, min_mass, write_root, dry_run?) do
+    paths = source_paths(sources)
+
     # Two-pass: first collect every loser-rewrite + the canonical entry
     # the shared module should host, *without* touching the filesystem.
     # Then group everything by target module and write each shared file
@@ -756,12 +762,13 @@ defmodule Number42.Refactors.Ex.ExtractSharedModule do
     # the local `defp`, leaving the caller pointing at a private name.
     # Drop those entries — the local `defp` stays put, and we leave
     # the existing Shared module alone for that name.
-    loser_entries = loser_entries |> drop_entries_blocked_by_existing_privates(write_root)
+    loser_entries =
+      loser_entries |> drop_entries_blocked_by_existing_privates(write_root, paths)
 
     unless dry_run? do
       shared_specs
       |> Enum.each(fn {target, spec} ->
-        write_shared_module(target, spec, write_root)
+        write_shared_module(target, spec, write_root, paths)
       end)
     end
 
@@ -777,7 +784,7 @@ defmodule Number42.Refactors.Ex.ExtractSharedModule do
     do_closure(next, graph, rest ++ new)
   end
 
-  defp drop_entries_blocked_by_existing_privates(loser_entries, write_root) do
+  defp drop_entries_blocked_by_existing_privates(loser_entries, write_root, source_paths) do
     targets =
       loser_entries
       |> Enum.map(fn {_loser, %{target: t}} -> t end)
@@ -785,7 +792,7 @@ defmodule Number42.Refactors.Ex.ExtractSharedModule do
 
     privates_per_target =
       Map.new(targets, fn target ->
-        path = shared_module_path(target, write_root)
+        path = shared_module_path(target, write_root, source_paths)
 
         privates =
           case read_existing_shared(path, target) do
@@ -1595,15 +1602,6 @@ defmodule Number42.Refactors.Ex.ExtractSharedModule do
   defp rewrite_with_plan_or_passthrough(plan, source), do: source |> rewrite(plan)
   defp shared_module?(module), do: module |> Module.split() |> List.last() == "Shared"
 
-  defp shared_module_path(target_module, write_root) do
-    [first | tail] = Module.split(target_module)
-    root = Macro.underscore(first)
-    rest = Enum.map(tail, &Macro.underscore/1)
-
-    rel = Path.join(["lib", root | rest]) <> ".ex"
-    Path.join(write_root, rel)
-  end
-
   defp splice_before_module_end(source, addition) do
     lines = String.split(source, "\n")
     {prefix, suffix} = split_at_last_end(lines)
@@ -1680,8 +1678,8 @@ defmodule Number42.Refactors.Ex.ExtractSharedModule do
     ok?
   end
 
-  defp write_shared_module(target_module, spec, write_root) do
-    path = shared_module_path(target_module, write_root)
+  defp write_shared_module(target_module, spec, write_root, source_paths) do
+    path = shared_module_path(target_module, write_root, source_paths)
     File.mkdir_p!(Path.dirname(path))
 
     # Source modules can already `import target_module` from a prior

@@ -1784,4 +1784,56 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
       refute Map.has_key?(plan, MyApp.Test.C)
     end
   end
+
+  describe "lib path derivation (#9)" do
+    test "namespace whose underscore differs from the on-disk dir writes to the real dir",
+         %{tmp: tmp} do
+      # `Macro.underscore("CodeQA")` == "code_qa", but the project lays
+      # the namespace out under `lib/codeqa/`. The fresh Shared file must
+      # follow the on-disk layout, not the naive underscore — otherwise
+      # we spawn a duplicate top-level `lib/code_qa/` dir and collide on
+      # the next run.
+      a = """
+      defmodule CodeQA.AST.Nodes do
+        def assign(scope, attrs) do
+          scope
+          |> Map.put(:attrs, attrs)
+          |> Map.put(:assigned, true)
+        end
+      end
+      """
+
+      b = """
+      defmodule CodeQA.AST.Nodes.Positions do
+        def assign(scope, attrs) do
+          scope
+          |> Map.put(:attrs, attrs)
+          |> Map.put(:assigned, true)
+        end
+      end
+      """
+
+      sources = [
+        {Path.join(tmp, "lib/codeqa/ast/nodes.ex"), a},
+        {Path.join(tmp, "lib/codeqa/ast/nodes/positions.ex"), b}
+      ]
+
+      plan = prepared(sources, write_root: tmp)
+
+      real_path = Path.join(tmp, "lib/codeqa/ast/nodes/shared.ex")
+      naive_path = Path.join(tmp, "lib/code_qa/ast/nodes/shared.ex")
+
+      assert File.exists?(real_path),
+             "expected fresh Shared file at the real on-disk dir #{real_path}"
+
+      refute File.exists?(naive_path),
+             "must not create a duplicate top-level dir from Macro.underscore"
+
+      shared_src = File.read!(real_path)
+      assert shared_src =~ "defmodule CodeQA.AST.Nodes.Shared"
+      assert shared_src =~ "def assign(scope, attrs)"
+
+      assert Map.has_key?(plan, CodeQA.AST.Nodes)
+    end
+  end
 end
