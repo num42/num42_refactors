@@ -49,6 +49,53 @@ defmodule Number42.Refactors.Ex.AliasUsageTest do
       assert_rewrites(@subject, before_source, after_source)
     end
 
+    test "inserts alias after a leading @moduledoc, not before it" do
+      before_source = """
+      defmodule Foo do
+        @moduledoc "Orchestrates things."
+
+        def go(x), do: My.Deep.Mod.run(x)
+      end
+      """
+
+      after_source = """
+      defmodule Foo do
+        @moduledoc "Orchestrates things."
+
+        alias My.Deep.Mod
+
+        def go(x), do: Mod.run(x)
+      end
+      """
+
+      assert_rewrites(@subject, before_source, after_source)
+    end
+
+    test "inserts alias after @moduledoc that precedes an existing alias block" do
+      before_source = """
+      defmodule Foo do
+        @moduledoc "Orchestrates things."
+
+        alias Already.Here
+
+        def go(x), do: My.Deep.Mod.run(Here.f(x))
+      end
+      """
+
+      after_source = """
+      defmodule Foo do
+        @moduledoc "Orchestrates things."
+
+        alias Already.Here
+        alias My.Deep.Mod
+
+        def go(x), do: Mod.run(Here.f(x))
+      end
+      """
+
+      assert_rewrites(@subject, before_source, after_source)
+    end
+
     test "inserts alias after existing prefix block" do
       before_source = """
       defmodule Foo do
@@ -176,6 +223,16 @@ defmodule Number42.Refactors.Ex.AliasUsageTest do
     test "running twice equals running once" do
       assert_idempotent(@subject, """
       defmodule Foo do
+        def go(x), do: My.Deep.Mod.run(x)
+      end
+      """)
+    end
+
+    test "running twice equals running once with a leading @moduledoc" do
+      assert_idempotent(@subject, """
+      defmodule Foo do
+        @moduledoc "Orchestrates things."
+
         def go(x), do: My.Deep.Mod.run(x)
       end
       """)
