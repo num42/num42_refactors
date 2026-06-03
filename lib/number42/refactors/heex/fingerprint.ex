@@ -128,10 +128,11 @@ defmodule Number42.Refactors.Heex.Fingerprint do
     }
   end
 
+  # Only `:element` and `:eex_block` nodes reach `line_of/1`: leaf
+  # `:eex_expr` / `:text` nodes are never emitted as fragments (see
+  # `walk_one/5`), so they never need a line.
   defp line_of({:element, _, _, _, %{line: l}}), do: l
   defp line_of({:eex_block, _, _, %{line: l}}), do: l
-  defp line_of({:eex_expr, _, %{line: l}}), do: l
-  defp line_of({:text, _, %{line: l}}), do: l
 
   defp maybe_emit(summary, _node, _modes, _file, min_mass, frags)
        when is_integer(min_mass) and summary.mass < min_mass,

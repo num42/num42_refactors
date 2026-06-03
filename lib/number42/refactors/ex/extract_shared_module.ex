@@ -1596,13 +1596,9 @@ defmodule Number42.Refactors.Ex.ExtractSharedModule do
   defp shared_module?(module), do: module |> Module.split() |> List.last() == "Shared"
 
   defp shared_module_path(target_module, write_root) do
-    parts = Module.split(target_module)
-
-    {root, rest} =
-      case parts do
-        [first | tail] -> {Macro.underscore(first), tail |> Enum.map(&Macro.underscore/1)}
-        _ -> {"", []}
-      end
+    [first | tail] = Module.split(target_module)
+    root = Macro.underscore(first)
+    rest = Enum.map(tail, &Macro.underscore/1)
 
     rel = Path.join(["lib", root | rest]) <> ".ex"
     Path.join(write_root, rel)
