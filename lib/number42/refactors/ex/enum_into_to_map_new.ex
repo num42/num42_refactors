@@ -15,6 +15,15 @@ defmodule Number42.Refactors.Ex.EnumIntoToMapNew do
   the alphabetic dispatch order doesn't have us rewrite to
   `Map.new(Enum.map(...))` first and starve the more specific match.
 
+  ## Preserves the pipe flow
+
+  When the source is the tail of a `|>` chain
+  (`coll |> ... |> Enum.into(%{})`), the rewrite re-threads onto that
+  chain — `coll |> ... |> Map.new()` — rather than wrapping the whole
+  chain in `Map.new(...)`, which would invert the left-to-right reading
+  order into an inside-out call. The non-piped call form
+  (`Enum.into(coll, %{})`) keeps the `Map.new(coll)` call shape.
+
   Source emission goes through `Sourceror.to_string/1`; `mix format`
   re-pipes after the refactor runs.
   """
@@ -75,7 +84,7 @@ defmodule Number42.Refactors.Ex.EnumIntoToMapNew do
     if defers_to_enum_map?(coll) do
       []
     else
-      [Patch.replace(node, "Map.new(#{Sourceror.to_string(coll)})")]
+      [Patch.replace(node, "#{Sourceror.to_string(coll)} |> Map.new()")]
     end
   end
 

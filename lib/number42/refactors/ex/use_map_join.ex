@@ -11,6 +11,14 @@ defmodule Number42.Refactors.Ex.UseMapJoin do
   `Enum.join(Enum.map(coll, fun), sep)`) parse to the same AST shape,
   so one walker handles both.
 
+  ## Preserves the pipe flow
+
+  The piped form re-threads onto the chain
+  (`coll |> Enum.map_join(sep, fun)`) instead of wrapping it in a call
+  (`Enum.map_join(coll, sep, fun)`), keeping the left-to-right reading
+  order when `coll` is itself a multi-stage pipe. The nested-call form
+  has no chain to preserve and keeps the call shape.
+
   ## Scope
 
   Only the `Enum.join/2` form is rewritten. The zero-arg
@@ -93,7 +101,7 @@ defmodule Number42.Refactors.Ex.UseMapJoin do
           ]} = node,
          source
        ),
-       do: node |> rewrite(coll, fun, sep, source)
+       do: node |> rewrite(coll, fun, sep, source, :call)
 
   defp maybe_patch(
          {:|>, _,
@@ -107,7 +115,7 @@ defmodule Number42.Refactors.Ex.UseMapJoin do
           ]} = node,
          source
        ),
-       do: node |> rewrite(coll, fun, sep, source)
+       do: node |> rewrite(coll, fun, sep, source, :pipe)
 
   defp maybe_patch(_, _), do: []
   defp patch_or_passthrough([], source), do: source
@@ -115,17 +123,20 @@ defmodule Number42.Refactors.Ex.UseMapJoin do
   defp pos_eq(a, b), do: a[:line] == b[:line] and a[:column] == b[:column]
   defp pos_le(a, b), do: {a[:line], a[:column]} <= {b[:line], b[:column]}
 
-  defp rewrite(node, coll, fun, sep, source) do
+  defp rewrite(node, coll, fun, sep, source, form) do
     coll_text = slice_node(source, coll)
     fun_text = slice_node(source, fun)
     sep_text = slice_node(source, sep)
 
     case [coll_text, fun_text, sep_text] do
       [{:ok, c}, {:ok, f}, {:ok, s}] ->
-        [Patch.replace(node, "Enum.map_join(#{c}, #{s}, #{f})")]
+        [Patch.replace(node, replacement(form, c, s, f))]
 
       _ ->
         []
     end
   end
+
+  defp replacement(:pipe, coll, sep, fun), do: "#{coll} |> Enum.map_join(#{sep}, #{fun})"
+  defp replacement(:call, coll, sep, fun), do: "Enum.map_join(#{coll}, #{sep}, #{fun})"
 end

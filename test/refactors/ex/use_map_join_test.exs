@@ -6,15 +6,23 @@ defmodule Number42.Refactors.Ex.UseMapJoinTest do
   @subject UseMapJoin
 
   describe "rewrites" do
-    test "Enum.map(coll, fun) |> Enum.join(sep) -> Enum.map_join(coll, sep, fun)" do
+    test "Enum.map(coll, fun) |> Enum.join(sep) re-threads onto the pipe" do
       assert_rewrites(
         @subject,
         "list |> Enum.map(&to_string/1) |> Enum.join(\", \")",
-        "Enum.map_join(list, \", \", &to_string/1)"
+        "list |> Enum.map_join(\", \", &to_string/1)"
       )
     end
 
-    test "non-pipe nested form" do
+    test "multi-stage pipe re-threads onto the chain instead of wrapping" do
+      assert_rewrites(
+        @subject,
+        "lines |> Enum.with_index() |> Enum.map(fn x -> x end) |> Enum.join(\"\\n\")",
+        "lines |> Enum.with_index() |> Enum.map_join(\"\\n\", fn x -> x end)"
+      )
+    end
+
+    test "non-pipe nested form keeps the call form" do
       assert_rewrites(
         @subject,
         "Enum.join(Enum.map(list, &to_string/1), \", \")",
