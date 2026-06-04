@@ -73,10 +73,27 @@ defmodule Number42.Refactors.Ex.IfLiftToClauses do
   A single-branch `if` (no `else`) lifts with the catch-all returning
   `nil` — the same value the original `if` produced when falsy.
 
+  ## Default arguments
+
+  Elixir allows `\\` defaults to be declared exactly once per function.
+  When the lifted clause carries defaults, both implementation clauses
+  would otherwise duplicate them and the module wouldn't compile. So we
+  hoist the defaults into a body-less header clause and emit the two
+  implementation clauses on plain params:
+
+      def f(x, opts \\ []) do
+        if is_atom(x), do: {:atom, opts}, else: {:other, opts}
+      end
+      ↓
+      def f(x, opts \\ [])
+      def f(x, opts) when is_atom(x), do: {:atom, opts}
+      def f(_x, opts), do: {:other, opts}
+
   ## Idempotence
 
-  After lifting, the function has two clauses, neither of which is a
-  single-`if` body. A second pass finds no match.
+  After lifting, the function has two implementation clauses, neither of
+  which is a single-`if` body (and a body-less header clause is skipped
+  outright). A second pass finds no match.
   """
 
   use Number42.Refactors.Refactor
@@ -111,8 +128,11 @@ defmodule Number42.Refactors.Ex.IfLiftToClauses do
   defp atomize(cond_ast), do: split_conjunction(cond_ast) |> reduce_atoms_or_error()
 
   defp bare_param_names(params) do
-    for {name, _ast} <- params, name != nil, do: name
+    for {name, _ast, _default} <- params, name != nil, do: name
   end
+
+  defp has_defaults?(params),
+    do: Enum.any?(params, fn {_name, _ast, default} -> default != nil end)
 
   defp build_patches(ast, source),
     do:
@@ -140,19 +160,30 @@ defmodule Number42.Refactors.Ex.IfLiftToClauses do
   defp combine_conj(a, b) when is_list(a) and is_list(b), do: a ++ b
 
   defp extract_params({fn_name, _, args}) when is_atom(fn_name) and is_list(args) do
-    typed =
-      args
-      |> Enum.map(fn arg ->
-        case bare_var(arg) do
-          {:ok, name} -> {name, arg}
-          :skip -> {nil, arg}
-        end
-      end)
-
-    {:ok, {fn_name, typed}}
+    {:ok, {fn_name, Enum.map(args, &typed_param/1)}}
   end
 
   defp extract_params(_), do: :error
+
+  # A param slot is `{name, pattern_ast, default_ast}` where:
+  #   * `default_ast` is `nil` for an ordinary param, or the default
+  #     expression AST for a `param \\ default` slot.
+  #   * `pattern_ast` is the param without its default marker — what the
+  #     implementation clauses actually match on.
+  #   * `name` is the bound variable name (atom) or `nil` for a non-bare
+  #     pattern.
+  defp typed_param({:\\, _, [var, default]}) do
+    {name, _ast, _} = typed_param(var)
+    {name, var, default}
+  end
+
+  defp typed_param(arg) do
+    case bare_var(arg) do
+      {:ok, name} -> {name, arg, nil}
+      :skip -> {nil, arg, nil}
+    end
+  end
+
   defp has_when_guard?({:when, _, _}), do: true
   defp has_when_guard?(_), do: false
 
@@ -708,11 +739,14 @@ defmodule Number42.Refactors.Ex.IfLiftToClauses do
 
   defp render_catchall_params(params, else_uses, head_slots) do
     any_preserved? =
-      params |> Enum.any?(fn {name, _ast} -> name != nil and MapSet.member?(else_uses, name) end)
+      params
+      |> Enum.any?(fn {name, _ast, _default} ->
+        name != nil and MapSet.member?(else_uses, name)
+      end)
 
     params
     |> Enum.zip(head_slots)
-    |> Enum.map(fn {{name, ast}, {head_text, _head_kind}} ->
+    |> Enum.map(fn {{name, ast, _default}, {head_text, _head_kind}} ->
       cond do
         name != nil and MapSet.member?(else_uses, name) -> Atom.to_string(name)
         name == nil -> head_text
@@ -747,8 +781,26 @@ defmodule Number42.Refactors.Ex.IfLiftToClauses do
     else_clause = render_clause(catchall_head, plan.else_body_ast, plan.else_text)
 
     _ = source
-    do_clause <> "\n\n" <> else_clause
+
+    [render_header_clause(kind, fn_name, params), do_clause, else_clause]
+    |> Enum.reject(&(&1 == nil))
+    |> Enum.join("\n\n")
   end
+
+  # Defaults may be declared exactly once per function. When the lifted
+  # function carries `\\` defaults we hoist them into a body-less header
+  # clause; both implementation clauses then match on plain params.
+  defp render_header_clause(kind, fn_name, params) do
+    if has_defaults?(params) do
+      slots = Enum.map_join(params, ", ", &render_header_slot/1)
+      "#{kind} #{fn_name}(#{slots})"
+    end
+  end
+
+  defp render_header_slot({_name, ast, nil}), do: Sourceror.to_string(ast)
+
+  defp render_header_slot({_name, ast, default}),
+    do: Sourceror.to_string(ast) <> " \\\\ " <> Sourceror.to_string(default)
 
   defp render_guard([]), do: ""
 
@@ -762,7 +814,7 @@ defmodule Number42.Refactors.Ex.IfLiftToClauses do
 
   defp render_head_slots(params, patterns, head_uses) do
     params
-    |> Enum.map(fn {name, ast} ->
+    |> Enum.map(fn {name, ast, _default} ->
       cond do
         name == nil ->
           # Anonymous slot (literal, `_name`, or pattern). Pass through.

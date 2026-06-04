@@ -180,6 +180,42 @@ defmodule Number42.RefactorCase do
     |> MapSet.to_list()
   end
 
+  @doc """
+  Assert that `source` compiles as real Elixir.
+
+  Some refactors split or rewrite function heads; a structurally valid
+  diff can still emit code the compiler rejects (e.g. default arguments
+  declared in more than one clause). This compiles the rewritten string
+  and fails with the captured compiler error if it doesn't.
+  """
+  @spec assert_compiles(String.t()) :: :ok
+  def assert_compiles(source) do
+    Code.compile_string(source)
+    :ok
+  rescue
+    error ->
+      flunk("""
+      Refactor output does not compile.
+
+      --- error ---
+      #{Exception.message(error)}
+      --- source ---
+      #{source}
+      """)
+  after
+    purge_compiled_modules(source)
+  end
+
+  defp purge_compiled_modules(source) do
+    ~r/^\s*defmodule\s+([A-Z][\w.]*)/m
+    |> Regex.scan(source, capture: :all_but_first)
+    |> Enum.each(fn [name] ->
+      module = Module.concat([name])
+      :code.purge(module)
+      :code.delete(module)
+    end)
+  end
+
   defp squeeze(source),
     do:
       source

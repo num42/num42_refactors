@@ -82,6 +82,37 @@ defmodule Number42.Refactors.Ex.IfElseToCondTest do
       assert_rewrites(@subject, before_source, after_source)
     end
 
+    test "compound inner condition (no outer-body binding) still flattens with conjunction" do
+      # Regression guard for the issue #8 fix: the skip rule must only trip on
+      # outer-body bindings. A compound inner guard that references nothing from
+      # the outer body must still flatten correctly into a conjunction.
+      before_source = """
+      def f(x) do
+        if a > 0 do
+          if b > 0 and c < 10 do
+            hit
+          else
+            miss
+          end
+        else
+          fallback
+        end
+      end
+      """
+
+      after_source = """
+      def f(x) do
+        cond do
+          a > 0 and (b > 0 and c < 10) -> hit
+          a > 0 -> miss
+          true -> fallback
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, after_source)
+    end
+
     test "branches contain multi-statement bodies (no pre-statements before nested if)" do
       before_source = """
       def f(x) do
@@ -252,6 +283,30 @@ defmodule Number42.Refactors.Ex.IfElseToCondTest do
           else
             c
           end
+        end
+      end
+      """)
+    end
+
+    test "inner condition is a compound expression referencing an outer-body binding — skip (issue #8)" do
+      # Repro from the issue. The outer `if` body introduces `total`, and the
+      # inner `if` guards on a compound expression that *references* `total`.
+      # Flattening here previously replaced the WHOLE compound guard with a
+      # no-op `compute_total.()` lambda call, silently dropping every guard.
+      # Safest default: leave it alone.
+      assert_unchanged(@subject, """
+      def update_state(state, {_prev, _curr, next}, _emit_buf, _src, _grp) do
+        if next == nil do
+          total = state.literal_count + state.id_count
+
+          if total > 0 and not state.has_control_flow and
+               state.literal_count / total > 0.6 do
+            {MapSet.new([{:data_vote, 2}]), :halt}
+          else
+            {MapSet.new(), state}
+          end
+        else
+          {MapSet.new(), state}
         end
       end
       """)

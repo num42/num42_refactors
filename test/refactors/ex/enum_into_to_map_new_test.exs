@@ -11,7 +11,15 @@ defmodule Number42.Refactors.Ex.EnumIntoToMapNewTest do
     end
 
     test "pipe form rewrites the call" do
-      assert_rewrites(@subject, "stream |> Enum.into(%{})", "Map.new(stream)")
+      assert_rewrites(@subject, "stream |> Enum.into(%{})", "stream |> Map.new()")
+    end
+
+    test "multi-stage pipe re-threads onto the chain instead of wrapping" do
+      assert_rewrites(
+        @subject,
+        "coll |> step() |> Enum.into(%{})",
+        "coll |> step() |> Map.new()"
+      )
     end
   end
 
