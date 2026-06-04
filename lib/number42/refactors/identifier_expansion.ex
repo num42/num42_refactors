@@ -109,40 +109,100 @@ defmodule Number42.Refactors.IdentifierExpansion do
   @spec resolve(String.t(), [candidate()], opts()) :: {:ok, String.t()} | :skip
   def resolve(short, candidates, opts) when is_binary(short) and is_list(candidates) do
     opts = normalize_opts(opts)
+
+    case resolve_shortcut(short, opts) do
+      {:halt, result} -> result
+      :cont -> heuristic_resolve(short, candidates, opts)
+    end
+  end
+
+  @doc """
+  Like `resolve/3`, but returns the *full ranked* list of surviving
+  long-form candidates instead of just the winner.
+
+  The list is `[long_form]` ordered best-first (highest score first,
+  ties broken by candidate order). `resolve/3` is exactly
+  `List.first/1` of this list wrapped in `{:ok, _}`, or `:skip` when
+  the list is empty.
+
+  Callers that need a *fallback* expansion — e.g. resolving a
+  collision where the first-choice long form is already taken by
+  another binding in the same scope — walk this list for the next
+  non-conflicting choice.
+
+  Whitelist / stop-word / standalone-word shortcuts still suppress
+  expansion entirely (empty list). A `known`-mapping shortcut returns
+  a single-element list — there is no "second best" for an explicit
+  mapping.
+
+  ## Examples
+
+      iex> alias Number42.Refactors.IdentifierExpansion
+      iex> IdentifierExpansion.resolve_ranked("xyz", [{"changeset", :alias}], %{})
+      []
+  """
+  @spec resolve_ranked(String.t(), [candidate()], opts()) :: [String.t()]
+  def resolve_ranked(short, candidates, opts) when is_binary(short) and is_list(candidates) do
+    opts = normalize_opts(opts)
+
+    case resolve_shortcut(short, opts) do
+      {:halt, {:ok, long}} -> [long]
+      {:halt, :skip} -> []
+      :cont -> ranked_candidates(short, candidates, opts)
+    end
+  end
+
+  # Pre-heuristic shortcuts shared by `resolve/3` and
+  # `resolve_ranked/3` — they must agree on whitelist/stop/known/
+  # standalone-word handling so the ranked head always equals the
+  # `resolve/3` winner. `:cont` means "fall through to scoring".
+  defp resolve_shortcut(short, opts) do
     short_atom = String.to_atom(short)
 
     cond do
       # Whitelist: short is explicitly fine as-is.
       MapSet.member?(opts.whitelist, short_atom) ->
-        :skip
+        {:halt, :skip}
 
       # Stop-list: never expand English function words.
       MapSet.member?(opts.stop_words, short_atom) ->
-        :skip
+        {:halt, :skip}
 
       # Known mapping wins over heuristic. Project-supplied keys
       # override the built-in canonical abbreviations.
       Map.has_key?(opts.known, short) ->
-        {:ok, Map.fetch!(opts.known, short)}
+        {:halt, {:ok, Map.fetch!(opts.known, short)}}
 
       Map.has_key?(@builtin_known, short) ->
-        {:ok, Map.fetch!(@builtin_known, short)}
+        {:halt, {:ok, Map.fetch!(@builtin_known, short)}}
 
       # Standalone-word demotion: `short` is a deliberate subtoken
       # elsewhere in the module → don't expand.
       MapSet.member?(opts.module_subtokens, short) ->
-        :skip
+        {:halt, :skip}
 
       true ->
-        heuristic_resolve(short, candidates, opts)
+        :cont
     end
   end
 
   defp heuristic_resolve(short, candidates, opts) do
+    case ranked_candidates(short, candidates, opts) do
+      [] -> :skip
+      [best | _] -> {:ok, best}
+    end
+  end
+
+  # Surviving long forms, best-first. `score_candidate` may emit the
+  # same long form from several candidates; keep only the highest-
+  # scoring occurrence so the list carries distinct expansions.
+  defp ranked_candidates(short, candidates, opts) do
     candidates
     |> Enum.flat_map(&score_candidate(short, &1, opts))
     |> filter_by_threshold(opts.min_score)
-    |> pick_best()
+    |> Enum.sort_by(fn {_long, score} -> score end, :desc)
+    |> Enum.uniq_by(fn {long, _score} -> long end)
+    |> Enum.map(fn {long, _score} -> long end)
   end
 
   defp score_candidate(short, {compound, source}, opts) do
@@ -261,13 +321,6 @@ defmodule Number42.Refactors.IdentifierExpansion do
 
   defp filter_by_threshold(scored, min_score) do
     scored |> Enum.filter(fn {_, score} -> score >= min_score end)
-  end
-
-  defp pick_best([]), do: :skip
-
-  defp pick_best(scored) do
-    {long, _score} = scored |> Enum.max_by(fn {_, s} -> s end)
-    {:ok, long}
   end
 
   # -----------------------------------------------------------------

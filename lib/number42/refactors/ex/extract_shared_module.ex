@@ -765,6 +765,18 @@ defmodule Number42.Refactors.Ex.ExtractSharedModule do
     loser_entries =
       loser_entries |> drop_entries_blocked_by_existing_privates(write_root, paths)
 
+    # A loser is only safe to rewrite once the function it delegates to
+    # (or imports) is guaranteed to exist as a public `def` in the
+    # *canonical* `*.Shared` module — the one the compiler resolves the
+    # target name to. When a Shared module already exists for the target
+    # namespace but the lift cannot reach it (e.g. it lives at a path the
+    # writer doesn't target, so the spec lands in a stray file instead),
+    # the body deletion + import rewrite would point the loser at a
+    # function that never arrives. Drop those entries so both edits are
+    # refused and the source stays compilable.
+    loser_entries =
+      loser_entries |> drop_entries_with_incomplete_lift(sources, shared_specs, write_root)
+
     unless dry_run? do
       shared_specs
       |> Enum.each(fn {target, spec} ->
@@ -773,6 +785,101 @@ defmodule Number42.Refactors.Ex.ExtractSharedModule do
     end
 
     loser_entries |> Enum.group_by(fn {loser, _} -> loser end, fn {_, entry} -> entry end)
+  end
+
+  # For each target Shared module, the set of public `{name, arity}`
+  # functions the loser rewrites are allowed to rely on. Anything not in
+  # this set means the lift did not (and will not) land in the module the
+  # loser points to — so the loser must keep its local definition.
+  defp drop_entries_with_incomplete_lift(loser_entries, sources, shared_specs, write_root) do
+    publics_per_target =
+      loser_entries
+      |> Enum.map(fn {_loser, %{target: t}} -> t end)
+      |> Enum.uniq()
+      |> Map.new(fn target ->
+        {target, lifted_publics_for_target(target, sources, shared_specs, write_root)}
+      end)
+
+    loser_entries
+    |> Enum.reject(fn {_loser, %{arity: a, name: n, target: t}} ->
+      not MapSet.member?(Map.fetch!(publics_per_target, t), {n, a})
+    end)
+  end
+
+  # Public `{name, arity}` set the canonical `target` module will expose
+  # after the writes. Two contributors:
+  #
+  #   * functions already public in the canonical module (found in the
+  #     input sources — `mix refactor` threads the whole file list,
+  #     including any pre-existing `*.Shared`, through `source_files`).
+  #   * functions/helpers the current plan supplies — but only when they
+  #     actually reach the canonical module: either there is no canonical
+  #     yet (a fresh module is written and *is* the canonical) or the
+  #     writer's path resolves to the existing canonical so the append
+  #     lands there.
+  defp lifted_publics_for_target(target, sources, shared_specs, write_root) do
+    canonical_body = canonical_shared_body(target, sources)
+    existing_publics = canonical_public_keys(canonical_body)
+
+    spec_publics =
+      case Map.fetch(shared_specs, target) do
+        {:ok, spec} -> spec_public_keys(spec)
+        :error -> MapSet.new()
+      end
+
+    if spec_reaches_canonical?(canonical_body, target, write_root, source_paths(sources)) do
+      MapSet.union(existing_publics, spec_publics)
+    else
+      existing_publics
+    end
+  end
+
+  # The canonical module's body if it appears among the input sources,
+  # else nil. `*.Shared` modules are skipped by `extract_from_ast`, so we
+  # look them up here directly by name.
+  defp canonical_shared_body(target, sources) do
+    sources
+    |> Enum.find_value(fn {_path, source} ->
+      with {:ok, ast} <- Sourceror.parse_string(source),
+           {:ok, body_exprs} <- find_target_module_body(ast, target) do
+        body_exprs
+      else
+        _ -> nil
+      end
+    end)
+  end
+
+  defp canonical_public_keys(nil), do: MapSet.new()
+
+  defp canonical_public_keys(body_exprs) do
+    body_exprs
+    |> Enum.filter(&match?({:def, _, _}, &1))
+    |> Enum.map(&clause_name_arity/1)
+    |> Enum.reject(&match?({nil, _}, &1))
+    |> MapSet.new()
+  end
+
+  # Functions and helpers the spec contributes, all rendered as public
+  # `def` in the shared module (helpers are promoted on write).
+  defp spec_public_keys(spec) do
+    function_keys = spec.functions |> Enum.map(fn e -> {e.name, e.arity} end)
+    helper_keys = spec.helpers |> Enum.map(&clause_name_arity/1)
+
+    (function_keys ++ helper_keys)
+    |> Enum.reject(&match?({nil, _}, &1))
+    |> MapSet.new()
+  end
+
+  # nil canonical body → no pre-existing Shared in sources → a fresh
+  # module is written at the target path and *is* the canonical one, so
+  # the spec always reaches it. Otherwise the append only lands when the
+  # writer's path actually resolves to that same existing module.
+  defp spec_reaches_canonical?(nil, _target, _write_root, _source_paths), do: true
+
+  defp spec_reaches_canonical?(_canonical_body, target, write_root, source_paths) do
+    shared_module_path(target, write_root, source_paths)
+    |> read_existing_shared(target)
+    |> is_map()
   end
 
   defp do_closure(reached, _graph, []), do: reached

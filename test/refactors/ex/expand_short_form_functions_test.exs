@@ -600,6 +600,130 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctionsTest do
     end
   end
 
+  describe "regression: re-expansion loop on deliberately-truncated names (#15)" do
+    test "does not re-expand a short that is a contiguous prefix of a context word" do
+      # Regression #15: the heuristic latched `str` against the module
+      # name `Stream` and rewrote `defp str_token/1` to
+      # `stream_token/1`. But `str` is just the first three (contiguous)
+      # characters of `stream` — the author wrote a deliberately
+      # truncated leading word, not an abbreviation that drops internal
+      # letters (`cs → changeset`, `kw → keyword`). Auto-completing a
+      # prefix-truncation fights the author: every run re-expands it,
+      # and after the human renames it back the loop repeats. A short
+      # that is a contiguous prefix of its only-word heuristic expansion
+      # is too weak a signal — leave the compound name alone.
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule StreamView do
+          defp str_token(v), do: v
+
+          def go(v), do: str_token(v)
+        end
+        '''
+      )
+    end
+
+    test "the prefix-truncation name is stable across repeated runs" do
+      # The loop in #15 is observable as a fixpoint failure: applying
+      # the refactor must not keep flipping the name. Here the name is
+      # already the author's deliberate form, so once == twice == the
+      # original.
+      assert_idempotent(
+        @subject,
+        ~S'''
+        defmodule StreamView do
+          defp str_token(v), do: v
+
+          def go(v), do: str_token(v)
+        end
+        '''
+      )
+    end
+
+    test "still expands genuine abbreviations that are not prefixes of the expansion" do
+      # Guard against over-correcting: `cs` is NOT a prefix of
+      # `changeset` (it drops internal letters), so the alias-driven
+      # heuristic must still expand it. Only contiguous prefix-
+      # truncations are treated as deliberate.
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          alias Ecto.Changeset
+
+          defp fetch_cs(arg), do: arg
+
+          def go(x), do: fetch_cs(x)
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          alias Ecto.Changeset
+
+          defp fetch_changeset(arg), do: arg
+
+          def go(x), do: fetch_changeset(x)
+        end
+        '''
+      )
+    end
+  end
+
+  describe "macro shadowing via use" do
+    test "does not rename a defp to a name that shadows a use-injected macro" do
+      # Regression from #3: `defp t(content, kind \\ "<ID>")` in a module
+      # with `use ExUnit.Case` was renamed to `defp test/2`, shadowing
+      # `ExUnit.Case.test/2`. The test module then failed to compile:
+      # `cannot invoke def/2 inside function/macro`. The collision set
+      # for renames must include macros injected by `use`, not just the
+      # module's own def names.
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          use ExUnit.Case, async: true
+
+          defp t(content, kind \\ "<ID>"), do: %{kind: kind, content: content}
+
+          test "uses the helper" do
+            assert t("config") == %{kind: "<ID>", content: "config"}
+          end
+        end
+        ''',
+        known: %{"t" => "test"}
+      )
+    end
+
+    test "still renames when the long form is not a use-injected macro" do
+      # Same module shape, but the long form (`keyword`) is not injected
+      # by `use ExUnit.Case`. The guard must be specific to in-scope
+      # macros, not a blanket refusal for `use`-bearing modules.
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          use ExUnit.Case, async: true
+
+          defp fetch_kw(arg), do: arg
+
+          def go(x), do: fetch_kw(x)
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          use ExUnit.Case, async: true
+
+          defp fetch_keyword(arg), do: arg
+
+          def go(x), do: fetch_keyword(x)
+        end
+        ''',
+        known: %{"kw" => "keyword"}
+      )
+    end
+  end
+
   describe "idempotent" do
     test "running twice equals running once" do
       assert_idempotent(

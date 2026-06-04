@@ -55,7 +55,7 @@ defmodule Number42.Refactors.Ex.SortFunctions do
   unsortable node onwards starts a fresh region after the next
   function block.
 
-  ## Clauses keep relative order
+  ## Clauses keep relative order — and stay contiguous
 
   Multi-clause functions rely on top-to-bottom match order:
 
@@ -64,12 +64,39 @@ defmodule Number42.Refactors.Ex.SortFunctions do
       def to_int(_), do: -1
 
   Each clause is its own block. The sort key is
-  `{visibility, name, arity, original_line}` — when two blocks share
-  `{visibility, name, arity}` (i.e. they're clauses of the same
-  function), the source-line tie-breaker keeps them in their original
-  top-to-bottom order. A catch-all clause that sat above guard
-  clauses stays above them, even when the function's clauses are
-  split into non-adjacent groups elsewhere in the file.
+  `{heex_group, visibility, impl_group, name, arity, original_line}` —
+  when two blocks share `{name, arity}` (i.e. they're clauses of the
+  same function) every other tie-breaker is keyed by `{name, arity}`
+  too, so the only field that differs is `original_line`. That keeps
+  the clauses adjacent and in their original top-to-bottom order: a
+  catch-all clause that sat above guard clauses stays above them.
+
+  If a function's clauses are split across two sortable regions (an
+  unsortable node — a constant, a macro call — sits between them in the
+  source), reordering either region independently could wedge an
+  unrelated function between the clauses and trigger the compiler's
+  *"clauses with the same name and arity should be grouped together"*
+  warning. To uphold contiguity in that case we **refuse to reorder any
+  region that touches a split clause group** and leave the source order
+  intact. Doing nothing never makes contiguity worse.
+
+  ## Section comments are preserved
+
+  Divider comments such as `# --- GenServer callbacks ---` and any
+  other comment that sits directly above a function block are attached
+  by the parser as `:leading_comments` of the block's first node. The
+  block's source slice is extended upward to include them, so the
+  comment travels with the block it heads instead of being silently
+  deleted when the block moves.
+
+  ## Public API before behaviour callbacks
+
+  Within the public group, plain `def`s sort ahead of `@impl`-annotated
+  behaviour callbacks (`init`, `handle_call`, ...), mirroring the
+  common convention of listing a module's external surface first and
+  its callbacks below. The `@impl` grouping is keyed by `{name, arity}`
+  so a callback whose `@impl` only decorates its first clause keeps all
+  its clauses together. Private `defp`s always come last.
 
   ## HEEx-first ordering
 
@@ -159,10 +186,57 @@ defmodule Number42.Refactors.Ex.SortFunctions do
   defp apply_patches({:error, _}, source), do: source
 
   defp block_source({:fn_block, _, _, nodes}, source) do
-    first_range = nodes |> List.first() |> Sourceror.get_range()
+    first = nodes |> List.first()
     last_range = nodes |> List.last() |> Sourceror.get_range()
 
-    slice_range(source, first_range.start, last_range.end)
+    slice_range(source, block_start_pos(first), last_range.end)
+  end
+
+  # Effective start position of a block, extended upward to cover any
+  # *non-divider* comments Sourceror attached to the block's first node
+  # as `:leading_comments`. Per-function comments live in the gap above a
+  # node, outside its AST range — slicing from the bare range start drops
+  # them. We pull the start up so they travel with the block they
+  # annotate. Section dividers (`# --- callbacks ---`) are deliberately
+  # excluded: they anchor a section boundary (see `section_break?`) and
+  # must stay in source position rather than be dragged with a block.
+  defp block_start_pos(node) do
+    range = Sourceror.get_range(node)
+    node_line = range.start[:line]
+
+    case earliest_non_divider_comment_line(node) do
+      nil -> range.start
+      line when line < node_line -> [line: line, column: 1]
+      _ -> range.start
+    end
+  end
+
+  defp earliest_non_divider_comment_line(node) do
+    node
+    |> leading_comments()
+    |> Enum.reject(&section_divider?/1)
+    |> Enum.map(& &1.line)
+    |> Enum.min(fn -> nil end)
+  end
+
+  defp leading_comments(node) do
+    node
+    |> Sourceror.get_meta()
+    |> Keyword.get(:leading_comments, [])
+  end
+
+  # A divider comment marks a logical section (`# --- callbacks ---`,
+  # `# === public API ===`). We match a leading `#`, optional space, then
+  # 3+ of the usual ASCII rule characters. Such comments anchor a section
+  # boundary instead of decorating a single function.
+  @section_divider_re ~r/^#\s*[-=*~_]{3,}/
+  defp section_divider?(%{text: text}), do: Regex.match?(@section_divider_re, text)
+  defp section_divider?(_), do: false
+
+  # True when a node carries a section-divider comment in its leading
+  # comments — i.e. a new logical section starts at this node.
+  defp section_break?(node) do
+    node |> leading_comments() |> Enum.any?(&section_divider?/1)
   end
 
   defp build_patches(ast, source) do
@@ -171,26 +245,54 @@ defmodule Number42.Refactors.Ex.SortFunctions do
     |> Enum.flat_map(fn exprs ->
       intoed_block = group_into_blocks(exprs)
       heex_set = heex_function_set(intoed_block)
+      impl_set = impl_function_set(intoed_block)
+      regions = split_into_regions(intoed_block)
+      split_set = cross_region_split_set(regions)
 
-      intoed_block
-      |> split_into_regions()
-      |> Enum.flat_map(&region_patch(&1, source, heex_set))
+      regions
+      |> Enum.flat_map(&region_patch(&1, source, heex_set, impl_set, split_set))
     end)
+  end
+
+  # Names/arities whose clauses live in more than one sortable region.
+  # A region terminator (a constant, a macro call, ...) sat between two
+  # clauses of the same function in the source. Reordering either region
+  # independently can wedge an unrelated function between those clauses,
+  # producing the compiler's "clauses with the same name and arity should
+  # be grouped together" warning. We refuse to reorder any region that
+  # touches such a group — leaving the source order intact never makes
+  # contiguity worse and stays idempotent.
+  defp cross_region_split_set(regions) do
+    regions
+    |> Enum.flat_map(fn region ->
+      region
+      |> Enum.map(fn {:fn_block, name, arity, _} -> {name, arity} end)
+      |> Enum.uniq()
+    end)
+    |> Enum.frequencies()
+    |> Enum.flat_map(fn
+      {key, count} when count > 1 -> [key]
+      _ -> []
+    end)
+    |> MapSet.new()
   end
 
   defp build_replace_patch(original, sorted, source) do
     first_node = original |> List.first() |> first_node_of_block()
     last_node = original |> List.last() |> last_node_of_block()
 
-    first_range = Sourceror.get_range(first_node)
+    # Start the patch at the first block's effective start (above any
+    # leading divider comment), so the original comment lines are
+    # replaced by the re-stitched, comment-carrying slices rather than
+    # left behind and duplicated.
+    start_pos = block_start_pos(first_node)
     last_range = Sourceror.get_range(last_node)
 
     # Each block is rendered by stitching its original source slices
     # together — the slices already include their own attached
-    # attributes since those were collected into the block. Blocks
-    # are joined with a single newline + indent (dense format);
-    # `mix format` will normalize spacing as needed.
-    indent = leading_indent(source, first_range.start[:line])
+    # attributes and leading comments. Blocks are joined with a single
+    # newline + indent (dense format); `mix format` normalizes spacing.
+    indent = leading_indent(source, start_pos[:line])
 
     rendered =
       sorted
@@ -200,7 +302,7 @@ defmodule Number42.Refactors.Ex.SortFunctions do
 
     range = %{
       end: [line: last_range.end[:line], column: last_range.end[:column]],
-      start: [line: first_range.start[:line], column: first_range.start[:column]]
+      start: [line: start_pos[:line], column: start_pos[:column]]
     }
 
     Patch.new(range, rendered, false)
@@ -262,19 +364,41 @@ defmodule Number42.Refactors.Ex.SortFunctions do
   defp group_into_blocks(exprs) do
     exprs
     |> Enum.reduce({[], []}, fn node, {blocks, attr_buf} ->
-      case classify_node(node) do
-        {:def, name, arity} ->
-          add_def(node, name, arity, blocks, attr_buf)
-
-        :attached_attr ->
-          {blocks, [node | attr_buf]}
-
-        :other ->
-          flushed = flush_attrs_as_other(attr_buf, blocks)
-          {[{:other, node} | flushed], []}
-      end
+      {blocks, attr_buf}
+      |> maybe_open_section(node)
+      |> add_node(node)
     end)
     |> finalize_blocks()
+  end
+
+  # A node carrying a section-divider comment opens a new logical
+  # section. We flush any buffered attributes and inject a
+  # `:section_break` marker so `split_into_regions` treats the divider
+  # like any other region boundary — sorting happens within each section
+  # and the divider stays put in the source (it is never sliced into a
+  # block). Attributes can buffer above the divider node, so flush them
+  # first to keep the marker between the previous block and this one.
+  defp maybe_open_section({blocks, attr_buf}, node) do
+    if section_break?(node) do
+      flushed = flush_attrs_as_other(attr_buf, blocks)
+      {[:section_break | flushed], []}
+    else
+      {blocks, attr_buf}
+    end
+  end
+
+  defp add_node({blocks, attr_buf}, node) do
+    case classify_node(node) do
+      {:def, name, arity} ->
+        add_def(node, name, arity, blocks, attr_buf)
+
+      :attached_attr ->
+        {blocks, [node | attr_buf]}
+
+      :other ->
+        flushed = flush_attrs_as_other(attr_buf, blocks)
+        {[{:other, node} | flushed], []}
+    end
   end
 
   defp heex_function_set(blocks) do
@@ -288,6 +412,26 @@ defmodule Number42.Refactors.Ex.SortFunctions do
     end)
     |> MapSet.new()
   end
+
+  # `{name, arity}` of every function with an `@impl` attribute on any of
+  # its clauses. Keyed by name/arity (not per-block) so that a function
+  # whose `@impl` annotation only decorates its first clause still keeps
+  # all its clauses in the same group — splitting them would tear the
+  # function apart and break clause contiguity.
+  defp impl_function_set(blocks) do
+    blocks
+    |> Enum.flat_map(fn
+      {:fn_block, name, arity, nodes} ->
+        if nodes |> Enum.any?(&impl_attr?/1), do: [{name, arity}], else: []
+
+      _ ->
+        []
+    end)
+    |> MapSet.new()
+  end
+
+  defp impl_attr?({:@, _, [{:impl, _, _}]}), do: true
+  defp impl_attr?(_), do: false
 
   defp last_node_of_block({:fn_block, _, _, nodes}), do: List.last(nodes)
 
@@ -309,14 +453,25 @@ defmodule Number42.Refactors.Ex.SortFunctions do
   defp patch_or_passthrough([], source), do: source
   defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
 
-  defp region_patch(blocks, source, heex_set) do
-    sorted = blocks |> Enum.sort_by(&sort_key(&1, heex_set))
-
-    if sorted == blocks do
+  defp region_patch(blocks, source, heex_set, impl_set, split_set) do
+    if region_touches_split?(blocks, split_set) do
       []
     else
-      [build_replace_patch(blocks, sorted, source)]
+      sorted = blocks |> Enum.sort_by(&sort_key(&1, heex_set, impl_set))
+
+      if sorted == blocks do
+        []
+      else
+        [build_replace_patch(blocks, sorted, source)]
+      end
     end
+  end
+
+  defp region_touches_split?(blocks, split_set) do
+    blocks
+    |> Enum.any?(fn {:fn_block, name, arity, _} ->
+      MapSet.member?(split_set, {name, arity})
+    end)
   end
 
   defp slice_range(source, start_pos, end_pos) do
@@ -349,7 +504,7 @@ defmodule Number42.Refactors.Ex.SortFunctions do
     end
   end
 
-  defp sort_key({:fn_block, name, arity, nodes} = block, heex_set) do
+  defp sort_key({:fn_block, name, arity, nodes} = block, heex_set, impl_set) do
     visibility =
       case nodes |> Enum.find(&def_node?/1) do
         {:def, _, _} -> 0
@@ -359,7 +514,13 @@ defmodule Number42.Refactors.Ex.SortFunctions do
 
     heex_group = if MapSet.member?(heex_set, {name, arity}), do: 0, else: 1
 
-    {heex_group, visibility, Atom.to_string(name) |> String.downcase(), arity,
+    # Plain public API (0) sorts ahead of `@impl` behaviour callbacks (1)
+    # within the public group, mirroring the repo convention of listing a
+    # module's external surface first and its callbacks below. Keyed by
+    # name/arity so multi-clause functions never straddle the boundary.
+    impl_group = if MapSet.member?(impl_set, {name, arity}), do: 1, else: 0
+
+    {heex_group, visibility, impl_group, Atom.to_string(name) |> String.downcase(), arity,
      original_line(block)}
   end
 
@@ -374,10 +535,12 @@ defmodule Number42.Refactors.Ex.SortFunctions do
         {:fn_block, _, _, _} = b, acc ->
           {:cont, [b | acc]}
 
-        {:other, _}, [] ->
+        # Any non-fn_block marker (`{:other, _}` or `:section_break`)
+        # closes the current region. Reordering never crosses it.
+        _boundary, [] ->
           {:cont, []}
 
-        {:other, _}, acc ->
+        _boundary, acc ->
           {:cont, acc |> Enum.reverse(), []}
       end,
       fn
@@ -385,7 +548,7 @@ defmodule Number42.Refactors.Ex.SortFunctions do
         acc -> {:cont, acc |> Enum.reverse(), []}
       end
     )
-    |> Enum.filter(&(length(&1) >= 2))
+    |> Enum.reject(&(&1 == []))
   end
 
   defp start_line_or_zero(%{start: start}), do: start |> Keyword.fetch!(:line)

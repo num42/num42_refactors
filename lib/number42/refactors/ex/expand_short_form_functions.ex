@@ -51,7 +51,11 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
   - **No subtoken resolves.** The name is short but neither
     `@known` nor compound-resolve produces an expansion.
   - **Collision.** The expanded name already exists as another
-    function (any kind, any arity) in the same module.
+    function (any kind, any arity) in the same module, OR it is a
+    macro injected into the module by a `use` statement (e.g.
+    `use ExUnit.Case` exports `test/2`, `describe/2`). Renaming a
+    short helper onto such a name shadows the macro and breaks
+    compilation.
   - **Single-char subtokens.** `f(...)` etc. — no signal strong
     enough to expand without false positives.
 
@@ -121,6 +125,24 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
                 up
               )a)
 
+  # Callable names that `use <Module>` injects into the surrounding
+  # module. Renaming a short helper onto one of these shadows the
+  # macro (`defp test/2` shadows `ExUnit.Case.test/2`) and breaks
+  # compilation: the parser binds the later `test "..." do ... end`
+  # to the new local 2-arity function instead of the macro, and
+  # `Kernel.def/2`'s no-function-scope guard fires.
+  #
+  # Keyed on the full `use` alias path so we never refuse a rename
+  # in a module that doesn't actually `use` that framework. The
+  # table is intentionally conservative: only the well-known
+  # test/spec macros whose names fall in the short-helper expansion
+  # window are listed. Extend here when a new framework's injected
+  # callables collide with plausible long forms.
+  @use_injected_callables %{
+    [:ExUnit, :Case] => ~w(test describe setup setup_all)a,
+    [:ExUnit, :CaseTemplate] => ~w(test describe setup setup_all)a
+  }
+
   @impl Number42.Refactors.Refactor
   def transform(source, opts) do
     ctx = build_ctx(opts)
@@ -160,8 +182,13 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
         collect_import_compounds(body_exprs)
       )
 
-    {private_groups, occupied_names} = collect_private_def_groups(body_exprs)
+    {private_groups, def_names} = collect_private_def_groups(body_exprs)
     all_def_subtokens_by_name = collect_def_subtokens_by_name(body_exprs)
+
+    # A rename target is occupied if it's already a def in the module
+    # OR a macro injected by a `use` statement (`use ExUnit.Case` →
+    # `test`, `describe`, ...). Shadowing either breaks compilation.
+    occupied_names = MapSet.union(def_names, collect_use_injected_callables(body_exprs))
 
     resolutions =
       private_groups
@@ -270,6 +297,23 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
     |> Enum.reject(&(&1 == ""))
   end
 
+  # Macros pulled into the module by `use <Module>`. Looks each
+  # used module up in `@use_injected_callables` (keyed on the full
+  # alias path) and unions the injected callable names. Modules not
+  # in the table contribute nothing — the guard never widens beyond
+  # the frameworks we know inject short-helper-colliding macros.
+  defp collect_use_injected_callables(exprs) do
+    exprs
+    |> Enum.flat_map(fn
+      {:use, _, [{:__aliases__, _, parts} | _]} when is_list(parts) ->
+        Map.get(@use_injected_callables, parts, [])
+
+      _ ->
+        []
+    end)
+    |> MapSet.new()
+  end
+
   # Returns {private_groups, all_def_names_set}.
   # private_groups: %{{name, arity} => [def_node, ...]} for defp/defmacrop only.
   # all_def_names_set: every def name in the module (any kind, any arity)
@@ -374,6 +418,23 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
           expansion_overlaps_other_parts?(expansion, other_parts, part) ->
             {:halt, :skip}
 
+          # Prefix-truncation auto-complete (#15). The heuristic
+          # latched a short that is a *contiguous prefix* of a
+          # single-word expansion (`str` → `stream` off the module
+          # name `Stream`). That's not decoding an abbreviation
+          # (`cs → changeset`, `kw → keyword` drop internal letters)
+          # — it just lengthens a word the author already started
+          # typing. Treating it as an expansion fights the author:
+          # the rename re-fires on every run, and once a human
+          # renames `stream_token` back to the deliberate
+          # `str_token`, the loop repeats. A short that the author
+          # wrote as a leading truncation is part of a full,
+          # deliberate name — keep it verbatim. Explicit `known`
+          # mappings stay authoritative; this gate only tempers the
+          # heuristic guess.
+          heuristic_prefix_truncation?(part, expansion, resolve_opts) ->
+            {:cont, [part | acc]}
+
           true ->
             {:cont, [expansion | acc]}
         end
@@ -414,6 +475,20 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
     expansion
     |> String.split("_", trim: true)
     |> Enum.any?(&MapSet.member?(siblings, &1))
+  end
+
+  # True when the heuristic merely auto-completed a leading truncation:
+  # `short` is a contiguous prefix of a single-word `expansion`
+  # (`str` of `stream`). Genuine abbreviations (`cs`, `kw`, `bi`) are
+  # NOT prefixes — they drop internal letters or span words — so they
+  # pass through and still expand. An explicit project `known` mapping
+  # for `short` overrides this: the user asked for it, so we never
+  # second-guess it.
+  defp heuristic_prefix_truncation?(short, expansion, resolve_opts) do
+    not Map.has_key?(resolve_opts.known, short) and
+      not String.contains?(expansion, "_") and
+      short != expansion and
+      String.starts_with?(expansion, short)
   end
 
   # Walk the entire module body, patching every reference to a

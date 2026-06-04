@@ -5,14 +5,23 @@ defmodule Number42.Refactors.Ex.MapNewLambdaToForComprehensionTest do
 
   @subject MapNewLambdaToForComprehension
 
-  describe "rewrites — bare call form" do
-    test "Map.new(coll, fn x -> {k, v} end) -> for x <- coll do {k, v} end |> Map.new()" do
+  describe "rewrites — bare call form, multi-line tuple body" do
+    # Threshold (see issue #16): the bare/simple-pipe expansion only fires
+    # when the lambda's tuple body spans ≥ 2 source lines. A multi-line
+    # body is where the comprehension head earns its keep — there's already
+    # vertical real estate, so the `for`/`|> Map.new()` shape adds no tax
+    # while gaining a place to hang filters and local bindings.
+
+    test "Map.new(coll, fn x -> {\\n  k,\\n  v\\n} end) -> for x <- coll do … end |> Map.new()" do
       assert_rewrites(
         @subject,
         """
         defmodule M do
           def go(rows) do
-            Map.new(rows, fn r -> {r.id, r} end)
+            Map.new(rows, fn r ->
+              {compute_key(r),
+               compute_value(r)}
+            end)
           end
         end
         """,
@@ -20,7 +29,7 @@ defmodule Number42.Refactors.Ex.MapNewLambdaToForComprehensionTest do
         defmodule M do
           def go(rows) do
             for r <- rows do
-              {r.id, r}
+              {compute_key(r), compute_value(r)}
             end
             |> Map.new()
           end
@@ -35,7 +44,10 @@ defmodule Number42.Refactors.Ex.MapNewLambdaToForComprehensionTest do
         """
         defmodule M do
           def go(attrs) do
-            Map.new(attrs, fn {k, v} -> {to_string(k), v} end)
+            Map.new(attrs, fn {k, v} ->
+              {to_string(k),
+               normalize(v)}
+            end)
           end
         end
         """,
@@ -43,7 +55,7 @@ defmodule Number42.Refactors.Ex.MapNewLambdaToForComprehensionTest do
         defmodule M do
           def go(attrs) do
             for {k, v} <- attrs do
-              {to_string(k), v}
+              {to_string(k), normalize(v)}
             end
             |> Map.new()
           end
@@ -52,88 +64,24 @@ defmodule Number42.Refactors.Ex.MapNewLambdaToForComprehensionTest do
       )
     end
 
-    test "tuple body with computed key/value expressions" do
-      assert_rewrites(
-        @subject,
-        """
-        defmodule M do
-          def go(items) do
-            Map.new(items, fn i -> {i.id, i.value || 0} end)
-          end
-        end
-        """,
-        """
-        defmodule M do
-          def go(items) do
-            for i <- items do
-              {i.id, i.value || 0}
-            end
-            |> Map.new()
-          end
-        end
-        """
-      )
-    end
-
-    test "nested map-literal value is preserved" do
-      assert_rewrites(
-        @subject,
-        """
-        defmodule M do
-          def go(items) do
-            Map.new(items, fn i -> {i.id, %{a: i.a, b: i.b}} end)
-          end
-        end
-        """,
-        """
-        defmodule M do
-          def go(items) do
-            for i <- items do
-              {i.id, %{a: i.a, b: i.b}}
-            end
-            |> Map.new()
-          end
-        end
-        """
-      )
-    end
-
-    test "function-call key expression is preserved" do
-      # Earlier tests cover computed values; this pins computed keys.
-      assert_rewrites(
-        @subject,
-        """
-        defmodule M do
-          def go(items) do
-            Map.new(items, fn i -> {hash(i), i} end)
-          end
-        end
-        """,
-        """
-        defmodule M do
-          def go(items) do
-            for i <- items do
-              {hash(i), i}
-            end
-            |> Map.new()
-          end
-        end
-        """
-      )
-    end
-
-    test "two Map.new callsites in one module — both are rewritten" do
+    test "two multi-line Map.new callsites in one module — both are rewritten" do
       # Guards against `rewrite-only-the-first-hit` walker bugs.
       assert_rewrites(
         @subject,
         """
         defmodule M do
           def one(rows) do
-            Map.new(rows, fn r -> {r.id, r} end)
+            Map.new(rows, fn r ->
+              {r.id,
+               r}
+            end)
           end
 
           def two(items) do
-            Map.new(items, fn i -> {i.id, i.name} end)
+            Map.new(items, fn i ->
+              {i.id,
+               i.name}
+            end)
           end
         end
         """,
@@ -158,14 +106,18 @@ defmodule Number42.Refactors.Ex.MapNewLambdaToForComprehensionTest do
     end
   end
 
-  describe "rewrites — pipe form" do
-    test "coll |> Map.new(fn x -> {k, v} end) -> for + |> Map.new()" do
+  describe "rewrites — pipe form, multi-line tuple body" do
+    test "coll |> Map.new(fn x -> {\\n…\\n} end) -> for + |> Map.new()" do
       assert_rewrites(
         @subject,
         """
         defmodule M do
           def go(rows) do
-            rows |> Map.new(fn r -> {r.id, r} end)
+            rows
+            |> Map.new(fn r ->
+              {r.id,
+               build(r)}
+            end)
           end
         end
         """,
@@ -173,7 +125,7 @@ defmodule Number42.Refactors.Ex.MapNewLambdaToForComprehensionTest do
         defmodule M do
           def go(rows) do
             for r <- rows do
-              {r.id, r}
+              {r.id, build(r)}
             end
             |> Map.new()
           end
@@ -181,28 +133,51 @@ defmodule Number42.Refactors.Ex.MapNewLambdaToForComprehensionTest do
         """
       )
     end
+  end
 
-    test "pipe form with destructuring lambda arg" do
-      assert_rewrites(
-        @subject,
-        """
-        defmodule M do
-          def go(pairs) do
-            pairs |> Map.new(fn {k, v} -> {to_string(k), v} end)
-          end
+  describe "leaves alone — single-line tuple body (threshold, issue #16)" do
+    # The verbosity-tax case: a one-line `Map.new(coll, fn x -> {k, v} end)`
+    # carries no composability that's being used, so expanding it to a
+    # 3-line `for`/`|> Map.new()` block is pure cost. Leave it.
+
+    test "bare form: Map.new(counts, fn {k, v} -> {to_string(k), v} end)" do
+      assert_unchanged(@subject, """
+      defmodule M do
+        def go(counts) do
+          Map.new(counts, fn {k, v} -> {to_string(k), v} end)
         end
-        """,
-        """
-        defmodule M do
-          def go(pairs) do
-            for {k, v} <- pairs do
-              {to_string(k), v}
-            end
-            |> Map.new()
-          end
+      end
+      """)
+    end
+
+    test "bare form: simple key/value tuple" do
+      assert_unchanged(@subject, """
+      defmodule M do
+        def go(rows) do
+          Map.new(rows, fn r -> {r.id, r} end)
         end
-        """
-      )
+      end
+      """)
+    end
+
+    test "bare form: computed value still single-line stays" do
+      assert_unchanged(@subject, """
+      defmodule M do
+        def go(items) do
+          Map.new(items, fn i -> {i.id, i.value || 0} end)
+        end
+      end
+      """)
+    end
+
+    test "pipe form: single-line tuple body stays" do
+      assert_unchanged(@subject, """
+      defmodule M do
+        def go(rows) do
+          rows |> Map.new(fn r -> {r.id, r} end)
+        end
+      end
+      """)
     end
   end
 
@@ -568,7 +543,8 @@ defmodule Number42.Refactors.Ex.MapNewLambdaToForComprehensionTest do
       # the refactor WILL rewrite this — alias-resolution is out of
       # scope. If this ever becomes a real problem, the AST walker
       # would need module-level alias resolution (see ResolveImplTrue).
-      # For now, this test pins the known limitation.
+      # The body is multi-line so the threshold doesn't mask the
+      # over-reach this test is meant to pin.
       assert_rewrites(
         @subject,
         """
@@ -576,7 +552,10 @@ defmodule Number42.Refactors.Ex.MapNewLambdaToForComprehensionTest do
           alias SomeLib.Map
 
           def go(coll) do
-            Map.new(coll, fn x -> {x.k, x.v} end)
+            Map.new(coll, fn x ->
+              {x.k,
+               x.v}
+            end)
           end
         end
         """,
@@ -613,19 +592,40 @@ defmodule Number42.Refactors.Ex.MapNewLambdaToForComprehensionTest do
   end
 
   describe "leaves alone — nested Map.new" do
-    test "outer Map.new with multi-statement body is left alone; inner conformant Map.new is too" do
-      # The outer Map.new has a multi-statement lambda body, so it
-      # skips. The inner Map.new IS a valid match — but it's nested
-      # inside the outer lambda's body. This test pins traversal
-      # behaviour: we rewrite every match independently, regardless
-      # of whether an ancestor was skipped.
+    test "inner single-line Map.new is below the threshold — no asymmetric expansion (issue #16)" do
+      # Issue #16's worst case: the outer Map.new has a multi-statement
+      # lambda body (always skipped — not a bare tuple), and the inner
+      # Map.new used to be expanded on its own, producing a confusing
+      # asymmetric mix. With the single-line threshold the inner one is
+      # also left alone, so the whole expression stays put.
+      assert_unchanged(@subject, """
+      defmodule M do
+        def go(groups) do
+          Map.new(groups, fn g ->
+            values = Map.new(g.items, fn i -> {i.id, i.value} end)
+            {g.id, values}
+          end)
+        end
+      end
+      """)
+    end
+
+    test "inner multi-line Map.new is still expanded; outer multi-statement body stays" do
+      # When the inner lambda's tuple body itself spans multiple lines,
+      # the inner one IS over the threshold and rewrites — the outer
+      # (multi-statement body) is still left alone, as always.
       assert_rewrites(
         @subject,
         """
         defmodule M do
           def go(groups) do
             Map.new(groups, fn g ->
-              values = Map.new(g.items, fn i -> {i.id, i.value} end)
+              values =
+                Map.new(g.items, fn i ->
+                  {i.id,
+                   i.value}
+                end)
+
               {g.id, values}
             end)
           end
@@ -680,7 +680,7 @@ defmodule Number42.Refactors.Ex.MapNewLambdaToForComprehensionTest do
   end
 
   describe "idempotent" do
-    test "bare-form rewrite is idempotent" do
+    test "single-line bare form (now a no-op) is idempotent" do
       assert_idempotent(@subject, """
       defmodule M do
         def go(rows), do: Map.new(rows, fn r -> {r.id, r} end)
@@ -688,10 +688,29 @@ defmodule Number42.Refactors.Ex.MapNewLambdaToForComprehensionTest do
       """)
     end
 
-    test "pipe-form rewrite is idempotent" do
+    test "multi-line bare-form rewrite is idempotent" do
       assert_idempotent(@subject, """
       defmodule M do
-        def go(rows), do: rows |> Map.new(fn r -> {r.id, r} end)
+        def go(rows) do
+          Map.new(rows, fn r ->
+            {r.id,
+             r}
+          end)
+        end
+      end
+      """)
+    end
+
+    test "multi-line pipe-form rewrite is idempotent" do
+      assert_idempotent(@subject, """
+      defmodule M do
+        def go(rows) do
+          rows
+          |> Map.new(fn r ->
+            {r.id,
+             r}
+          end)
+        end
       end
       """)
     end
@@ -706,7 +725,10 @@ defmodule Number42.Refactors.Ex.MapNewLambdaToForComprehensionTest do
       defmodule M do
         def go(rows) do
           # build id->row index
-          Map.new(rows, fn r -> {r.id, r} end)
+          Map.new(rows, fn r ->
+            {r.id,
+             r}
+          end)
         end
       end
       """

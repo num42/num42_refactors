@@ -948,4 +948,259 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone.CrossFileTest do
       assert shared_src =~ "defmodule CodeQA.AST.Nodes.Shared"
     end
   end
+
+  describe "lexically-scoped macros in clone body" do
+    # `__MODULE__` resolves against the lexical module. When a cross-file
+    # clone body uses it, the helper is lifted into a `*.Shared` module
+    # where `__MODULE__` would rebind to the struct-less shared module.
+    # So the cross-file emitter parametrises it: the module is threaded
+    # in as a first argument, `%__MODULE__{...}` becomes
+    # `struct!(module, ...)`, and each caller passes its own
+    # `__MODULE__`. `__ENV__`/`__CALLER__`/`__DIR__`/`__STACKTRACE__`
+    # have no runtime value to pass, so a clone body using one is still
+    # skipped.
+
+    defp assert_compiles!(src, label) do
+      mods = Code.compile_string(src)
+      Enum.each(mods, fn {mod, _bin} -> :code.purge(mod) and :code.delete(mod) end)
+      :ok
+    rescue
+      e ->
+        flunk("#{label} did not compile:\n#{src}\n\n#{Exception.message(e)}")
+    end
+
+    test "six `%__MODULE__{}` struct clones → struct!/2 helper that compiles", %{tmp: tmp} do
+      # Issue #5 repro: six modules with an identical `cast/1` building
+      # `%__MODULE__{}`. Extracting verbatim into a `*.Shared` module
+      # rebinds `__MODULE__` to the struct-less Shared module and fails
+      # to compile. Option A: parametrise the module — emit
+      # `cast_shared(module, node) -> struct!(module, ...)` and have each
+      # caller pass `__MODULE__`.
+      mk = fn name ->
+        """
+        defmodule CodeQA.AST.Nodes.#{name} do
+          alias CodeQA.AST.Enrichment.Node
+          defstruct [:tokens, :line_count, :children, :start_line, :end_line, :label]
+
+          def cast(%Node{} = node) do
+            %__MODULE__{
+              tokens: node.tokens,
+              line_count: node.line_count,
+              children: node.children,
+              start_line: node.start_line,
+              end_line: node.end_line,
+              label: node.label
+            }
+          end
+        end
+        """
+      end
+
+      names = ~w(CodeNode DocNode FunctionNode ImportNode ModuleNode TestNode)
+
+      sources =
+        names
+        |> Enum.map(fn n ->
+          p = Path.join(tmp, "lib/codeqa/ast/nodes/#{Macro.underscore(n)}.ex")
+          src = mk.(n)
+          File.mkdir_p!(Path.dirname(p))
+          File.write!(p, src)
+          {p, src}
+        end)
+
+      plan = prepared(sources, write_root: tmp)
+
+      [shared] = Path.wildcard(Path.join(tmp, "**/shared.ex"))
+      shared_src = File.read!(shared)
+
+      # struct!/2 with the module as the first parameter, no bare
+      # `%__MODULE__{}` left to rebind.
+      assert shared_src =~ "struct!(module"
+      refute shared_src =~ "%__MODULE__"
+
+      # The lifted Shared module compiles — the original bug is gone.
+      assert_compiles!(shared_src, "Shared module")
+
+      # Every caller passes its own `__MODULE__` and imports arity 2.
+      Enum.each(sources, fn {_p, src} ->
+        out = apply_refactor(@subject, src, prepared: plan)
+        assert out =~ "cast_shared(__MODULE__, node)"
+        assert out =~ "cast_shared: 2"
+      end)
+    end
+
+    test "bare `__MODULE__` (non-struct) cross-file clone → module var, compiles", %{tmp: tmp} do
+      # `__MODULE__` outside a struct literal is parametrised the same
+      # way: the bare reference becomes the threaded-in module var.
+      mk = fn name ->
+        """
+        defmodule MyApp.Reg.#{name} do
+          def reg(x) do
+            {__MODULE__, :tag, to_string(x), String.upcase(to_string(x))}
+          end
+        end
+        """
+      end
+
+      sources =
+        ~w(Foo Bar)
+        |> Enum.map(fn n ->
+          p = Path.join(tmp, "lib/my_app/reg/#{Macro.underscore(n)}.ex")
+          src = mk.(n)
+          File.mkdir_p!(Path.dirname(p))
+          File.write!(p, src)
+          {p, src}
+        end)
+
+      plan = prepared(sources, min_mass: 4, write_root: tmp)
+
+      [shared] = Path.wildcard(Path.join(tmp, "**/shared.ex"))
+      shared_src = File.read!(shared)
+
+      # The helper takes the module first and uses it in the tuple;
+      # no bare `__MODULE__` survives in the lifted body.
+      assert shared_src =~ "reg_shared(module"
+      refute shared_src =~ "__MODULE__"
+      assert_compiles!(shared_src, "Shared module (bare __MODULE__)")
+
+      Enum.each(sources, fn {_p, src} ->
+        out = apply_refactor(@subject, src, prepared: plan)
+        assert out =~ "reg_shared(__MODULE__"
+      end)
+    end
+
+    test "`__ENV__` in clone body → group skipped", %{tmp: tmp} do
+      mk = fn name ->
+        """
+        defmodule MyApp.Items.#{name} do
+          def trace(x) do
+            mod = __ENV__.module
+            {mod, "tag", to_string(x), String.upcase(to_string(x))}
+          end
+        end
+        """
+      end
+
+      sources =
+        ~w(Foo Bar)
+        |> Enum.map(fn n ->
+          p = Path.join(tmp, "lib/my_app/items/#{Macro.underscore(n)}.ex")
+          src = mk.(n)
+          File.mkdir_p!(Path.dirname(p))
+          File.write!(p, src)
+          {p, src}
+        end)
+
+      _plan = prepared(sources, min_mass: 4, write_root: tmp)
+
+      refute File.exists?(Path.join(tmp, "lib/my_app/items/shared.ex")),
+             "expected no Shared module when clone body uses `__ENV__`"
+    end
+
+    test "`__CALLER__` in clone body → group skipped", %{tmp: tmp} do
+      mk = fn name ->
+        """
+        defmodule MyApp.Items.#{name} do
+          defmacro emit(x) do
+            caller = __CALLER__.module
+            quote do
+              {unquote(caller), unquote(x), "lit", to_string(unquote(x))}
+            end
+          end
+        end
+        """
+      end
+
+      sources =
+        ~w(Foo Bar)
+        |> Enum.map(fn n ->
+          p = Path.join(tmp, "lib/my_app/items/#{Macro.underscore(n)}.ex")
+          src = mk.(n)
+          File.mkdir_p!(Path.dirname(p))
+          File.write!(p, src)
+          {p, src}
+        end)
+
+      _plan = prepared(sources, min_mass: 4, write_root: tmp)
+
+      refute File.exists?(Path.join(tmp, "lib/my_app/items/shared.ex")),
+             "expected no Shared module when clone body uses `__CALLER__`"
+    end
+
+    test "a shared `__MODULE__` helper is itself parametrised and compiles", %{tmp: tmp} do
+      # A `defp` that two modules share and that uses `__MODULE__` is a
+      # clone in its own right: the differing literal becomes an ordinary
+      # hole and `__MODULE__` becomes the threaded-in module var. The
+      # lifted Shared helper therefore compiles — `__MODULE__` is never
+      # left bare in the shared module.
+      mk = fn name, tag ->
+        """
+        defmodule MyApp.Wrap.#{name} do
+          def emit(x), do: wrap(x)
+
+          defp wrap(x) do
+            {__MODULE__, #{inspect(tag)}, to_string(x), String.upcase(to_string(x))}
+          end
+        end
+        """
+      end
+
+      sources =
+        [{"Foo", "foo_tag"}, {"Bar", "bar_tag"}]
+        |> Enum.map(fn {n, tag} ->
+          p = Path.join(tmp, "lib/my_app/wrap/#{Macro.underscore(n)}.ex")
+          src = mk.(n, tag)
+          File.mkdir_p!(Path.dirname(p))
+          File.write!(p, src)
+          {p, src}
+        end)
+
+      _plan = prepared(sources, min_mass: 4, write_root: tmp)
+
+      [shared] = Path.wildcard(Path.join(tmp, "**/shared.ex"))
+      shared_src = File.read!(shared)
+
+      assert shared_src =~ "module"
+      refute shared_src =~ "__MODULE__"
+      assert_compiles!(shared_src, "Shared helper with __MODULE__")
+    end
+
+    test "ordinary clone (no lexical macros) still extracts and Shared compiles", %{tmp: tmp} do
+      # Guard against an over-broad skip: a body with no lexical macro
+      # must still be extracted, and the emitted Shared module must
+      # compile.
+      a = """
+      defmodule MyApp.Items.Foo do
+        def emit(t) do
+          "until " <> to_string(t)
+        end
+      end
+      """
+
+      b = """
+      defmodule MyApp.Items.Bar do
+        def emit(t) do
+          "ago " <> to_string(t)
+        end
+      end
+      """
+
+      sources = [
+        {Path.join(tmp, "lib/my_app/items/foo.ex"), a},
+        {Path.join(tmp, "lib/my_app/items/bar.ex"), b}
+      ]
+
+      Enum.each(sources, fn {p, src} ->
+        File.mkdir_p!(Path.dirname(p))
+        File.write!(p, src)
+      end)
+
+      _plan = prepared(sources, min_mass: 4, write_root: tmp)
+
+      shared_path = Path.join(tmp, "lib/my_app/items/shared.ex")
+      assert File.exists?(shared_path), "expected Shared module for ordinary clones"
+
+      assert_compiles!(File.read!(shared_path), "shared module")
+    end
+  end
 end
