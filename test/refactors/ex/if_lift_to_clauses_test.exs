@@ -906,6 +906,153 @@ defmodule Number42.Refactors.Ex.IfLiftToClausesTest do
     end
   end
 
+  describe "default arguments (\\\\) — emit a header clause" do
+    test "single trailing default → header clause + two impl clauses without default" do
+      before_source = ~S"""
+      defmodule M do
+        def f(x, opts \\ []) do
+          if is_atom(x) do
+            {:atom, opts}
+          else
+            {:other, opts}
+          end
+        end
+      end
+      """
+
+      expected = ~S"""
+      defmodule M do
+        def f(x, opts \\ [])
+        def f(x, opts) when is_atom(x), do: {:atom, opts}
+        def f(_x, opts), do: {:other, opts}
+      end
+      """
+
+      assert_rewrites(@subject, before_source, expected)
+    end
+
+    test "default unused in either branch → header keeps default, impl clauses underscore it" do
+      before_source = ~S"""
+      defmodule M do
+        def f(x, opts \\ []) do
+          if is_atom(x) do
+            :atom
+          else
+            :other
+          end
+        end
+      end
+      """
+
+      expected = ~S"""
+      defmodule M do
+        def f(x, opts \\ [])
+        def f(x, _opts) when is_atom(x), do: :atom
+        def f(_, _), do: :other
+      end
+      """
+
+      assert_rewrites(@subject, before_source, expected)
+    end
+
+    test "multiple defaults at arbitrary positions (issue #7 repro)" do
+      before_source = ~S"""
+      defmodule M do
+        def overall_score(category_grades, scale \\ default_scale(), impact_map \\ %{}) do
+          if category_grades == [] do
+            {0, "F"}
+          else
+            score = compute(category_grades, impact_map)
+            {score, grade_letter(score, scale)}
+          end
+        end
+      end
+      """
+
+      expected = ~S"""
+      defmodule M do
+        def overall_score(category_grades, scale \\ default_scale(), impact_map \\ %{})
+
+        def overall_score([], _scale, _impact_map), do: {0, "F"}
+
+        def overall_score(category_grades, scale, impact_map) do
+          score = compute(category_grades, impact_map)
+          {score, grade_letter(score, scale)}
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, expected)
+    end
+
+    test "output actually compiles (the core bug — defaults declared once)" do
+      before_source = ~S"""
+      defmodule CompileCheckOne do
+        def overall_score(category_grades, scale \\ [], impact_map \\ %{}) do
+          if category_grades == [] do
+            {0, "F"}
+          else
+            score = round(length(category_grades) / map_size(impact_map))
+            {score, hd(scale)}
+          end
+        end
+      end
+      """
+
+      out = apply_refactor(@subject, before_source)
+
+      assert_compiles(out)
+    end
+
+    test "output compiles when a default sits before a non-default param" do
+      before_source = ~S"""
+      defmodule CompileCheckTwo do
+        def g(opts \\ [], x) do
+          if is_atom(x) do
+            {:atom, opts}
+          else
+            {:other, opts}
+          end
+        end
+      end
+      """
+
+      out = apply_refactor(@subject, before_source)
+
+      assert_compiles(out)
+    end
+  end
+
+  describe "default arguments — idempotent" do
+    test "header clause + impl clauses pass through unchanged" do
+      source = ~S"""
+      defmodule M do
+        def f(x, opts \\ [])
+        def f(x, opts) when is_atom(x), do: {:atom, opts}
+        def f(x, opts), do: {:other, opts}
+      end
+      """
+
+      assert_idempotent(@subject, source)
+    end
+
+    test "lift-then-relift on a defaulted function stays stable" do
+      source = ~S"""
+      defmodule M do
+        def f(x, opts \\ []) do
+          if is_atom(x) do
+            {:atom, opts}
+          else
+            {:other, opts}
+          end
+        end
+      end
+      """
+
+      assert_idempotent(@subject, source)
+    end
+  end
+
   describe "idempotent" do
     test "is_* guard lift" do
       source = """
