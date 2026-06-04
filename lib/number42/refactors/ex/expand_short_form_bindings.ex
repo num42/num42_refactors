@@ -408,60 +408,44 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
     # compound-context heuristic.
     from_schema_signals = resolve_via_from_schemas(body, short_names_set)
 
-    # Resolve: short-name → long-name (atom) per binding.
+    # Resolve: short-name → *ranked* long-name candidates per binding.
     # Priority: from-schema > call-site > RHS/compound heuristics.
-    # `:conflict` at a higher tier short-circuits to `:skip` instead
-    # of falling through to weaker signals — disagreement is itself
-    # information, not absence.
-    resolutions =
+    # `:conflict` at a higher tier short-circuits to `[]` instead of
+    # falling through to weaker signals — disagreement is itself
+    # information, not absence. The from-schema / call-site signals are
+    # single-valued (`[long]`); only the heuristic tier produces a
+    # multi-element ranking, used as fallback when the first choice
+    # collides with another binding in the same scope (see
+    # `assign_long_forms/3`).
+    ranked =
       short_bindings
       |> Enum.reject(fn {name, _node, _rhs} -> MapSet.member?(rebound, name) end)
-      |> Enum.flat_map(fn {name, _node, rhs} ->
-        result =
-          case Map.fetch(from_schema_signals, name) do
-            {:ok, {:ok, long}} ->
-              {:ok, long}
-
-            {:ok, :conflict} ->
-              :skip
-
-            :error ->
-              case Map.fetch(call_site_signals, name) do
-                {:ok, {:ok, long}} ->
-                  {:ok, long}
-
-                {:ok, :conflict} ->
-                  :skip
-
-                :error ->
-                  resolve_long(
-                    name,
-                    rhs,
-                    context_candidates,
-                    context_compounds,
-                    fn_compound,
-                    context_compound
-                  )
-              end
-          end
-
-        case result do
-          {:ok, long} ->
-            long_atom = String.to_atom(long)
-
-            cond do
-              MapSet.member?(occupied, long_atom) -> []
-              MapSet.member?(called_in_body, long_atom) -> []
-              cryptic_target?(long, context_compound) -> []
-              true -> [{name, long_atom}]
-            end
-
-          :skip ->
-            []
-        end
+      |> Enum.map(fn {name, _node, rhs} ->
+        {name,
+         ranked_long_forms(
+           name,
+           rhs,
+           from_schema_signals,
+           call_site_signals,
+           context_candidates,
+           context_compounds,
+           fn_compound,
+           context_compound
+         )}
       end)
-      |> Map.new()
-      |> drop_long_form_collisions()
+
+    # Assign in source order, resolving same-scope collisions by walking
+    # each later binding's own ranking for the next free expansion. A
+    # `gate` rejects targets that would shadow an existing binding/call
+    # or that are still cryptic — applied to *every* candidate tried,
+    # not just the first.
+    gate = fn long_atom ->
+      not MapSet.member?(occupied, long_atom) and
+        not MapSet.member?(called_in_body, long_atom) and
+        not cryptic_target?(Atom.to_string(long_atom), context_compound)
+    end
+
+    resolutions = assign_long_forms(ranked, gate, context_compound)
 
     # Pre-shadow references: in `x = ...x...` the `x` on the RHS is a
     # reference to the OUTER (pre-shadow) binding of `x` — typically a
@@ -503,31 +487,110 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
     |> Enum.reject(&is_nil/1)
   end
 
-  # Symmetric `:conflict` collapse, on the other axis. The per-name
-  # resolvers already refuse to rename when ONE short name has
-  # disagreeing long-form observations. This catches the mirror case:
-  # MULTIPLE DISTINCT short names in the same clause that independently
-  # resolve to the SAME long form. Renaming each in isolation would
-  # produce two `value = ...` lines in one scope — the second `=`
-  # shadows the first, so every later reference to the first short
-  # silently picks up the second's value (issue #2: `head_val -
-  # base_val` → `value - value == 0`).
-  #
-  # Group the resolved `%{short => long}` map by long form and drop
-  # every group whose cardinality is > 1. The pre-existing "long form
-  # already a name in scope" guard covers bindings that exist *before*
-  # this pass; this covers the bindings the pass is about to create.
-  defp drop_long_form_collisions(resolutions) do
-    colliding_longs =
-      resolutions
-      |> Enum.frequencies_by(fn {_short, long} -> long end)
-      |> Enum.filter(fn {_long, count} -> count > 1 end)
-      |> Enum.map(fn {long, _count} -> long end)
-      |> MapSet.new()
+  # Ranked long-form candidates for one short binding, best-first, as
+  # strings. Tier priority is unchanged (from-schema > call-site >
+  # heuristic); the first two tiers are single-valued, so only the
+  # heuristic tier (`resolve_ranked`) yields a multi-element ranking.
+  # `:conflict` at a higher tier returns `[]` — disagreement suppresses
+  # the rename rather than falling through to weaker signals.
+  defp ranked_long_forms(
+         name,
+         rhs,
+         from_schema_signals,
+         call_site_signals,
+         context_candidates,
+         context_compounds,
+         fn_compound,
+         context_compound
+       ) do
+    case Map.fetch(from_schema_signals, name) do
+      {:ok, {:ok, long}} ->
+        [long]
 
-    resolutions
-    |> Enum.reject(fn {_short, long} -> MapSet.member?(colliding_longs, long) end)
-    |> Map.new()
+      {:ok, :conflict} ->
+        []
+
+      :error ->
+        case Map.fetch(call_site_signals, name) do
+          {:ok, {:ok, long}} ->
+            [long]
+
+          {:ok, :conflict} ->
+            []
+
+          :error ->
+            resolve_long_ranked(
+              name,
+              rhs,
+              context_candidates,
+              context_compounds,
+              fn_compound,
+              context_compound
+            )
+        end
+    end
+  end
+
+  # Assign each short binding a long form, in source order, so that no
+  # two bindings in the same scope collapse to the same name. The first
+  # binding to want a given long form keeps it; every later binding
+  # walks its OWN ranking for the next candidate the `gate` accepts and
+  # that isn't already `taken`. Only when the whole ranking is
+  # exhausted do we fall back to a `<long>_2` suffix — and that only
+  # when the original short is itself cryptic (an expressive short like
+  # `base_val` is left untouched rather than disfigured into
+  # `value_2`). Returns `%{short_atom => long_atom}`.
+  defp assign_long_forms(ranked, gate, context_compound) do
+    {assignments, _taken} =
+      Enum.reduce(ranked, {[], MapSet.new()}, fn {name, longs}, {acc, taken} ->
+        case pick_free_long(longs, gate, taken) do
+          {:ok, long_atom} ->
+            {[{name, long_atom} | acc], MapSet.put(taken, long_atom)}
+
+          :exhausted ->
+            case suffix_fallback(longs, gate, taken, name, context_compound) do
+              {:ok, long_atom} -> {[{name, long_atom} | acc], MapSet.put(taken, long_atom)}
+              :skip -> {acc, taken}
+            end
+        end
+      end)
+
+    Map.new(assignments)
+  end
+
+  # First long form in the ranking that passes the gate and is not yet
+  # taken. `:exhausted` when none qualifies.
+  defp pick_free_long(longs, gate, taken) do
+    longs
+    |> Enum.map(&String.to_atom/1)
+    |> Enum.find(fn long_atom -> gate.(long_atom) and not MapSet.member?(taken, long_atom) end)
+    |> case do
+      nil -> :exhausted
+      long_atom -> {:ok, long_atom}
+    end
+  end
+
+  # All ranked choices collided. If the short is itself cryptic, derive
+  # `<first_gated_long>_<n>` (n ≥ 2) — the lowest free suffix that
+  # passes the gate. If the short is already expressive, leave it
+  # alone (`:skip`).
+  defp suffix_fallback([], _gate, _taken, _name, _ctx), do: :skip
+
+  defp suffix_fallback([first | _] = _longs, gate, taken, name, context_compound) do
+    cond do
+      not cryptic_target?(Atom.to_string(name), context_compound) ->
+        :skip
+
+      not gate.(String.to_atom(first)) ->
+        :skip
+
+      true ->
+        2
+        |> Stream.iterate(&(&1 + 1))
+        |> Stream.map(&String.to_atom("#{first}_#{&1}"))
+        |> Enum.find(fn long_atom -> not MapSet.member?(taken, long_atom) end)
+        |> then(&{:ok, &1})
+    end
   end
 
   # For each resolved `=` binding `name = rhs`, return every
@@ -562,7 +625,11 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
     end)
   end
 
-  defp resolve_long(
+  # Ranked heuristic expansion for one short name, best-first strings.
+  # Same guards as the single-pick path used to have; `known` yields a
+  # one-element ranking (an explicit mapping has no runner-up) and the
+  # locality-safety skip yields `[]`.
+  defp resolve_long_ranked(
          name,
          rhs,
          context_candidates,
@@ -575,7 +642,7 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
 
     cond do
       Map.has_key?(context_compound.known, string) ->
-        {:ok, Map.fetch!(context_compound.known, string)}
+        [Map.fetch!(context_compound.known, string)]
 
       # Locality safety: if the short name appears verbatim as a
       # subtoken of any local source (RHS source token, function
@@ -585,7 +652,7 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
       # author's chosen vocabulary (e.g. `ids = ..._ids` → `id`
       # inverts the cardinality from collection to element). Keep.
       short_is_subtoken_of_local_source?(string, rhs_compound, context_compounds) ->
-        :skip
+        []
 
       true ->
         # RHS source (call name or property access) gets prepended as
@@ -617,7 +684,7 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
           min_score: 80
         }
 
-        Number42.Refactors.IdentifierExpansion.resolve(string, candidates_with_rhs, opts)
+        Number42.Refactors.IdentifierExpansion.resolve_ranked(string, candidates_with_rhs, opts)
     end
   end
 
