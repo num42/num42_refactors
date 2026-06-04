@@ -137,11 +137,15 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
       end)
 
     unless dry_run? do
-      _state = process_cross_writes(plan_entries, write_root)
+      _state = process_cross_writes(plan_entries, write_root, source_paths(sources))
     end
 
     assemble_plan(plan_entries)
   end
+
+  # On-disk paths of the (non-excluded) source files, used to derive the
+  # real `lib/<dir>` layout instead of naively underscoring the namespace.
+  defp source_paths(sources), do: sources |> Enum.map(fn {path, _src} -> path end)
 
   @impl Number42.Refactors.Refactor
   def description, do: "Type-II clone extraction: parametrise differing literals into a helper"
@@ -1913,7 +1917,7 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
     {:ok, build_plan(sources, opts)}
   end
 
-  defp process_cross_writes(plan_entries, write_root) do
+  defp process_cross_writes(plan_entries, write_root, source_paths) do
     cross_helpers =
       plan_entries
       |> Enum.flat_map(fn
@@ -1924,7 +1928,7 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
 
     cross_helpers
     |> Enum.each(fn {target, infos} ->
-      write_cross_helper_file(target, infos, write_root)
+      write_cross_helper_file(target, infos, write_root, source_paths)
     end)
   end
 
@@ -2410,15 +2414,6 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
 
   defp shared_module?(module), do: module |> Module.split() |> List.last() == "Shared"
 
-  defp shared_module_path(target_module, write_root) do
-    [first | tail] = Module.split(target_module)
-    root = Macro.underscore(first)
-    rest = Enum.map(tail, &Macro.underscore/1)
-
-    rel = Path.join(["lib", root | rest]) <> ".ex"
-    Path.join(write_root, rel)
-  end
-
   defp signature_or_skip({name, args}, kind) when is_list(args) do
     {kind, name, length(args)}
   end
@@ -2576,8 +2571,8 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
   defp var_name_or_error({:ok, name}), do: {:ok, name}
   defp var_name_or_error(:skip), do: :error
 
-  defp write_cross_helper_file(target, infos, write_root) do
-    path = shared_module_path(target, write_root)
+  defp write_cross_helper_file(target, infos, write_root, source_paths) do
+    path = shared_module_path(target, write_root, source_paths)
     File.mkdir_p!(Path.dirname(path))
 
     # Drop helpers that are already in the target file (idempotence).

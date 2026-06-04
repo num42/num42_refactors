@@ -1104,25 +1104,23 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
     end
   end
 
-  describe "regression — incomplete lift into an unreachable Shared module is refused (#6)" do
-    # Real-world repro: a canonical `*.Shared` module already exists and
-    # is threaded through the planner's sources (mix refactor passes the
-    # whole file list via `source_files`). Two formatter modules share a
-    # `defp pr_summary_section/1`. The loser rewrite deletes that defp,
-    # extends `import Shared, only: [...]` with `pr_summary_section: 1`,
-    # and delegates `render/1` — but the lift never reaches the canonical
-    # Shared because the writer's module-name → path derivation resolves
-    # to a *different* file (the `CodeQA` → `code_qa` underscore split,
-    # tracked separately as the path bug). The compiler resolves the
-    # import/delegate to the canonical Shared, which never got the
-    # function → `undefined function pr_summary_section/1`.
+  describe "regression — lift completes into the canonical Shared (#6 + #9)" do
+    # Real-world repro: a canonical `*.Shared` module already exists at
+    # `lib/codeqa/...` and is threaded through the planner's sources (mix
+    # refactor passes the whole file list via `source_files`). Two
+    # formatter modules share a `defp pr_summary_section/1`.
     #
-    # The lift is incomplete, so both edits must be refused: the losers
-    # keep their local `defp` and their original import, leaving the
-    # source exactly as compilable as before.
-    test "losers are left untouched when the lift can't reach the canonical Shared", %{tmp: tmp} do
-      # Canonical Shared lives at lib/codeqa/... — the writer derives
-      # lib/code_qa/... from the module name and can't find it.
+    # Before the #9 path fix the writer derived `lib/code_qa/...` from the
+    # `CodeQA` namespace (`Macro.underscore("CodeQA") == "code_qa"`) and
+    # couldn't find the canonical Shared, so the lift was refused to avoid
+    # emitting callers that import a function that never arrives. With #9
+    # the writer derives the lib dir from the on-disk layout, finds the
+    # canonical `lib/codeqa/...` Shared, and the lift completes: the helper
+    # moves to Shared as a public `def`, both losers drop their local
+    # `defp` and import it, and no stray `lib/code_qa/` dir is created.
+    test "lift reaches the canonical lib/codeqa Shared and completes", %{tmp: tmp} do
+      # Canonical Shared lives at lib/codeqa/... — the #9 layout
+      # derivation finds it instead of the naive lib/code_qa/...
       canonical_dir = Path.join(tmp, "lib/codeqa/health_report/formatter")
       File.mkdir_p!(canonical_dir)
 
@@ -1183,18 +1181,23 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
           write_root: tmp
         )
 
-      # No loser is rewritten — the lift was refused.
-      assert plan == %{}
+      # The lift now reaches the canonical Shared, so both losers are
+      # rewritten.
+      assert Map.has_key?(plan, CodeQA.HealthReport.Formatter.GitHub)
+      assert Map.has_key?(plan, CodeQA.HealthReport.Formatter.Plain)
 
-      # The originals are unchanged: defp helper intact, import not
-      # extended, render/1 not delegated. So the source still compiles.
-      assert_unchanged(@subject, github, prepared: plan)
-      assert_unchanged(@subject, plain, prepared: plan)
+      # No stray `lib/code_qa/` dir — the file landed at the real layout.
+      refute File.exists?(Path.join(tmp, "lib/code_qa"))
 
-      # The canonical Shared is never given the function, so an import
-      # of `pr_summary_section: 1` would dangle — refusing the rewrite is
-      # the only compilable outcome.
-      refute apply_refactor(@subject, github, prepared: plan) =~ "pr_summary_section: 1"
+      # `pr_summary_section/1` was appended to the canonical Shared as a
+      # public `def`, so the losers' new import resolves.
+      canonical = File.read!(Path.join(canonical_dir, "shared.ex"))
+      assert canonical =~ ~r/def pr_summary_section\(/
+
+      # Each loser drops its local `defp` and imports the lifted name.
+      result_github = apply_refactor(@subject, github, prepared: plan)
+      assert result_github =~ "pr_summary_section: 1"
+      refute result_github =~ ~r/defp pr_summary_section\(/
     end
 
     test "lift still completes when the canonical Shared is reachable", %{tmp: tmp} do
@@ -1947,6 +1950,58 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
       assert Map.has_key?(plan, MyApp.A)
       assert Map.has_key?(plan, MyApp.B)
       refute Map.has_key?(plan, MyApp.Test.C)
+    end
+  end
+
+  describe "lib path derivation (#9)" do
+    test "namespace whose underscore differs from the on-disk dir writes to the real dir",
+         %{tmp: tmp} do
+      # `Macro.underscore("CodeQA")` == "code_qa", but the project lays
+      # the namespace out under `lib/codeqa/`. The fresh Shared file must
+      # follow the on-disk layout, not the naive underscore — otherwise
+      # we spawn a duplicate top-level `lib/code_qa/` dir and collide on
+      # the next run.
+      a = """
+      defmodule CodeQA.AST.Nodes do
+        def assign(scope, attrs) do
+          scope
+          |> Map.put(:attrs, attrs)
+          |> Map.put(:assigned, true)
+        end
+      end
+      """
+
+      b = """
+      defmodule CodeQA.AST.Nodes.Positions do
+        def assign(scope, attrs) do
+          scope
+          |> Map.put(:attrs, attrs)
+          |> Map.put(:assigned, true)
+        end
+      end
+      """
+
+      sources = [
+        {Path.join(tmp, "lib/codeqa/ast/nodes.ex"), a},
+        {Path.join(tmp, "lib/codeqa/ast/nodes/positions.ex"), b}
+      ]
+
+      plan = prepared(sources, write_root: tmp)
+
+      real_path = Path.join(tmp, "lib/codeqa/ast/nodes/shared.ex")
+      naive_path = Path.join(tmp, "lib/code_qa/ast/nodes/shared.ex")
+
+      assert File.exists?(real_path),
+             "expected fresh Shared file at the real on-disk dir #{real_path}"
+
+      refute File.exists?(naive_path),
+             "must not create a duplicate top-level dir from Macro.underscore"
+
+      shared_src = File.read!(real_path)
+      assert shared_src =~ "defmodule CodeQA.AST.Nodes.Shared"
+      assert shared_src =~ "def assign(scope, attrs)"
+
+      assert Map.has_key?(plan, CodeQA.AST.Nodes)
     end
   end
 end

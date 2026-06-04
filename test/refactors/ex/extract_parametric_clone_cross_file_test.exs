@@ -895,6 +895,60 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone.CrossFileTest do
     end
   end
 
+  # ---------------------------------------------------------------------
+  # #9 — fresh Shared file lands in the real lib subdir, not a naive
+  # Macro.underscore of the namespace.
+  # ---------------------------------------------------------------------
+
+  describe "lib path derivation (#9)" do
+    test "namespace whose underscore differs from the on-disk dir writes to the real dir",
+         %{tmp: tmp} do
+      # `Macro.underscore("CodeQA")` == "code_qa", but the project lays
+      # the namespace out under `lib/codeqa/`. The fresh Shared file must
+      # follow the on-disk layout, not the naive underscore.
+      a = """
+      defmodule CodeQA.AST.Nodes.Foo do
+        def emit(t) do
+          "until " <> Calendar.strftime(t, "%H:%M")
+        end
+      end
+      """
+
+      b = """
+      defmodule CodeQA.AST.Nodes.Bar do
+        def emit(t) do
+          "ago " <> Calendar.strftime(t, "%H:%M")
+        end
+      end
+      """
+
+      sources = [
+        {Path.join(tmp, "lib/codeqa/ast/nodes/foo.ex"), a},
+        {Path.join(tmp, "lib/codeqa/ast/nodes/bar.ex"), b}
+      ]
+
+      sources
+      |> Enum.each(fn {p, src} ->
+        File.mkdir_p!(Path.dirname(p))
+        File.write!(p, src)
+      end)
+
+      _plan = prepared(sources, write_root: tmp)
+
+      real_path = Path.join(tmp, "lib/codeqa/ast/nodes/shared.ex")
+      naive_path = Path.join(tmp, "lib/code_qa/ast/nodes/shared.ex")
+
+      assert File.exists?(real_path),
+             "expected fresh Shared file at the real on-disk dir #{real_path}"
+
+      refute File.exists?(naive_path),
+             "must not create a duplicate top-level dir from Macro.underscore"
+
+      shared_src = File.read!(real_path)
+      assert shared_src =~ "defmodule CodeQA.AST.Nodes.Shared"
+    end
+  end
+
   describe "lexically-scoped macros in clone body" do
     # `__MODULE__` resolves against the lexical module. When a cross-file
     # clone body uses it, the helper is lifted into a `*.Shared` module
