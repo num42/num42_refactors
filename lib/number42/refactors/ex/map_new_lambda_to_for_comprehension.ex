@@ -25,6 +25,26 @@ defmodule Number42.Refactors.Ex.MapNewLambdaToForComprehension do
     emit a pipe inside the generator head, which reads worse than
     the original; leave it for the user to pre-extract a binding
 
+  ## Threshold — single-line bodies are left alone
+
+  A one-line `Map.new(coll, fn x -> {k, v} end)` is *already* compact;
+  expanding it to a 3-line `for`/`|> Map.new()` block pays a verbosity
+  tax for composability that the call site isn't using. So the bare
+  and simple-pipe expansions only fire when the lambda's tuple body
+  spans **≥ 2 source lines** (measured via `Sourceror.get_range/1`),
+  where the vertical room already exists and the `for` head becomes a
+  natural slot for a later filter or local binding.
+
+  The one exception is the **filter/reject lift** below: when a
+  `coll |> Enum.filter(...) |> Map.new(fn)` pipeline collapses into a
+  single `for x <- coll, cond do … end`, the rewrite *removes* a pipe
+  stage — a structural win — so it fires regardless of body length.
+
+  This also fixes the asymmetric-nesting wart from issue #16: a nested
+  inner `Map.new(keys, fn {k, v} -> {…, v} end)` with a single-line
+  body is now below the threshold and stays put, instead of being
+  expanded while its multi-statement outer sibling is left untouched.
+
   ## Out of scope
 
   - Module-alias resolution. `alias SomeLib.Map` shadows the stdlib
@@ -69,6 +89,13 @@ defmodule Number42.Refactors.Ex.MapNewLambdaToForComprehension do
     no-guard lambda with a bare 2-tuple body — because anything else
     either changes semantics (multi-clause) or hides a tuple builder
     behind a control-flow construct the rewrite cannot reason about.
+
+    It also only fires when the tuple body spans two or more lines: a
+    one-liner is already compact, so expanding it would cost three
+    lines for composability the call site isn't using. The lone
+    exception is when an `Enum.filter`/`reject` stage folds into the
+    comprehension head — that removes a pipe stage, so it's worth it
+    even for a one-line body.
     """
   end
 
@@ -139,7 +166,7 @@ defmodule Number42.Refactors.Ex.MapNewLambdaToForComprehension do
          {{:., _, [{:__aliases__, _, [:Map]}, :new]}, _,
           [coll, {:fn, _, [{:->, _, [[pattern], body]}]}]} = node
        ) do
-    if simple_pattern?(pattern) and tuple_pair?(body),
+    if simple_pattern?(pattern) and tuple_pair?(body) and multi_line_body?(body),
       do: [replacement_patch(node, pattern, coll, body)],
       else: []
   end
@@ -162,18 +189,48 @@ defmodule Number42.Refactors.Ex.MapNewLambdaToForComprehension do
       pipe_lhs?(coll) ->
         case lift_filter_chain(coll, pattern) do
           {:ok, base_coll, conditions} ->
-            [replacement_patch(node, pattern, base_coll, body, conditions)]
+            patch_if_worth_it(node, pattern, base_coll, body, conditions)
 
           :skip ->
             []
         end
 
-      true ->
+      multi_line_body?(body) ->
         [replacement_patch(node, pattern, coll, body)]
+
+      true ->
+        []
     end
   end
 
   defp maybe_patch(_), do: []
+
+  # A lifted filter chain (non-empty conditions) collapses a pipe stage —
+  # a structural win that earns the `for` shape regardless of body length.
+  # With no lifted conditions, fall back to the line-span threshold.
+  defp patch_if_worth_it(node, pattern, coll, body, [_ | _] = conditions),
+    do: [replacement_patch(node, pattern, coll, body, conditions)]
+
+  defp patch_if_worth_it(node, pattern, coll, body, []) do
+    if multi_line_body?(body),
+      do: [replacement_patch(node, pattern, coll, body)],
+      else: []
+  end
+
+  # Threshold (issue #16): a single-line tuple body — `fn x -> {k, v} end`
+  # — pays a 2-line verbosity tax for composability nobody is using, so we
+  # leave it. A body whose tuple already spans ≥ 2 source lines has the
+  # vertical room; the `for`/`|> Map.new()` shape costs nothing extra and
+  # opens a natural slot for filters and local bindings.
+  defp multi_line_body?(body) do
+    case Sourceror.get_range(body) do
+      %Sourceror.Range{start: start_pos, end: end_pos} ->
+        Keyword.fetch!(end_pos, :line) > Keyword.fetch!(start_pos, :line)
+
+      nil ->
+        false
+    end
+  end
 
   defp node_key({_, meta, _} = node) when is_list(meta),
     do: {:erlang.phash2(node), Keyword.get(meta, :line), Keyword.get(meta, :column)}
