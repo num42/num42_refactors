@@ -129,11 +129,13 @@ defmodule Number42.Refactors.Ex.SortFunctionsTest do
       assert result =~ ~r/@doc "beta docs"\s*\n\s*@spec beta\(\)\s*::\s*:b\s*\n\s*def beta/
     end
 
-    test "helper without @impl between two @impl defs lands in alphabetical position cleanly" do
-      # Order in source: init, helper, handle_call.
-      # Alphabetical order: handle_call, helper, init.
-      # The two @impl true attributes must follow their original
-      # defs, not the def that happens to take their slot.
+    test "plain public helper sorts ahead of @impl callbacks, attributes stay attached" do
+      # Source order: init (@impl), helper (plain), handle_call (@impl).
+      # New convention (issue #12 b): plain public API is grouped ahead
+      # of @impl behaviour callbacks, so the order is helper, then the
+      # callbacks alphabetised (handle_call, init). The two @impl
+      # attributes must still follow their original defs, not whatever
+      # def takes their slot.
       before_source = """
       defmodule M do
         @impl true
@@ -148,12 +150,12 @@ defmodule Number42.Refactors.Ex.SortFunctionsTest do
 
       result = apply_refactor(@subject, before_source)
 
-      # Final order must be handle_call < helper < init.
-      hc_idx = :binary.match(result, "def handle_call") |> elem(0)
+      # Final order: helper (plain public) < handle_call < init (callbacks).
       h_idx = :binary.match(result, "def helper") |> elem(0)
+      hc_idx = :binary.match(result, "def handle_call") |> elem(0)
       i_idx = :binary.match(result, "def init") |> elem(0)
-      assert hc_idx < h_idx
-      assert h_idx < i_idx
+      assert h_idx < hc_idx
+      assert hc_idx < i_idx
 
       # Each @impl must still be directly above the def it was
       # originally attached to.
@@ -169,6 +171,208 @@ defmodule Number42.Refactors.Ex.SortFunctionsTest do
       defmodule Foo do
         def beta, do: :b
         def alpha, do: :a
+      end
+      """)
+    end
+  end
+
+  describe "section comments survive (issue #12 a)" do
+    test "a `# ---` divider is preserved and stays heading its section" do
+      before_source = """
+      defmodule M do
+        use GenServer
+
+        def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
+
+        # --- GenServer callbacks ---
+
+        @impl true
+        def init(state), do: {:ok, state}
+
+        @impl true
+        def handle_call(:get, _from, state), do: {:reply, state, state}
+      end
+      """
+
+      result = apply_refactor(@subject, before_source)
+
+      # The divider must NOT be deleted...
+      assert result =~ "# --- GenServer callbacks ---"
+
+      divider_idx = :binary.match(result, "# --- GenServer callbacks ---") |> elem(0)
+      start_link_idx = :binary.match(result, "def start_link") |> elem(0)
+      handle_idx = :binary.match(result, "def handle_call") |> elem(0)
+      init_idx = :binary.match(result, "def init") |> elem(0)
+
+      # ...and must act as a section anchor: it stays below the public
+      # API and above the callbacks it heads, never dragged into the
+      # middle of a group as a clause moves.
+      assert start_link_idx < divider_idx
+      assert divider_idx < handle_idx
+      assert divider_idx < init_idx
+      # Within the section, the callbacks still sort alphabetically.
+      assert handle_idx < init_idx
+    end
+
+    test "multiple dividers each stay anchoring their own section" do
+      before_source = """
+      defmodule M do
+        use GenServer
+
+        def start_link(opts), do: opts
+
+        # --- GenServer callbacks ---
+
+        @impl true
+        def init(state), do: {:ok, state}
+
+        @impl true
+        def handle_call(:get, _from, state), do: {:reply, state, state}
+
+        # --- Private helpers ---
+
+        defp load_configs(tid), do: tid
+        defp helper(x), do: x
+      end
+      """
+
+      result = apply_refactor(@subject, before_source)
+
+      assert result =~ "# --- GenServer callbacks ---"
+      assert result =~ "# --- Private helpers ---"
+
+      cb_idx = :binary.match(result, "# --- GenServer callbacks ---") |> elem(0)
+      priv_idx = :binary.match(result, "# --- Private helpers ---") |> elem(0)
+      init_idx = :binary.match(result, "def init") |> elem(0)
+      helper_idx = :binary.match(result, "defp helper") |> elem(0)
+
+      # Each section sorts independently; the dividers stay between the
+      # sections in source order.
+      assert cb_idx < init_idx
+      assert init_idx < priv_idx
+      assert priv_idx < helper_idx
+    end
+
+    test "an already-sectioned, within-section-sorted module is left unchanged" do
+      # Idempotency on the conformant shape the refactor produces:
+      # sections present, each section sorted, public before private.
+      assert_unchanged(@subject, """
+      defmodule M do
+        use GenServer
+
+        def start_link(opts), do: opts
+
+        # --- GenServer callbacks ---
+
+        @impl true
+        def handle_call(:get, _from, state), do: {:reply, state, state}
+
+        @impl true
+        def init(state), do: {:ok, state}
+      end
+      """)
+    end
+  end
+
+  describe "public/private + callback grouping (issue #12 b)" do
+    test "@impl callbacks group together, not interleaved with plain public defs" do
+      before_source = """
+      defmodule M do
+        def start_link(opts), do: opts
+
+        @impl true
+        def init(state), do: {:ok, state}
+
+        def get_tid(pid), do: pid
+
+        @impl true
+        def handle_call(:get, _from, state), do: {:reply, state, state}
+      end
+      """
+
+      result = apply_refactor(@subject, before_source)
+
+      get_tid_idx = :binary.match(result, "def get_tid") |> elem(0)
+      start_link_idx = :binary.match(result, "def start_link") |> elem(0)
+      init_idx = :binary.match(result, "def init") |> elem(0)
+      handle_idx = :binary.match(result, "def handle_call") |> elem(0)
+
+      # Plain public defs (get_tid, start_link) must NOT be interleaved
+      # with the @impl callbacks (handle_call, init): every plain public
+      # def comes before every callback (or every callback before every
+      # plain public def) — i.e. the two groups are contiguous, not mixed.
+      plain = [get_tid_idx, start_link_idx]
+      callbacks = [handle_idx, init_idx]
+
+      assert Enum.max(plain) < Enum.min(callbacks) or
+               Enum.max(callbacks) < Enum.min(plain),
+             "plain public defs and @impl callbacks must not interleave"
+    end
+
+    test "defp stays after every def (public before private)" do
+      before_source = """
+      defmodule M do
+        defp zeta_helper(x), do: x
+        def alpha, do: zeta_helper(1)
+        defp beta_helper(y), do: y
+      end
+      """
+
+      result = apply_refactor(@subject, before_source)
+
+      alpha_idx = :binary.match(result, "def alpha") |> elem(0)
+      beta_idx = :binary.match(result, "defp beta_helper") |> elem(0)
+      zeta_idx = :binary.match(result, "defp zeta_helper") |> elem(0)
+
+      assert alpha_idx < beta_idx
+      assert alpha_idx < zeta_idx
+    end
+  end
+
+  describe "clause contiguity holds in all cases (issue #12 c)" do
+    test "sorting never wedges a function between same name/arity clauses split by an attribute" do
+      # A constant attribute (`@threshold`) sits between two clauses of
+      # `run/1`. This is legal and warning-free input. The attribute
+      # splits the module into regions; the lower region is
+      # `[run(list), dispatch]`. Sorting it alphabetically previously
+      # moved `dispatch/1` ABOVE `run(list)`, wedging it between the two
+      # `run/1` clauses and producing the compiler warning
+      # "clauses with the same name and arity should be grouped together".
+      before_source = """
+      defmodule M do
+        def run([]), do: :empty
+
+        @threshold 5
+
+        def run(list), do: length(list)
+        def dispatch(x), do: x
+      end
+      """
+
+      # Sanity: the input's clauses are already grouped (no warning).
+      assert ungrouped_clauses(before_source) == []
+
+      result = apply_refactor(@subject, before_source)
+
+      assert ungrouped_clauses(result) == [],
+             """
+             Refactor split same name/arity clauses apart:
+             #{result}
+             """
+    end
+
+    test "split clauses are left in place rather than reordered" do
+      # When clauses of one function span two regions, the refactor must
+      # not reorder either region (doing so risks separating the
+      # clauses). The whole module passes through unchanged.
+      assert_unchanged(@subject, """
+      defmodule M do
+        def run([]), do: :empty
+
+        @threshold 5
+
+        def run(list), do: length(list)
+        def dispatch(x), do: x
       end
       """)
     end

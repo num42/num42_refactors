@@ -51,7 +51,11 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
   - **No subtoken resolves.** The name is short but neither
     `@known` nor compound-resolve produces an expansion.
   - **Collision.** The expanded name already exists as another
-    function (any kind, any arity) in the same module.
+    function (any kind, any arity) in the same module, OR it is a
+    macro injected into the module by a `use` statement (e.g.
+    `use ExUnit.Case` exports `test/2`, `describe/2`). Renaming a
+    short helper onto such a name shadows the macro and breaks
+    compilation.
   - **Single-char subtokens.** `f(...)` etc. — no signal strong
     enough to expand without false positives.
 
@@ -121,6 +125,24 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
                 up
               )a)
 
+  # Callable names that `use <Module>` injects into the surrounding
+  # module. Renaming a short helper onto one of these shadows the
+  # macro (`defp test/2` shadows `ExUnit.Case.test/2`) and breaks
+  # compilation: the parser binds the later `test "..." do ... end`
+  # to the new local 2-arity function instead of the macro, and
+  # `Kernel.def/2`'s no-function-scope guard fires.
+  #
+  # Keyed on the full `use` alias path so we never refuse a rename
+  # in a module that doesn't actually `use` that framework. The
+  # table is intentionally conservative: only the well-known
+  # test/spec macros whose names fall in the short-helper expansion
+  # window are listed. Extend here when a new framework's injected
+  # callables collide with plausible long forms.
+  @use_injected_callables %{
+    [:ExUnit, :Case] => ~w(test describe setup setup_all)a,
+    [:ExUnit, :CaseTemplate] => ~w(test describe setup setup_all)a
+  }
+
   @impl Number42.Refactors.Refactor
   def transform(source, opts) do
     ctx = build_ctx(opts)
@@ -160,8 +182,13 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
         collect_import_compounds(body_exprs)
       )
 
-    {private_groups, occupied_names} = collect_private_def_groups(body_exprs)
+    {private_groups, def_names} = collect_private_def_groups(body_exprs)
     all_def_subtokens_by_name = collect_def_subtokens_by_name(body_exprs)
+
+    # A rename target is occupied if it's already a def in the module
+    # OR a macro injected by a `use` statement (`use ExUnit.Case` →
+    # `test`, `describe`, ...). Shadowing either breaks compilation.
+    occupied_names = MapSet.union(def_names, collect_use_injected_callables(body_exprs))
 
     resolutions =
       private_groups
@@ -268,6 +295,23 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
     end)
     |> Enum.uniq()
     |> Enum.reject(&(&1 == ""))
+  end
+
+  # Macros pulled into the module by `use <Module>`. Looks each
+  # used module up in `@use_injected_callables` (keyed on the full
+  # alias path) and unions the injected callable names. Modules not
+  # in the table contribute nothing — the guard never widens beyond
+  # the frameworks we know inject short-helper-colliding macros.
+  defp collect_use_injected_callables(exprs) do
+    exprs
+    |> Enum.flat_map(fn
+      {:use, _, [{:__aliases__, _, parts} | _]} when is_list(parts) ->
+        Map.get(@use_injected_callables, parts, [])
+
+      _ ->
+        []
+    end)
+    |> MapSet.new()
   end
 
   # Returns {private_groups, all_def_names_set}.

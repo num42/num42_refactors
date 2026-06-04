@@ -153,14 +153,42 @@ defmodule Number42.Refactors.Ex.LiftDirectives do
     case ast do
       {:defmodule, _, [_name, [{_do, body}]]} ->
         toed_expr = body_to_exprs(body)
-        {prefix, _rest} = toed_expr |> Enum.split_while(&prefix_node?/1)
-        line = insert_line_after(prefix, body)
+        {prefix, rest} = toed_expr |> Enum.split_while(&prefix_node?/1)
+        line = insert_line(prefix, rest, body)
         {toed_expr, line}
 
       _ ->
         nil
     end
   end
+
+  # Insertion point for the lifted directives. When the prefix ends in
+  # attributes attached to the following `def`/`defp` (e.g. `@spec`,
+  # `@doc`, `@impl`), insert *above* that whole cluster so the
+  # spec/doc stays adjacent to its `def`. Otherwise insert after the
+  # last prefix node (the existing alias/import block).
+  defp insert_line(prefix, rest, body) do
+    case attached_attr_cluster(prefix, rest) do
+      [first | _] -> line_of(first)
+      [] -> insert_line_after(prefix, body)
+    end
+  end
+
+  # The trailing run of def-attached attributes in `prefix`, but only
+  # when a `def`/`defp` actually follows. `@moduledoc` is a module
+  # header, never part of a def cluster, so it terminates the run.
+  defp attached_attr_cluster(prefix, [{def_kind, _, _} | _]) when def_kind?(def_kind) do
+    prefix
+    |> Enum.reverse()
+    |> Enum.take_while(&def_attached_attr?/1)
+    |> Enum.reverse()
+  end
+
+  defp attached_attr_cluster(_prefix, _rest), do: []
+
+  defp def_attached_attr?({:@, _, [{:moduledoc, _, _}]}), do: false
+  defp def_attached_attr?({:@, _, _}), do: true
+  defp def_attached_attr?(_), do: false
 
   defp insert_line_after([], body) do
     case body do

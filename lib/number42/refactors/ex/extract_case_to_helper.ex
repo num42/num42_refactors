@@ -1,10 +1,25 @@
 defmodule Number42.Refactors.Ex.ExtractCaseToHelper do
   @moduledoc """
   Extracts a `case <call>(args) do ... end` that sits as the **last
-  expression** of a `def`/`defp` body into a private helper named
-  `handle_<host_fn>_<scrutinee_fn>/N`. Each `case` clause becomes a
-  helper clause; the original `case` is replaced by a pipe call that
-  threads the scrutinee result into the helper.
+  expression** of a `def`/`defp` body into a private helper. Each `case`
+  clause becomes a helper clause; the original `case` is replaced by a
+  pipe call that threads the scrutinee result into the helper.
+
+  ## Helper naming
+
+  The helper is named after **what the clauses dispatch on**, not after
+  the call that produced the value, because the patterns are what the
+  reader needs to understand the branch:
+
+  - **Pattern-derived (preferred).** When the clauses form a recognized
+    pattern family, the name encodes that family. The canonical one is
+    the `:ok`/`:error` *result* family (every clause leads with `:ok` or
+    `:error`, bare or tagged) → `on_<scrutinee>_result/N`.
+  - **Call-derived (fallback).** When no clear family is present, the
+    name falls back to the mechanical `handle_<host_fn>_<scrutinee_fn>/N`.
+
+  New families are added in one place (`pattern_family_suffix/1`) as a
+  clause-set predicate — call sites stay untouched.
 
   ## Why
 
@@ -30,11 +45,11 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelper do
 
       def host(a, b, ctx) do
         # ...maybe other statements first...
-        fetch(a, b) |> handle_host_fetch(ctx)
+        fetch(a, b) |> on_fetch_result(ctx)
       end
 
-      defp handle_host_fetch({:ok, value}, ctx), do: use(value, ctx)
-      defp handle_host_fetch(:error, ctx), do: default(ctx)
+      defp on_fetch_result({:ok, value}, ctx), do: use(value, ctx)
+      defp on_fetch_result(:error, ctx), do: default(ctx)
 
   ## Constraints
 
@@ -56,7 +71,7 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelper do
     - Otherwise, the refactor walks `_2`, `_3`, ... appended to the
       base name until it finds a free slot (or another structural
       match → no-op). Same-name/different-arity counts as a collision
-      to keep the FIXME helper visually grouped.
+      to keep the synthesized helper visually grouped.
 
   ## Why procedural
 
@@ -75,7 +90,9 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelper do
   alias Sourceror.Patch
 
   @impl Number42.Refactors.Refactor
-  def description, do: "case <call>(...) do ... end at tail of fn -> extract handle_<host>_<call>"
+  def description,
+    do: "case <call>(...) do ... end at tail of fn -> extract pattern-named dispatch helper"
+
   @impl Number42.Refactors.Refactor
   def explanation do
     """
@@ -454,13 +471,7 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelper do
          # nested case/if/with, map literal, list literal, &-capture,
          # lambda, raise/throw/exit, block, …).
          false <- non_complex_case?(clauses) do
-      base_name =
-        synth_compound_name(
-          "handle",
-          strip_name_suffix(host_name),
-          strip_name_suffix(scrutinee_name),
-          ""
-        )
+      base_name = synth_handler_name(host_name, scrutinee_name, clauses)
 
       head_params =
         head |> function_param_patterns() |> Enum.flat_map(&pattern_var_names/1) |> MapSet.new()
@@ -512,7 +523,44 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelper do
   defp function_param_patterns(_), do: []
   defp guard_text_or_render({:ok, text}, _guard), do: text
   defp guard_text_or_render(:error, guard), do: guard |> Sourceror.to_string()
-  defp indent_body(str), do: String.split(str, "\n") |> Enum.map_join("\n", &("    " <> &1))
+  # The sliced body text has its first line at column 0 (the slice
+  # starts mid-source-line, at the expression) while continuation lines
+  # keep their original source indentation — the case/clause nesting
+  # depth, not the helper's. Re-anchor: the first line was at source
+  # column `C`; continuation lines are at `C + relative`, and the
+  # *minimum* continuation indent is exactly `C` (top-level-aligned
+  # tokens like a leading `|>` or a closing `end` sit at `C`). Strip `C`
+  # from continuation lines to recover their relative shape, leave the
+  # first line untouched, then indent the whole block by the canonical 4
+  # spaces. Blank lines stay blank.
+  defp indent_body(str) do
+    case String.split(str, "\n") do
+      [single] ->
+        "    " <> single
+
+      [first | rest] ->
+        common = continuation_indent(rest)
+        reindented = Enum.map(rest, &dedent_line(&1, common))
+        [first | reindented] |> Enum.map_join("\n", &prefix_line/1)
+    end
+  end
+
+  defp continuation_indent(lines) do
+    lines
+    |> Enum.reject(&blank?/1)
+    |> Enum.map(&leading_spaces/1)
+    |> Enum.min(fn -> 0 end)
+  end
+
+  defp dedent_line(line, common) do
+    if blank?(line), do: "", else: String.slice(line, common..-1//1)
+  end
+
+  defp prefix_line(""), do: ""
+  defp prefix_line(line), do: "    " <> line
+
+  defp blank?(line), do: String.trim(line) == ""
+  defp leading_spaces(line), do: byte_size(line) - byte_size(String.trim_leading(line))
 
   defp match_tail_case({:case, _, [scrutinee, [{_do, clauses_kw}]]} = node) do
     cond do
@@ -704,11 +752,6 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelper do
     # is `defp`. Callers stay through the public host.
     _ = def_kind
 
-    fixme = """
-      # FIXME: extracted automatically by ExtractCaseToHelper — review
-      # the parameter list and consider a better name.\
-    """
-
     clause_texts =
       branches
       |> Enum.map(fn %{body: body, guard: guard, pattern: pattern, used_in_body: used} ->
@@ -742,7 +785,7 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelper do
         """
       end)
 
-    [fixme | clause_texts] |> Enum.join("\n")
+    clause_texts |> Enum.join("\n")
   end
 
   defp render_pattern_text(pattern, source),
@@ -772,6 +815,78 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelper do
 
   defp strip_name_suffix(name),
     do: name |> to_string() |> String.replace_suffix("?", "") |> String.replace_suffix("!", "")
+
+  # Name the helper after what the dispatch *decides on* — the clause
+  # patterns — when those patterns form a recognizable family, else fall
+  # back to the mechanical `handle_<host>_<scrutinee>` (the scrutinee
+  # call name). Pattern-derived names beat call-derived ones: the call
+  # is "how we got the value", the patterns are "what we branch on".
+  defp synth_handler_name(host_name, scrutinee_name, clauses) do
+    scrutinee = strip_name_suffix(scrutinee_name)
+
+    case pattern_family_suffix(clauses) do
+      nil ->
+        synth_compound_name("handle", strip_name_suffix(host_name), scrutinee, "")
+
+      suffix ->
+        # `on_<scrutinee>_<suffix>` — the family suffix already encodes
+        # the dispatch identity, so the host name is redundant noise.
+        synth_compound_name("on", "", scrutinee, suffix)
+    end
+  end
+
+  # Recognize a pattern *family* across the clauses and return its
+  # semantic name suffix, or nil when no family matches. Generic by
+  # design — a family is "all clauses share a recognizable leading-tag
+  # shape". Each family is one `{predicate_on_leading_tags, suffix}`
+  # entry; add a family by appending a tuple here, call sites stay
+  # untouched. The canonical one is the `:ok`/`:error` result family →
+  # `_result`.
+  defp pattern_family_suffix(clauses) do
+    tags = clauses |> Enum.map(&leading_tag/1)
+    families = [{&result_family?/1, "result"}]
+
+    Enum.find_value(families, fn {matches?, suffix} ->
+      if matches?.(tags), do: suffix
+    end)
+  end
+
+  # The result family: every clause leads with `:ok` or `:error` (bare
+  # atom `:ok`/`:error` or a tagged tuple `{:ok, …}`/`{:error, …}`), with
+  # at least one clause actually tagged so we don't fire on a plain
+  # `:ok | :other` enum. This is the shape `{:ok, _}` / `{:error, _}`
+  # dispatch the issue calls out, generalized over the tuple/atom mix.
+  defp result_family?(tags) do
+    Enum.all?(tags, &(&1 in [:ok, :error])) and :ok in tags
+  end
+
+  # The "leading tag" of a clause: the first element's atom when the
+  # pattern is a tuple, or the atom itself for a bare-atom pattern. Any
+  # other shape (bound var, `nil`, map, list, pin, …) has no leading tag.
+  # Sourceror wraps atoms/literals in `:__block__`, hence the unwrapping.
+  defp leading_tag({:->, _meta, [[pattern_node], _body]}) do
+    {pattern, _guard} = unwrap_when(pattern_node)
+    pattern_leading_tag(pattern)
+  end
+
+  defp leading_tag(_), do: nil
+
+  # 2-element tuple: Sourceror represents `{a, b}` as a `:__block__`
+  # wrapping a raw 2-tuple. The first element is the tag.
+  defp pattern_leading_tag({:__block__, _, [{tag_node, _second}]}),
+    do: atom_literal(tag_node)
+
+  # 3+-element tuple: `{:{}, _, [first | _]}`.
+  defp pattern_leading_tag({:{}, _, [first | _]}), do: atom_literal(first)
+
+  # Bare atom pattern (`:ok`, `:error`, `nil`, …), possibly wrapped.
+  defp pattern_leading_tag({:__block__, _, [atom]}) when is_atom(atom), do: atom
+  defp pattern_leading_tag(atom) when is_atom(atom), do: atom
+  defp pattern_leading_tag(_), do: nil
+
+  defp atom_literal({:__block__, _, [atom]}) when is_atom(atom), do: atom
+  defp atom_literal(atom) when is_atom(atom), do: atom
+  defp atom_literal(_), do: nil
 
   defp unwrap_when({:when, _meta, [pat, guard]}), do: {pat, guard}
   defp unwrap_when(pat), do: {pat, nil}

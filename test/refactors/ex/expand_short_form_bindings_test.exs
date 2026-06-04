@@ -1099,6 +1099,178 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindingsTest do
     end
   end
 
+  describe "collision: distinct bindings resolving to the same long form" do
+    test "first cryptic binding keeps the long form, the next gets a _2 suffix" do
+      # Issue #2: `cs1` and `cs2` are distinct bindings in the same
+      # scope that both resolve to `changeset`. Renaming both in
+      # isolation produces two `changeset = ...` lines — the second
+      # shadows the first. Source-order assignment: the first keeps
+      # `changeset`; the second, having no runner-up of its own (an
+      # explicit `known` mapping is single-valued) and being itself
+      # cryptic (`cs2`), falls back to `changeset_2`. References track
+      # their own binding, so `merge(changeset, changeset_2)` stays
+      # semantically distinct.
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def go(a, b) do
+            cs1 = build_changeset(a)
+            cs2 = build_changeset(b)
+            merge(cs1, cs2)
+          end
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          def go(a, b) do
+            changeset = build_changeset(a)
+            changeset_2 = build_changeset(b)
+            merge(changeset, changeset_2)
+          end
+        end
+        ''',
+        known: %{"cs1" => "changeset", "cs2" => "changeset"}
+      )
+    end
+
+    test "a third non-colliding short in the same scope still rewrites to its own long form" do
+      # The colliding pair resolves to `changeset` / `changeset_2`; `bi`
+      # resolves to a distinct long form (`brand_item`) and is untouched
+      # by the collision handling.
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def go(a, b, attrs) do
+            cs1 = build_changeset(a)
+            cs2 = build_changeset(b)
+            bi = build_brand_item(attrs)
+            merge(cs1, cs2, bi)
+          end
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          def go(a, b, attrs) do
+            changeset = build_changeset(a)
+            changeset_2 = build_changeset(b)
+            brand_item = build_brand_item(attrs)
+            merge(changeset, changeset_2, brand_item)
+          end
+        end
+        ''',
+        known: %{"cs1" => "changeset", "cs2" => "changeset", "bi" => "brand_item"}
+      )
+    end
+
+    test "third colliding cryptic short continues the suffix counter" do
+      # Three distinct cryptic shorts collapsing to the same long form:
+      # the first keeps it, the rest take the next free `_n` suffix in
+      # source order.
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def go(a, b, c) do
+            cs1 = build_changeset(a)
+            cs2 = build_changeset(b)
+            cs3 = build_changeset(c)
+            merge(cs1, cs2, cs3)
+          end
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          def go(a, b, c) do
+            changeset = build_changeset(a)
+            changeset_2 = build_changeset(b)
+            changeset_3 = build_changeset(c)
+            merge(changeset, changeset_2, changeset_3)
+          end
+        end
+        ''',
+        known: %{"cs1" => "changeset", "cs2" => "changeset", "cs3" => "changeset"}
+      )
+    end
+
+    test "an expressive (non-cryptic) colliding short is left untouched instead of suffixed" do
+      # `base_val` / `head_val` both resolve to `value` (issue #2's
+      # original repro). `base_val` keeps the first slot? No — the long
+      # form `value` is itself rejected here as a target only if cryptic;
+      # the point of this test is the *fallback* side: when the runner
+      # collides and the short is already expressive, we do NOT disfigure
+      # it into `value_2`. `head_val` carries more meaning than
+      # `value_2`, so it stays as written.
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def go(a, b) do
+            base_val = value_for(a)
+            head_val = value_for(b)
+            head_val - base_val
+          end
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          def go(a, b) do
+            value = value_for(a)
+            head_val = value_for(b)
+            head_val - value
+          end
+        end
+        ''',
+        known: %{"base_val" => "value", "head_val" => "value"}
+      )
+    end
+
+    # The "second short takes its own runner-up before a _2 suffix"
+    # path is exercised by `assign_long_forms/3` and verified manually
+    # (`cs` ranks `["changeset", "changeset_summary"]`), but isn't given
+    # a dedicated integration test here: triggering it through real code
+    # requires two cryptic shorts to draw the *same* two-candidate
+    # ranking from context, which is too coupled to the latch scoring to
+    # assert stably.
+
+    test "collisions are scoped per clause — same long form in two clauses is fine" do
+      # `cs1` in `one/1` and `cs2` in `two/1` both map to `changeset`,
+      # but they live in different function bodies. No shadowing across
+      # clause boundaries, so each rewrites independently.
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def one(a) do
+            cs1 = build_changeset(a)
+            persist(cs1)
+          end
+
+          def two(b) do
+            cs2 = build_changeset(b)
+            persist(cs2)
+          end
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          def one(a) do
+            changeset = build_changeset(a)
+            persist(changeset)
+          end
+
+          def two(b) do
+            changeset = build_changeset(b)
+            persist(changeset)
+          end
+        end
+        ''',
+        known: %{"cs1" => "changeset", "cs2" => "changeset"}
+      )
+    end
+  end
+
   describe "Ecto from/in binding: schema is the strongest signal" do
     test "from(bi in BrandItem, ...) renames bi to brand_item across the body" do
       # The author's `from(bi in BrandItem, ...)` is an explicit

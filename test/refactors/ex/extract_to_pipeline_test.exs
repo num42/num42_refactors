@@ -329,6 +329,81 @@ defmodule Number42.Refactors.Ex.ExtractToPipelineTest do
     end
   end
 
+  describe "leaves alone — first arg is a special form (do/end or parens-elided)" do
+    # These special forms bind looser than `|>`. Without surrounding
+    # parens, `Enum.sum(for d <- xs, do: f(d))` rewritten as
+    # `for d <- xs, do: f(d) |> Enum.sum()` makes `|>` attach to the
+    # comprehension BODY (`f(d) |> Enum.sum()`), not its result list —
+    # changing semantics and crashing at runtime. The parens-elided
+    # `for`/`if`/`with` forms are the dangerous ones; `case`/`cond`
+    # do/end blocks happen to re-print safely, but the rule is uniform:
+    # an Enum/Stream call whose first arg is a special form is left as
+    # the call form. See GitHub issue #4.
+    test "first arg is a parens-elided for comprehension stays put" do
+      assert_unchanged(
+        @subject,
+        ~S|Enum.sum(for d <- 0..8, do: result["near_dup_block_d#{d}"])|
+      )
+    end
+
+    test "first arg is a for comprehension (simple) stays put" do
+      assert_unchanged(@subject, "Enum.sum(for d <- 0..8, do: result[d])")
+    end
+
+    test "first arg is an if/do/else expression stays put" do
+      assert_unchanged(@subject, "Enum.sum(if cond, do: a, else: b)")
+    end
+
+    test "first arg is an unless expression stays put" do
+      assert_unchanged(@subject, "Enum.count(unless cond, do: xs, else: ys)")
+    end
+
+    test "first arg is a case do/end block stays put" do
+      assert_unchanged(
+        @subject,
+        """
+        Enum.sum(case x do
+          1 -> [1]
+          _ -> []
+        end)
+        """
+      )
+    end
+
+    test "first arg is a cond do/end block stays put" do
+      assert_unchanged(
+        @subject,
+        """
+        Enum.count(cond do
+          true -> [1]
+        end)
+        """
+      )
+    end
+
+    test "first arg is a with expression stays put" do
+      assert_unchanged(@subject, "Enum.sum(with {:ok, v} <- f(), do: [v])")
+    end
+
+    # The same call site must keep skipping on a second pass — the
+    # bug in #4 was that a later pass re-matched the source and
+    # re-broke it.
+    test "for-comprehension first arg is idempotently left alone" do
+      assert_idempotent(@subject, "Enum.sum(for d <- 0..8, do: result[d])")
+    end
+
+    # A special form NOT in first-arg position is irrelevant to the
+    # precedence problem: only the first arg becomes the pipe LHS.
+    # `Enum.reduce(list, for(...), fun)` still extracts `list`.
+    test "special form in a non-first arg does not block extraction" do
+      assert_rewrites(
+        @subject,
+        "Enum.reduce(list, if(c, do: 0, else: 1), fun)",
+        "list |> Enum.reduce(if(c, do: 0, else: 1), fun)"
+      )
+    end
+  end
+
   describe "idempotent" do
     test "single rewrite is idempotent" do
       assert_idempotent(@subject, "Enum.map(list, fun)")

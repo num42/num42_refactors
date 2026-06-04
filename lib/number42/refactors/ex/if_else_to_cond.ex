@@ -280,8 +280,15 @@ defmodule Number42.Refactors.Ex.IfElseToCond do
   defp prepare_branch(%{pre: []} = b), do: {:ok, %{kind: :plain, branch: b}}
 
   defp prepare_branch(%{pre: pre, cond: cond_ast, body: body} = b) do
+    # The fn-extraction replaces the WHOLE branch condition with
+    # `compute_var.()`. That is only sound when the condition *is* exactly the
+    # bound variable — then `compute_var.()` is semantically equal to testing
+    # `var` for truthiness. If the condition is a compound expression that
+    # merely *references* the binding (e.g. `var > 0 and other_guard`),
+    # replacing it with `compute_var.()` would silently drop the real guards
+    # (issue #8). In that case we skip the whole rewrite (the safest default).
     with {:ok, last_binding_var, _rhs} <- last_stmt_is_binding(pre),
-         true <- cond_references_var?(cond_ast, last_binding_var),
+         true <- cond_is_exactly_var?(cond_ast, last_binding_var),
          false <- body_references_var?(body, last_binding_var) do
       fn_name = synth_fn_name(last_binding_var)
       fn_body = rewrap_pre_as_fn_body(pre)
@@ -365,9 +372,12 @@ defmodule Number42.Refactors.Ex.IfElseToCond do
 
   defp last_stmt_is_binding(_), do: :error
 
-  defp cond_references_var?(cond_ast, var) do
-    ast_contains_var?(cond_ast, var)
-  end
+  # True only when the condition AST is the bound variable itself (a bare
+  # `{var, _meta, ctx}` reference). A compound expression that *contains* the
+  # var does not qualify — replacing it wholesale with `compute_var.()` would
+  # drop the surrounding guards (issue #8).
+  defp cond_is_exactly_var?({var, _meta, ctx}, var) when is_atom(ctx), do: true
+  defp cond_is_exactly_var?(_cond_ast, _var), do: false
 
   defp body_references_var?(body, var), do: ast_contains_var?(body, var)
 

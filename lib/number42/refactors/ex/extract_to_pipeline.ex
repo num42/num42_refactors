@@ -27,6 +27,11 @@ defmodule Number42.Refactors.Ex.ExtractToPipeline do
     introducing one inside an operator silently re-associates the
     expression. Better to leave the call form than emit subtly wrong
     code.
+  - The **first arg is a special form** (`for`/`if`/`case`/`cond`/
+    `with`/...). These bind looser than `|>`, so a parens-elided form
+    in argument position (`Enum.sum(for d <- xs, do: f(d))`) would let
+    the fresh pipe attach inside the form's body rather than to its
+    result. Same conservative stance as a pipe-unsafe operand.
   - Zero-arg calls — nothing to extract.
 
   ## Why procedural
@@ -105,7 +110,15 @@ defmodule Number42.Refactors.Ex.ExtractToPipeline do
        when mod in @host_modules and is_atom(fun) and is_list(args) and args != [] do
     [first | rest] = args
 
-    with {:ok, first_text} <- slice_node_or_render(first),
+    # Special forms (`for`/`if`/`case`/`cond`/`with`/...) bind looser
+    # than `|>`: prepending such a first arg as the pipe LHS without
+    # surrounding parens makes the fresh `|>` attach inside the form's
+    # body. `Enum.sum(for d <- xs, do: f(d))` would become
+    # `for d <- xs, do: f(d) |> Enum.sum()` — the pipe takes each body
+    # value, not the comprehension's result list. Leave the call form,
+    # same conservative stance as a pipe-unsafe operand.
+    with false <- special_form?(first),
+         {:ok, first_text} <- slice_node_or_render(first),
          {:ok, rest_text} <- render_rest(rest) do
       mod_str = Atom.to_string(mod)
       fun_str = Atom.to_string(fun)

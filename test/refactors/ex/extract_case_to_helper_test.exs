@@ -27,16 +27,14 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelperTest do
       expected = """
       defmodule M do
         def mount(:not_mounted_at_router, %{"position_id" => position_id}, socket) do
-          load_for_mount(socket, position_id) |> handle_load_for_mount(socket)
+          load_for_mount(socket, position_id) |> on_load_for_mount_result(socket)
         end
 
-        # FIXME: extracted automatically by ExtractCaseToHelper — review
-        # the parameter list and consider a better name.
-        defp handle_load_for_mount({:ok, assigns}, socket) do
+        defp on_load_for_mount_result({:ok, assigns}, socket) do
           {:ok, assign(socket, assigns)}
         end
 
-        defp handle_load_for_mount({:error, :not_found}, socket) do
+        defp on_load_for_mount_result({:error, :not_found}, socket) do
           {:ok,
            socket
            |> assign(position: nil, invalid?: true)
@@ -67,16 +65,14 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelperTest do
       expected = """
       defmodule M do
         def foo(x) do
-          lookup(x) |> handle_foo_lookup()
+          lookup(x) |> on_lookup_result()
         end
 
-        # FIXME: extracted automatically by ExtractCaseToHelper — review
-        # the parameter list and consider a better name.
-        defp handle_foo_lookup({:ok, v}) do
+        defp on_lookup_result({:ok, v}) do
           combine(v, :ok, %{step: 1})
         end
 
-        defp handle_foo_lookup(:error) do
+        defp on_lookup_result(:error) do
           0
         end
       end
@@ -102,16 +98,14 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelperTest do
       expected = """
       defmodule M do
         def run(a, b) do
-          fetch(a) |> handle_run_fetch(a, b)
+          fetch(a) |> on_fetch_result(a, b)
         end
 
-        # FIXME: extracted automatically by ExtractCaseToHelper — review
-        # the parameter list and consider a better name.
-        defp handle_run_fetch({:ok, x}, a, _b) do
+        defp on_fetch_result({:ok, x}, a, _b) do
           use_a(x, a, %{tag: :ok})
         end
 
-        defp handle_run_fetch(:error, _a, b) do
+        defp on_fetch_result(:error, _a, b) do
           use_b(b)
         end
       end
@@ -120,9 +114,11 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelperTest do
       assert_rewrites(@subject, before_source, expected)
     end
 
-    test "remote call as scrutinee uses just the function name in helper name" do
-      # The match-on-found clause uses a multi-stage pipe — complex
-      # enough to clear the non-complex gate.
+    test "non-result patterns fall back to handle_<host>_<scrutinee>" do
+      # `nil` / bound-var clauses are not the {:ok,_}/{:error,_} result
+      # family, so the pattern-derived name doesn't fire — we keep the
+      # call-derived `handle_<host>_<scrutinee>` name. The match-on-found
+      # clause uses a multi-stage pipe — complex enough to clear the gate.
       before_source = """
       defmodule M do
         def get(id) do
@@ -140,8 +136,6 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelperTest do
           Repo.get(User, id) |> handle_get()
         end
 
-        # FIXME: extracted automatically by ExtractCaseToHelper — review
-        # the parameter list and consider a better name.
         defp handle_get(nil) do
           {:error, :not_found}
         end
@@ -176,22 +170,129 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelperTest do
         def go(x) do
           y = x + 1
 
-          work(y) |> handle_go_work(y)
+          work(y) |> on_work_result(y)
         end
 
-        # FIXME: extracted automatically by ExtractCaseToHelper — review
-        # the parameter list and consider a better name.
-        defp handle_go_work({:ok, r}, y) do
+        defp on_work_result({:ok, r}, y) do
           wrap(r, y, %{step: 2})
         end
 
-        defp handle_go_work(:error, y) do
+        defp on_work_result(:error, y) do
           y
         end
       end
       """
 
       assert_rewrites(@subject, before_source, expected)
+    end
+  end
+
+  describe "lifted body indentation" do
+    test "multi-line pipe body is dedented to canonical 4-space indent" do
+      # Regression for #13: the lifted body must be re-indented to a
+      # canonical 4-space base, not carry the source's deeper nesting.
+      # We compare against an exact (non-whitespace-squeezed) snapshot of
+      # the helper so over-indentation can't hide behind the squeeze.
+      before_source = """
+      defmodule M do
+        defp load_configs(tid) do
+          case File.ls(@yaml_dir) do
+            {:ok, files} ->
+              files
+              |> Enum.filter(&String.ends_with?(&1, ".yml"))
+              |> Enum.each(&load_yml_file(&1, tid))
+
+            {:error, _} ->
+              :ok
+          end
+        end
+      end
+      """
+
+      actual = apply_refactor(@subject, before_source)
+
+      assert actual =~
+               """
+                 defp on_ls_result({:ok, files}, tid) do
+                   files
+                   |> Enum.filter(&String.ends_with?(&1, ".yml"))
+                   |> Enum.each(&load_yml_file(&1, tid))
+                 end
+               """
+               |> String.trim_trailing("\n")
+
+      # No continuation line should be over-indented past the canonical
+      # body column (a pipe continuation at column > 5 would mean the
+      # source nesting leaked through).
+      refute actual =~ ~r/\n {6,}\|>/
+    end
+
+    test "nested case body keeps relative structure under 4-space base" do
+      before_source = """
+      defmodule M do
+        def go(x) do
+          case lookup(x) do
+            {:ok, v} ->
+              case decode(v) do
+                {:ok, d} -> d
+                :error -> :decode_failed
+              end
+
+            :error -> :lookup_failed
+          end
+        end
+      end
+      """
+
+      actual = apply_refactor(@subject, before_source)
+
+      assert actual =~
+               """
+                 defp on_lookup_result({:ok, v}) do
+                   case decode(v) do
+                     {:ok, d} -> d
+                     :error -> :decode_failed
+                   end
+                 end
+               """
+               |> String.trim_trailing("\n")
+    end
+  end
+
+  describe "no FIXME marker" do
+    test "extracted output carries no FIXME comment" do
+      before_source = """
+      defmodule M do
+        def mount(_, %{"id" => id}, socket) do
+          case load(socket, id) do
+            {:ok, assigns} -> {:ok, assign_async(socket, assigns, %{ok: true})}
+            :error -> {:error, :not_found}
+          end
+        end
+      end
+      """
+
+      actual = apply_refactor(@subject, before_source)
+
+      refute actual =~ "FIXME"
+      refute actual =~ "extracted automatically"
+    end
+
+    test "fallback-named output carries no FIXME comment either" do
+      before_source = """
+      defmodule M do
+        def get(id) do
+          case Repo.get(User, id) do
+            nil -> {:error, :not_found}
+            user -> user |> sanitize() |> wrap_ok()
+          end
+        end
+      end
+      """
+
+      actual = apply_refactor(@subject, before_source)
+
+      refute actual =~ "FIXME"
     end
   end
 
@@ -430,16 +531,14 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelperTest do
       expected = """
       defmodule M do
         def go(socket, id) do
-          load(socket, id) |> handle_go_load(socket)
+          load(socket, id) |> on_load_result(socket)
         end
 
-        # FIXME: extracted automatically by ExtractCaseToHelper — review
-        # the parameter list and consider a better name.
-        defp handle_go_load({:ok, assigns}, socket) do
+        defp on_load_result({:ok, assigns}, socket) do
           {:ok, assign(socket, assigns)}
         end
 
-        defp handle_go_load({:error, :not_found}, socket) do
+        defp on_load_result({:error, :not_found}, socket) do
           {:ok,
            socket
            |> assign(position: nil, invalid?: true)
@@ -466,16 +565,14 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelperTest do
       expected = """
       defmodule M do
         def run(a, b, ctx) do
-          fetch(a) |> handle_run_fetch(a, b, ctx)
+          fetch(a) |> on_fetch_result(a, b, ctx)
         end
 
-        # FIXME: extracted automatically by ExtractCaseToHelper — review
-        # the parameter list and consider a better name.
-        defp handle_run_fetch({:ok, x}, a, _b, ctx) do
+        defp on_fetch_result({:ok, x}, a, _b, ctx) do
           combine(x, a, ctx)
         end
 
-        defp handle_run_fetch(:error, _a, b, _ctx) do
+        defp on_fetch_result(:error, _a, b, _ctx) do
           b
         end
       end
@@ -506,19 +603,17 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelperTest do
       expected = """
       defmodule M do
         def go(x) do
-          lookup(x) |> handle_go_lookup()
+          lookup(x) |> on_lookup_result()
         end
 
-        # FIXME: extracted automatically by ExtractCaseToHelper — review
-        # the parameter list and consider a better name.
-        defp handle_go_lookup({:ok, v}) do
+        defp on_lookup_result({:ok, v}) do
           case decode(v) do
             {:ok, d} -> d
             :error -> :decode_failed
           end
         end
 
-        defp handle_go_lookup(:error) do
+        defp on_lookup_result(:error) do
           :lookup_failed
         end
       end
@@ -545,11 +640,11 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelperTest do
           end
         end
 
-        defp handle_foo_lookup({:ok, v}) do
+        defp on_lookup_result({:ok, v}) do
           wrap(v, :ok, %{seen: true})
         end
 
-        defp handle_foo_lookup(:error) do
+        defp on_lookup_result(:error) do
           0
         end
       end
@@ -566,16 +661,16 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelperTest do
           end
         end
 
-        defp handle_foo_lookup(_), do: :pre_existing
+        defp on_lookup_result(_), do: :pre_existing
       end
       """
 
       actual = apply_refactor(@subject, before_source)
-      assert String.contains?(actual, "lookup(x) |> handle_foo_lookup_2()")
-      assert String.contains?(actual, "defp handle_foo_lookup_2({:ok, v})")
-      assert String.contains?(actual, "defp handle_foo_lookup_2(:error)")
+      assert String.contains?(actual, "lookup(x) |> on_lookup_result_2()")
+      assert String.contains?(actual, "defp on_lookup_result_2({:ok, v})")
+      assert String.contains?(actual, "defp on_lookup_result_2(:error)")
       # Pre-existing helper stays put.
-      assert String.contains?(actual, "defp handle_foo_lookup(_)")
+      assert String.contains?(actual, "defp on_lookup_result(_)")
     end
 
     test "increments suffix until free: existing _2 forces _3" do
@@ -588,14 +683,14 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelperTest do
           end
         end
 
-        defp handle_foo_lookup(_), do: :one
-        defp handle_foo_lookup_2(_), do: :two
+        defp on_lookup_result(_), do: :one
+        defp on_lookup_result_2(_), do: :two
       end
       """
 
       actual = apply_refactor(@subject, before_source)
-      assert String.contains?(actual, "lookup(x) |> handle_foo_lookup_3()")
-      assert String.contains?(actual, "defp handle_foo_lookup_3({:ok, v})")
+      assert String.contains?(actual, "lookup(x) |> on_lookup_result_3()")
+      assert String.contains?(actual, "defp on_lookup_result_3({:ok, v})")
     end
   end
 
@@ -622,10 +717,10 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelperTest do
 
       # `token` rebound inside `from` — outer `token` is unused in body.
       # Pipe call has arity 1; helper signature has arity 1.
-      assert String.contains?(actual, "decode(token) |> handle_fetch_decode()")
-      assert String.contains?(actual, "defp handle_fetch_decode({:ok, decoded})")
-      assert String.contains?(actual, "defp handle_fetch_decode(:error)")
-      refute String.contains?(actual, "handle_fetch_decode(token)")
+      assert String.contains?(actual, "decode(token) |> on_decode_result()")
+      assert String.contains?(actual, "defp on_decode_result({:ok, decoded})")
+      assert String.contains?(actual, "defp on_decode_result(:error)")
+      refute String.contains?(actual, "on_decode_result(token)")
     end
 
     test "var rebound by `fn x ->` doesn't count as outer use" do
@@ -644,6 +739,7 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelperTest do
 
       actual = apply_refactor(@subject, before_source)
 
+      # `:keep` / `:drop` are not the result family → fallback name.
       # `x` is referenced in :drop body (outer) but not in :keep body
       # (the `x` inside `fn x -> x * 2 end` is the lambda binding, not
       # the outer var). `items` is used in :keep, not :drop.
@@ -678,7 +774,8 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelperTest do
     test "guard moves out of pattern slot into helper signature" do
       # Default branch builds the provider via a 3-arg call to clear
       # the non-complex gate; the guarded branch is the simple
-      # passthrough.
+      # passthrough. `{nil, rest}` / `{mod, rest}` are not the result
+      # family → fallback `handle_<host>_<scrutinee>` name.
       before_source = """
       defmodule M do
         defp resolve_provider(opts) do
@@ -696,8 +793,6 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelperTest do
           Keyword.pop(opts, :provider) |> handle_resolve_provider_pop()
         end
 
-        # FIXME: extracted automatically by ExtractCaseToHelper — review
-        # the parameter list and consider a better name.
         defp handle_resolve_provider_pop({nil, rest}) do
           {build_provider(:ai, :default, %{flag: true}), rest}
         end
@@ -713,7 +808,8 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelperTest do
 
     test "guard reading an outer var pulls that var into free_vars" do
       # First branch uses a 3-arg call to clear the non-complex gate;
-      # the guard logic is the actual subject under test.
+      # the guard logic is the actual subject under test. `{:big, n}` /
+      # `_` are not the result family → fallback name.
       before_source = """
       defmodule M do
         def run(threshold, items) do
@@ -754,9 +850,9 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelperTest do
 
       actual = apply_refactor(@subject, before_source)
 
-      assert String.contains?(actual, "load(id) |> handle_mount_load(socket)")
-      assert String.contains?(actual, "defp handle_mount_load({:ok, assigns}, socket)")
-      assert String.contains?(actual, "defp handle_mount_load(:error, _socket)")
+      assert String.contains?(actual, "load(id) |> on_load_result(socket)")
+      assert String.contains?(actual, "defp on_load_result({:ok, assigns}, socket)")
+      assert String.contains?(actual, "defp on_load_result(:error, _socket)")
     end
 
     test "pipe call uses real var names; only signatures get _ prefix" do
@@ -775,15 +871,16 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelperTest do
       actual = apply_refactor(@subject, before_source)
 
       # Pipe site keeps real names — vars exist at the call site.
-      assert String.contains?(actual, "fetch(a) |> handle_run_fetch(a, b)")
+      assert String.contains?(actual, "fetch(a) |> on_fetch_result(a, b)")
       # Each clause prefixes its locally-unused params.
-      assert String.contains?(actual, "defp handle_run_fetch({:ok, x}, a, _b)")
-      assert String.contains?(actual, "defp handle_run_fetch(:error, _a, b)")
+      assert String.contains?(actual, "defp on_fetch_result({:ok, x}, a, _b)")
+      assert String.contains?(actual, "defp on_fetch_result(:error, _a, b)")
     end
   end
 
   describe "name sanitization" do
-    test "strips trailing ?/! from host and scrutinee names" do
+    test "strips trailing ?/! from host and scrutinee names (fallback path)" do
+      # `{:module, _}` / `_` are not the result family → fallback name.
       # `:module` branch uses a 3-arg call so the gate lets the
       # extraction proceed; the boolean fall-through stays trivial.
       before_source = """
@@ -808,14 +905,17 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelperTest do
       assert {:ok, _} = Code.string_to_quoted(actual)
     end
 
-    test "strips bang from host name" do
+    test "strips bang from scrutinee name (result path)" do
+      # `{:ok, _}` / `:error` are the result family → pattern-derived
+      # name `on_<scrutinee>_result`. The scrutinee `persist!` keeps its
+      # bang stripped so the synthesised name is a valid identifier.
       # `raise` always counts as complex (control-flow break) →
       # gate lets the extraction through.
       before_source = """
       defmodule M do
         def commit!(state) do
-          case persist(state) do
-            {:ok, _} -> :ok
+          case persist!(state) do
+            {:ok, _} -> validate(state, :ok, %{committed: true})
             :error -> raise "boom"
           end
         end
@@ -824,8 +924,10 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelperTest do
 
       actual = apply_refactor(@subject, before_source)
 
-      assert String.contains?(actual, "handle_commit_persist")
-      refute String.contains?(actual, "handle_commit!_persist")
+      assert String.contains?(actual, "on_persist_result")
+      refute String.contains?(actual, "persist!_result")
+
+      assert {:ok, _} = Code.string_to_quoted(actual)
     end
   end
 
@@ -835,8 +937,23 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelperTest do
       defmodule M do
         def mount(_, %{"id" => id}, socket) do
           case load(socket, id) do
-            {:ok, assigns} -> {:ok, assign(socket, assigns)}
+            {:ok, assigns} -> {:ok, assign(socket, assigns, %{merge: true})}
             :error -> {:ok, put_flash(socket, :error, "nope")}
+          end
+        end
+      end
+      """
+
+      assert_idempotent(@subject, source)
+    end
+
+    test "running twice on a fallback-named extraction equals running once" do
+      source = """
+      defmodule M do
+        def get(id) do
+          case Repo.get(User, id) do
+            nil -> {:error, :not_found}
+            user -> user |> sanitize() |> wrap_ok()
           end
         end
       end
