@@ -418,6 +418,23 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
           expansion_overlaps_other_parts?(expansion, other_parts, part) ->
             {:halt, :skip}
 
+          # Prefix-truncation auto-complete (#15). The heuristic
+          # latched a short that is a *contiguous prefix* of a
+          # single-word expansion (`str` → `stream` off the module
+          # name `Stream`). That's not decoding an abbreviation
+          # (`cs → changeset`, `kw → keyword` drop internal letters)
+          # — it just lengthens a word the author already started
+          # typing. Treating it as an expansion fights the author:
+          # the rename re-fires on every run, and once a human
+          # renames `stream_token` back to the deliberate
+          # `str_token`, the loop repeats. A short that the author
+          # wrote as a leading truncation is part of a full,
+          # deliberate name — keep it verbatim. Explicit `known`
+          # mappings stay authoritative; this gate only tempers the
+          # heuristic guess.
+          heuristic_prefix_truncation?(part, expansion, resolve_opts) ->
+            {:cont, [part | acc]}
+
           true ->
             {:cont, [expansion | acc]}
         end
@@ -458,6 +475,20 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
     expansion
     |> String.split("_", trim: true)
     |> Enum.any?(&MapSet.member?(siblings, &1))
+  end
+
+  # True when the heuristic merely auto-completed a leading truncation:
+  # `short` is a contiguous prefix of a single-word `expansion`
+  # (`str` of `stream`). Genuine abbreviations (`cs`, `kw`, `bi`) are
+  # NOT prefixes — they drop internal letters or span words — so they
+  # pass through and still expand. An explicit project `known` mapping
+  # for `short` overrides this: the user asked for it, so we never
+  # second-guess it.
+  defp heuristic_prefix_truncation?(short, expansion, resolve_opts) do
+    not Map.has_key?(resolve_opts.known, short) and
+      not String.contains?(expansion, "_") and
+      short != expansion and
+      String.starts_with?(expansion, short)
   end
 
   # Walk the entire module body, patching every reference to a
