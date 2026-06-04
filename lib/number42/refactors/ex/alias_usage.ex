@@ -219,8 +219,7 @@ defmodule Number42.Refactors.Ex.AliasUsage do
     case ast do
       {:defmodule, _, [_name, [{_do, body}]]} ->
         toed_expr = body_to_exprs(body)
-        {prefix, _rest} = toed_expr |> Enum.split_while(&prefix_node?/1)
-        line = insert_line_after(prefix, body)
+        line = directive_insert_line(toed_expr)
         {toed_expr, line}
 
       _ ->
@@ -228,17 +227,35 @@ defmodule Number42.Refactors.Ex.AliasUsage do
     end
   end
 
-  defp insert_line_after([], body) do
-    case body do
-      {:__block__, _, [first | _]} -> line_of(first)
-      single -> line_of(single)
-    end
+  # The insertion point is *after* a leading `@moduledoc` (if any) and
+  # after the `use`/`alias`/`import`/`require`/`behaviour` prefix block.
+  # `@moduledoc` must stay the first thing in the module, so we anchor on
+  # the leading-moduledoc/prefix region — never inserting a directive
+  # above it. Other `@`-attributes are deliberately *not* prefix nodes:
+  # the alias belongs after them too, but they don't anchor the insertion.
+  defp directive_insert_line(exprs) do
+    {moduledoc, rest} = split_leading_moduledoc(exprs)
+    {prefix, _} = Enum.split_while(rest, &prefix_node?/1)
+
+    insert_anchored(prefix, moduledoc, rest)
   end
 
-  defp insert_line_after(prefix, _body) do
-    last = List.last(prefix)
-    end_of_expression_line(last) + 1
-  end
+  defp split_leading_moduledoc([{:@, _, [{:moduledoc, _, _}]} = moduledoc | rest]),
+    do: {moduledoc, rest}
+
+  defp split_leading_moduledoc(exprs), do: {nil, exprs}
+
+  # Insert *after* the last prefix node if there is one, else *after* a
+  # leading `@moduledoc`, else *at* the first body expression's line
+  # (pushing it down). Empty body falls back to line 1.
+  defp insert_anchored([_ | _] = prefix, _moduledoc, _rest),
+    do: end_of_expression_line(List.last(prefix)) + 1
+
+  defp insert_anchored([], moduledoc, _rest) when not is_nil(moduledoc),
+    do: end_of_expression_line(moduledoc) + 1
+
+  defp insert_anchored([], nil, [first | _]), do: line_of(first)
+  defp insert_anchored([], nil, []), do: 1
 
   defp patch_or_passthrough([], source), do: source
   defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
