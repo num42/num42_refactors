@@ -1104,6 +1104,171 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
     end
   end
 
+  describe "regression — incomplete lift into an unreachable Shared module is refused (#6)" do
+    # Real-world repro: a canonical `*.Shared` module already exists and
+    # is threaded through the planner's sources (mix refactor passes the
+    # whole file list via `source_files`). Two formatter modules share a
+    # `defp pr_summary_section/1`. The loser rewrite deletes that defp,
+    # extends `import Shared, only: [...]` with `pr_summary_section: 1`,
+    # and delegates `render/1` — but the lift never reaches the canonical
+    # Shared because the writer's module-name → path derivation resolves
+    # to a *different* file (the `CodeQA` → `code_qa` underscore split,
+    # tracked separately as the path bug). The compiler resolves the
+    # import/delegate to the canonical Shared, which never got the
+    # function → `undefined function pr_summary_section/1`.
+    #
+    # The lift is incomplete, so both edits must be refused: the losers
+    # keep their local `defp` and their original import, leaving the
+    # source exactly as compilable as before.
+    test "losers are left untouched when the lift can't reach the canonical Shared", %{tmp: tmp} do
+      # Canonical Shared lives at lib/codeqa/... — the writer derives
+      # lib/code_qa/... from the module name and can't find it.
+      canonical_dir = Path.join(tmp, "lib/codeqa/health_report/formatter")
+      File.mkdir_p!(canonical_dir)
+
+      shared = """
+      defmodule CodeQA.HealthReport.Formatter.Shared do
+        def count_severities_shared(list), do: Enum.frequencies_by(list, & &1.severity)
+        def worst_severity_shared(list), do: Enum.max_by(list, & &1.severity)
+      end
+      """
+
+      File.write!(Path.join(canonical_dir, "shared.ex"), shared)
+
+      github = """
+      defmodule CodeQA.HealthReport.Formatter.GitHub do
+        import CodeQA.HealthReport.Formatter.Shared, only: [count_severities_shared: 1, worst_severity_shared: 1]
+
+        def render(report) do
+          pr_summary_section(Map.get(report, :pr_summary)) ++
+            count_severities_shared(report.findings)
+        end
+
+        defp pr_summary_section(nil), do: []
+
+        defp pr_summary_section(summary) do
+          status = "modified \#{summary.files_modified}, added \#{summary.files_added}"
+          ["score \#{summary.score_delta}", status, ""]
+        end
+      end
+      """
+
+      plain = """
+      defmodule CodeQA.HealthReport.Formatter.Plain do
+        import CodeQA.HealthReport.Formatter.Shared, only: [count_severities_shared: 1, worst_severity_shared: 1]
+
+        def render(report) do
+          pr_summary_section(Map.get(report, :pr_summary)) ++
+            count_severities_shared(report.findings)
+        end
+
+        defp pr_summary_section(nil), do: []
+
+        defp pr_summary_section(summary) do
+          status = "modified \#{summary.files_modified}, added \#{summary.files_added}"
+          ["score \#{summary.score_delta}", status, ""]
+        end
+      end
+      """
+
+      # The planner sees the canonical Shared among its sources (exactly
+      # what `mix refactor` does via `source_files`).
+      plan =
+        prepared(
+          [
+            {"lib/codeqa/health_report/formatter/shared.ex", shared},
+            {"lib/codeqa/health_report/formatter/github.ex", github},
+            {"lib/codeqa/health_report/formatter/plain.ex", plain}
+          ],
+          write_root: tmp
+        )
+
+      # No loser is rewritten — the lift was refused.
+      assert plan == %{}
+
+      # The originals are unchanged: defp helper intact, import not
+      # extended, render/1 not delegated. So the source still compiles.
+      assert_unchanged(@subject, github, prepared: plan)
+      assert_unchanged(@subject, plain, prepared: plan)
+
+      # The canonical Shared is never given the function, so an import
+      # of `pr_summary_section: 1` would dangle — refusing the rewrite is
+      # the only compilable outcome.
+      refute apply_refactor(@subject, github, prepared: plan) =~ "pr_summary_section: 1"
+    end
+
+    test "lift still completes when the canonical Shared is reachable", %{tmp: tmp} do
+      # Same shape, but the canonical Shared sits where the writer's path
+      # derivation lands (`MyApp.Items` → lib/my_app/items). The lift
+      # must complete: the helper moves to Shared, the loser imports it.
+      shared_path = Path.join(tmp, "lib/my_app/items/shared.ex")
+      File.mkdir_p!(Path.dirname(shared_path))
+
+      shared = """
+      defmodule MyApp.Items.Shared do
+        def existing_helper(x), do: x + 1
+      end
+      """
+
+      File.write!(shared_path, shared)
+
+      a = """
+      defmodule MyApp.Items.A do
+        import MyApp.Items.Shared, only: [existing_helper: 1]
+
+        def render(report) do
+          summarize(report) ++ [existing_helper(report.score)]
+        end
+
+        defp summarize(report) do
+          report
+          |> Map.get(:items, [])
+          |> Enum.map(& &1.label)
+        end
+      end
+      """
+
+      b = """
+      defmodule MyApp.Items.B do
+        import MyApp.Items.Shared, only: [existing_helper: 1]
+
+        def render(report) do
+          summarize(report) ++ [existing_helper(report.score)]
+        end
+
+        defp summarize(report) do
+          report
+          |> Map.get(:items, [])
+          |> Enum.map(& &1.label)
+        end
+      end
+      """
+
+      plan =
+        prepared(
+          [
+            {"lib/my_app/items/shared.ex", shared},
+            {"lib/my_app/items/a.ex", a},
+            {"lib/my_app/items/b.ex", b}
+          ],
+          write_root: tmp
+        )
+
+      result_a = apply_refactor(@subject, a, prepared: plan)
+
+      # The helper moved to Shared as a public def; the loser's defp is
+      # gone and an import takes its place — every unqualified call to the
+      # migrated helper now resolves, so the post-lift source compiles.
+      shared_source = File.read!(shared_path)
+      assert shared_source =~ "def existing_helper(x)"
+      assert shared_source =~ ~r/def summarize\(report\)/
+      refute result_a =~ ~r/defp summarize\(/
+      assert result_a =~ ~r/import MyApp\.Items\.Shared,\s*only:\s*\[[^\]]*summarize:\s*1[^\]]*\]/
+      # The pre-existing `existing_helper: 1` import must survive.
+      assert result_a =~ ~r/existing_helper:\s*1/
+    end
+  end
+
   describe "origin comments" do
     # Reviewers want to see at a glance which modules a shared
     # function/helper came from. Every rendered definition gets a
