@@ -54,13 +54,21 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
   @binding_macros [:from]
 
   # Lexically-scoped compile-time macros: their value depends on the
-  # module they're expanded in, not on any runtime argument. Lifting a
-  # clone body that uses one into a `*.Shared` module silently rebinds
-  # it — e.g. `%__MODULE__{...}` then refers to the struct-less Shared
-  # module and fails to compile. There's no literal divergence the
-  # parametriser could capture, so a clone body (or a migrated helper)
-  # using one is skipped.
-  @lexical_macros [:__MODULE__, :__ENV__, :__CALLER__, :__DIR__, :__STACKTRACE__]
+  # module they're expanded in, not on any runtime argument.
+  #
+  # `__MODULE__` is the *parametrisable* one: when a cross-file clone
+  # body uses it, the cross-file emitter threads the module in as an
+  # extra argument (`%__MODULE__{...}` → `struct!(module, ...)`, bare
+  # `__MODULE__` → the module var) so the lifted helper stays correct
+  # in the `*.Shared` module. Intra-module extraction leaves it alone —
+  # the helper stays in the clones' own module, where `__MODULE__`
+  # already resolves correctly.
+  @module_macro :__MODULE__
+
+  # The rest have no runtime value to pass as a parameter, so a clone
+  # body (or a migrated helper) using one is skipped: lifting it into a
+  # `*.Shared` module would silently rebind it to the wrong module.
+  @unsafe_lexical_macros [:__ENV__, :__CALLER__, :__DIR__, :__STACKTRACE__]
 
   @doc """
   Build a rewrite plan from `[{path, source_string}]` tuples.
@@ -349,14 +357,14 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
     found?
   end
 
-  defp ast_uses_lexical_macro?(ast) do
+  defp ast_uses_macro?(ast, macros) do
     {_, found?} =
       Macro.prewalk(ast, false, fn
         _node, true ->
           {:ignore, true}
 
-        {name, _meta, ctx} = node, false when name in @lexical_macros and is_atom(ctx) ->
-          {node, true}
+        {name, _meta, ctx} = node, false when is_atom(name) and is_atom(ctx) ->
+          {node, name in macros}
 
         node, false ->
           {node, false}
@@ -364,6 +372,10 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
 
     found?
   end
+
+  defp ast_uses_unsafe_lexical_macro?(ast), do: ast_uses_macro?(ast, @unsafe_lexical_macros)
+
+  defp ast_uses_module_macro?(ast), do: ast_uses_macro?(ast, [@module_macro])
 
   defp atom_shaped_key?({:__block__, _, [a]}) when is_atom(a), do: true
   defp atom_shaped_key?(a) when is_atom(a), do: true
@@ -529,12 +541,13 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
                 # time. Skip the clause rather than emit broken code.
                 []
 
-              contains_lexical_macro?(body_kw) ->
-                # `__MODULE__`/`__ENV__`/`__CALLER__`/… resolve against
-                # the lexical module. Lifting them into a `*.Shared`
-                # module silently rebinds them (e.g. `%__MODULE__{}` →
-                # the struct-less Shared module → compile error). No
-                # literal divergence to capture, so skip the clause.
+              contains_unsafe_lexical_macro?(body_kw) ->
+                # `__ENV__`/`__CALLER__`/`__DIR__`/`__STACKTRACE__` have
+                # no runtime value to pass as a parameter. Lifting them
+                # into a `*.Shared` module silently rebinds them, so
+                # skip the clause. `__MODULE__` is NOT in this set — it
+                # is parametrised in the cross-file emitter (intra-module
+                # extraction leaves it alone, where it stays correct).
                 []
 
               true ->
@@ -552,11 +565,14 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
                   reachable_helper_clauses(body_exprs, name, length(args))
 
                 # A migrated `defp` carries its body into the Shared
-                # module too, so a lexical macro hiding in one of them
-                # is just as unsafe as one in the clone body.
+                # module too. An unsafe lexical macro there is as bad as
+                # in the clone body; `__MODULE__` in a migrated helper is
+                # also rejected because this change parametrises only the
+                # clone body, not migrated helpers.
                 reject_helpers? =
                   helpers_conflict? or
-                    Enum.any?(migratable_helpers, &clause_uses_lexical_macro?/1)
+                    Enum.any?(migratable_helpers, &clause_uses_unsafe_lexical_macro?/1) or
+                    Enum.any?(migratable_helpers, &clause_uses_module_macro?/1)
 
                 # Module attrs referenced from body or migratable
                 # helpers. A non-literal value or a missing attr
@@ -938,16 +954,26 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
       |> Keyword.values()
       |> Enum.any?(&ast_uses_binding_macro?/1)
 
-  defp contains_lexical_macro?(body_kw),
+  defp contains_unsafe_lexical_macro?(body_kw),
     do:
       body_kw
       |> Keyword.values()
-      |> Enum.any?(&ast_uses_lexical_macro?/1)
+      |> Enum.any?(&ast_uses_unsafe_lexical_macro?/1)
 
-  defp clause_uses_lexical_macro?({_kind, _, [_head, body_kw]}) when is_list(body_kw),
-    do: contains_lexical_macro?(body_kw)
+  # `__ENV__`/`__CALLER__`/… in a migrated `defp` would break in the
+  # `*.Shared` module just like in the clone body, and we don't
+  # parametrise migrated helpers — so they still reject the group.
+  # The clause body keeps raw Sourceror keys (`{:__block__, _, [:do]}`),
+  # so walk the whole clause AST rather than `Keyword.values`-ing it.
+  defp clause_uses_unsafe_lexical_macro?(clause),
+    do: ast_uses_unsafe_lexical_macro?(clause)
 
-  defp clause_uses_lexical_macro?(_), do: false
+  # A migrated `defp` carrying `__MODULE__` into a `*.Shared` module
+  # would break too — this change only parametrises the clone body, not
+  # migrated helpers — so such a group is rejected in the cross-file
+  # path (see `reject_helpers?`).
+  defp clause_uses_module_macro?(clause),
+    do: ast_uses_module_macro?(clause)
 
   defp dedupe_outer_holes(holes) do
     holes
@@ -1037,15 +1063,33 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
       |> Enum.map(&clause_name_arity/1)
       |> MapSet.new()
 
-    helper_body =
+    inflated_body =
       skeleton
       |> inflate_skeleton(outer_groups, helper_args)
       |> rename_local_holes(local_groups)
       |> qualify_aliases_skip_locals(first.aliases, migratable_local_calls)
 
+    # Cross-file lift moves the body into a *.Shared module, where a
+    # `__MODULE__` reference would rebind to the struct-less shared
+    # module. Thread the source module in as a first argument and
+    # rewrite `%__MODULE__{...}` → `struct!(module, ...)` / bare
+    # `__MODULE__` → the module var. The module var is prepended only
+    # to the emitted signature — `inflate_skeleton` already ran on the
+    # original `helper_args` (its hole-count math depends on that), so
+    # the parameter never participates in hole inflation.
+    parametrise_module? = ast_uses_module_macro?(inflated_body)
+    module_var = if parametrise_module?, do: fresh_module_var(helper_args, all_bound)
+
+    helper_body =
+      if parametrise_module?,
+        do: parametrize_module_macro(inflated_body, module_var),
+        else: inflated_body
+
+    final_args = if parametrise_module?, do: [module_var | helper_args], else: helper_args
+
     helper_def = %{
-      args: helper_args,
-      arity: length(helper_args),
+      args: final_args,
+      arity: length(final_args),
       body_ast: helper_body,
       kind: :def,
       name: helper_name
@@ -1074,7 +1118,11 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
             outer_groups |> Enum.map(fn g -> g.values |> Enum.at(e.bucket_index) end)
 
           kept_args = kept_arg_indices |> Enum.map(&Enum.at(e.arg_names, &1))
-          replacement = render_call(helper_name, kept_args ++ outer_values)
+
+          # When the helper was parametrised on the module, each caller
+          # passes its own `__MODULE__` as the (first) module argument.
+          leading_module = if parametrise_module?, do: [{:__MODULE__, [], nil}], else: []
+          replacement = render_call(helper_name, leading_module ++ kept_args ++ outer_values)
 
           rewrite_entry =
             {e.module,
@@ -1093,7 +1141,7 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
             [rewrite_entry]
           else
             import_entry =
-              {e.module, {:import, {target_module, [{helper_name, length(helper_args)}]}}}
+              {e.module, {:import, {target_module, [{helper_name, length(final_args)}]}}}
 
             [rewrite_entry, import_entry]
           end
@@ -2041,6 +2089,39 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
     |> Enum.sort_by(fn {name, _} -> name end)
     |> Enum.map_join("\n", fn {name, value_ast} ->
       "@#{name} #{value_ast |> strip_comments() |> Sourceror.to_string()}"
+    end)
+  end
+
+  # A parameter name for the threaded-in module, not colliding with
+  # any existing helper arg or body-bound var. `module` is the natural
+  # first choice; `resolve_name_collision` appends a digit if taken.
+  defp fresh_module_var(helper_args, all_bound) do
+    taken = MapSet.new(helper_args) |> MapSet.union(all_bound)
+    resolve_name_collision(:module, taken, 0)
+  end
+
+  # Rewrite lexical `__MODULE__` references in a cross-file helper body
+  # so the body is correct in the `*.Shared` module it gets lifted into:
+  #
+  #   %__MODULE__{a: x}  →  struct!(module, a: x)
+  #   {__MODULE__, x}    →  {module, x}   (bare reference)
+  #
+  # `%__MODULE__{...}` can't become `%module{...}` — that's struct
+  # *pattern* syntax, not construction — so it lowers to `struct!/2`
+  # (raises on unknown keys, matching the original struct literal's
+  # strictness). The struct's `{:%{}, _, pairs}` already carries the
+  # field pairs as a keyword list, reused verbatim as `struct!/2`'s
+  # second argument.
+  defp parametrize_module_macro(ast, module_var) do
+    Macro.prewalk(ast, fn
+      {:%, meta, [{:__MODULE__, _, ctx}, {:%{}, _, pairs}]} when is_atom(ctx) ->
+        {:struct!, meta, [{module_var, [], nil}, pairs]}
+
+      {:__MODULE__, _, ctx} when is_atom(ctx) ->
+        {module_var, [], nil}
+
+      other ->
+        other
     end)
   end
 
