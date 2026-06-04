@@ -111,6 +111,76 @@ defmodule Number42.RefactorCase do
   end
 
   @doc """
+  Return the list of `{visibility, name, arity}` definition groups in
+  `source` whose clauses are **not** contiguous.
+
+  The Elixir compiler emits *"clauses with the same name and arity
+  (number of arguments) should be grouped together"* when a function's
+  clauses are interrupted by another definition. We detect the same
+  condition by parsing the source and walking the top-level `def`/`defp`
+  nodes in order: a group is non-contiguous when clauses sharing the
+  same `{visibility, name, arity}` reappear after a different definition
+  has been seen in between.
+
+  This is a pure, deterministic, side-effect-free check — unlike
+  `Code.compile_string/1`, it never loads or purges modules and so
+  cannot pollute concurrently-running async tests.
+  """
+  @spec ungrouped_clauses(String.t()) :: [{:def | :defp, atom(), non_neg_integer()}]
+  def ungrouped_clauses(source) do
+    source
+    |> def_keys_in_order()
+    |> detect_ungrouped()
+  end
+
+  defp def_keys_in_order(source) do
+    case Sourceror.parse_string(source) do
+      {:ok, ast} ->
+        ast
+        |> Macro.prewalker()
+        |> Enum.flat_map(fn
+          {:defmodule, _, [_name, [{_do, body}]]} -> top_level_def_keys(body)
+          _ -> []
+        end)
+
+      {:error, _} ->
+        []
+    end
+  end
+
+  defp top_level_def_keys({:__block__, _, exprs}), do: Enum.flat_map(exprs, &def_key/1)
+  defp top_level_def_keys(expr), do: def_key(expr)
+
+  defp def_key({vis, _, [head | _]}) when vis in [:def, :defp] do
+    case def_name_arity(head) do
+      {name, arity} -> [{vis, name, arity}]
+      :error -> []
+    end
+  end
+
+  defp def_key(_), do: []
+
+  defp def_name_arity({:when, _, [head | _]}), do: def_name_arity(head)
+  defp def_name_arity({name, _, ctx}) when is_atom(name) and is_atom(ctx), do: {name, 0}
+
+  defp def_name_arity({name, _, args}) when is_atom(name) and is_list(args),
+    do: {name, length(args)}
+
+  defp def_name_arity(_), do: :error
+
+  # Walk the ordered keys; a group is non-contiguous if we encounter a
+  # key, then a *different* key, then that first key again.
+  defp detect_ungrouped(keys) do
+    keys
+    |> Enum.reduce({nil, MapSet.new(), MapSet.new()}, fn key, {prev, seen, bad} ->
+      bad = if key != prev and MapSet.member?(seen, key), do: MapSet.put(bad, key), else: bad
+      {key, MapSet.put(seen, key), bad}
+    end)
+    |> elem(2)
+    |> MapSet.to_list()
+  end
+
+  @doc """
   Assert that `source` compiles as real Elixir.
 
   Some refactors split or rewrite function heads; a structurally valid
