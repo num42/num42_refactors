@@ -129,8 +129,9 @@ defmodule Number42.Refactors.Ex.ExtractNestedBlock do
   defp deepest_too_deep_fn(body, max_nesting) do
     body
     |> walk_with_depth(0)
-    |> Enum.filter(fn {node, depth} -> match?({:fn, _, _}, node) and depth >= max_nesting end)
-    |> Enum.filter(fn {node, _depth} -> liftable_fn?(node) end)
+    |> Enum.filter(fn {node, depth} ->
+      match?({:fn, _, _}, node) and depth >= max_nesting and liftable_fn?(node)
+    end)
     |> case do
       [] -> nil
       candidates -> candidates |> Enum.max_by(fn {_, depth} -> depth end)
@@ -282,20 +283,21 @@ defmodule Number42.Refactors.Ex.ExtractNestedBlock do
     |> Enum.flat_map(fn
       {kind, _, [head, kw]} when kind in [:defp, :defmacrop] and is_list(kw) ->
         case extract_fn_signature(head) do
-          {name, _args} ->
-            case fetch_do_body_keyword(kw) do
-              {:ok, body} -> [{Atom.to_string(name), body}]
-              :error -> []
-            end
-
-          :error ->
-            []
+          {name, _args} -> index_entry_for(name, kw)
+          :error -> []
         end
 
       _ ->
         []
     end)
     |> Enum.group_by(fn {name, _} -> name end, fn {_, body} -> body end)
+  end
+
+  defp index_entry_for(name, kw) do
+    case fetch_do_body_keyword(kw) do
+      {:ok, body} -> [{Atom.to_string(name), body}]
+      :error -> []
+    end
   end
 
   defp liftable_fn?({:fn, _, [{:->, _, [_args, body]}]}),

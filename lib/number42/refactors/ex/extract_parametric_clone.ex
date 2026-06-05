@@ -252,22 +252,20 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
       {:defmodule, _, [name_ast, [{_do, body}]]} = mod_node ->
         case alias_to_module(name_ast) do
           {:ok, mod} ->
-            cond do
-              shared_module?(mod) ->
-                # `*.Shared` is the host file we write to, never a loser.
-                # If a stale plan still lists it, ignore — patching would
-                # inject a self-import and rewrite the helper into a
-                # delegate to itself.
-                []
+            if shared_module?(mod) do
+              # `*.Shared` is the host file we write to, never a loser.
+              # If a stale plan still lists it, ignore — patching would
+              # inject a self-import and rewrite the helper into a
+              # delegate to itself.
+              []
+            else
+              case Map.get(plan, mod) do
+                nil ->
+                  []
 
-              true ->
-                case Map.get(plan, mod) do
-                  nil ->
-                    []
-
-                  {helpers, rewrites, imports} ->
-                    patches_for_module(mod_node, body, helpers, rewrites, imports)
-                end
+                {helpers, rewrites, imports} ->
+                  patches_for_module(mod_node, body, helpers, rewrites, imports)
+              end
             end
 
           :error ->
@@ -519,99 +517,97 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
          module_attrs,
          body_exprs
        ) do
-    cond do
-      head_has_guard?(head) ->
-        # `when`-guards would have to be replicated by the helper.
-        # Out of scope for v1.
-        []
+    if head_has_guard?(head) do
+      # `when`-guards would have to be replicated by the helper.
+      # Out of scope for v1.
+      []
+    else
+      case extract_fn_signature(head) do
+        {name, args} when is_list(args) ->
+          arg_bindings = args |> Enum.map(&extract_arg_binding/1)
 
-      true ->
-        case extract_fn_signature(head) do
-          {name, args} when is_list(args) ->
-            arg_bindings = args |> Enum.map(&extract_arg_binding/1)
+          cond do
+            arg_bindings |> Enum.any?(&(&1 == :error)) ->
+              []
 
-            cond do
-              arg_bindings |> Enum.any?(&(&1 == :error)) ->
-                []
+            clause_mass(clause) < min_mass ->
+              []
 
-              clause_mass(clause) < min_mass ->
-                []
+            contains_binding_macro_call?(body_kw) ->
+              # Macros that bind a variable inside a compile-time
+              # keyword list (Ecto `from(bind in Schema, where: …)`,
+              # similar query DSLs) cannot be parametrised: their
+              # bind name and keyword keys must be atoms at compile
+              # time. Skip the clause rather than emit broken code.
+              []
 
-              contains_binding_macro_call?(body_kw) ->
-                # Macros that bind a variable inside a compile-time
-                # keyword list (Ecto `from(bind in Schema, where: …)`,
-                # similar query DSLs) cannot be parametrised: their
-                # bind name and keyword keys must be atoms at compile
-                # time. Skip the clause rather than emit broken code.
-                []
+            contains_unsafe_lexical_macro?(body_kw) ->
+              # `__ENV__`/`__CALLER__`/`__DIR__`/`__STACKTRACE__` have
+              # no runtime value to pass as a parameter. Lifting them
+              # into a `*.Shared` module silently rebinds them, so
+              # skip the clause. `__MODULE__` is NOT in this set — it
+              # is parametrised in the cross-file emitter (intra-module
+              # extraction leaves it alone, where it stays correct).
+              []
 
-              contains_unsafe_lexical_macro?(body_kw) ->
-                # `__ENV__`/`__CALLER__`/`__DIR__`/`__STACKTRACE__` have
-                # no runtime value to pass as a parameter. Lifting them
-                # into a `*.Shared` module silently rebinds them, so
-                # skip the clause. `__MODULE__` is NOT in this set — it
-                # is parametrised in the cross-file emitter (intra-module
-                # extraction leaves it alone, where it stays correct).
-                []
+            true ->
+              arg_names = arg_bindings |> Enum.map(fn {:ok, n} -> n end)
+              body_ast = body_kw |> Keyword.values() |> List.first()
 
-              true ->
-                arg_names = arg_bindings |> Enum.map(fn {:ok, n} -> n end)
-                body_ast = body_kw |> Keyword.values() |> List.first()
+              # Reachable defp helpers: those that this clone can
+              # call AND that no other public def in the module
+              # also calls (otherwise migrating them orphans the
+              # other caller). When a clone references a defp that
+              # is *also* used by a non-clone def, the clone group
+              # gets rejected at emit-time — we record the conflict
+              # via `reject_helpers?`.
+              {migratable_helpers, helpers_conflict?} =
+                reachable_helper_clauses(body_exprs, name, length(args))
 
-                # Reachable defp helpers: those that this clone can
-                # call AND that no other public def in the module
-                # also calls (otherwise migrating them orphans the
-                # other caller). When a clone references a defp that
-                # is *also* used by a non-clone def, the clone group
-                # gets rejected at emit-time — we record the conflict
-                # via `reject_helpers?`.
-                {migratable_helpers, helpers_conflict?} =
-                  reachable_helper_clauses(body_exprs, name, length(args))
+              # A migrated `defp` carries its body into the Shared
+              # module too. An unsafe lexical macro there is as bad as
+              # in the clone body; `__MODULE__` in a migrated helper is
+              # also rejected because this change parametrises only the
+              # clone body, not migrated helpers.
+              reject_helpers? =
+                helpers_conflict? or
+                  Enum.any?(migratable_helpers, &clause_uses_unsafe_lexical_macro?/1) or
+                  Enum.any?(migratable_helpers, &clause_uses_module_macro?/1)
 
-                # A migrated `defp` carries its body into the Shared
-                # module too. An unsafe lexical macro there is as bad as
-                # in the clone body; `__MODULE__` in a migrated helper is
-                # also rejected because this change parametrises only the
-                # clone body, not migrated helpers.
-                reject_helpers? =
-                  helpers_conflict? or
-                    Enum.any?(migratable_helpers, &clause_uses_unsafe_lexical_macro?/1) or
-                    Enum.any?(migratable_helpers, &clause_uses_module_macro?/1)
+              # Module attrs referenced from body or migratable
+              # helpers. A non-literal value or a missing attr
+              # (e.g. attr declared with `Module.put_attribute`,
+              # not `@`) makes migration unsafe.
+              attrs_used = collect_attrs_used([body_ast], migratable_helpers)
 
-                # Module attrs referenced from body or migratable
-                # helpers. A non-literal value or a missing attr
-                # (e.g. attr declared with `Module.put_attribute`,
-                # not `@`) makes migration unsafe.
-                attrs_used = collect_attrs_used([body_ast], migratable_helpers)
+              {attrs_to_migrate, reject_attrs?} =
+                resolve_attrs_for_migration(attrs_used, module_attrs)
 
-                {attrs_to_migrate, reject_attrs?} =
-                  resolve_attrs_for_migration(attrs_used, module_attrs)
+              [
+                %{
+                  aliases: aliases,
+                  arg_names: arg_names,
+                  arity: length(args),
+                  attrs: attrs_to_migrate,
+                  attrs_rejected?: reject_attrs?,
+                  body_ast: body_ast,
+                  bucket_index: nil,
+                  clause: clause,
+                  helpers: migratable_helpers,
+                  helpers_rejected?: reject_helpers?,
+                  imports: imports,
+                  kind: kind,
+                  module: module,
+                  name: name,
+                  path: path,
+                  skeleton_hash: skeleton_hash(body_ast)
+                }
+              ]
+          end
 
-                [
-                  %{
-                    aliases: aliases,
-                    arg_names: arg_names,
-                    arity: length(args),
-                    attrs: attrs_to_migrate,
-                    attrs_rejected?: reject_attrs?,
-                    body_ast: body_ast,
-                    bucket_index: nil,
-                    clause: clause,
-                    helpers: migratable_helpers,
-                    helpers_rejected?: reject_helpers?,
-                    imports: imports,
-                    kind: kind,
-                    module: module,
-                    name: name,
-                    path: path,
-                    skeleton_hash: skeleton_hash(body_ast)
-                  }
-                ]
-            end
-
-          _ ->
-            []
-        end
+        _ ->
+          []
+      end
     end
   end
 
@@ -1769,37 +1765,35 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
 
     %{holes: holes, skeleton: skeleton} = AstDiff.tree_diff(asts)
 
-    cond do
-      holes_land_on_map_keys?(skeleton, holes) ->
-        # Map keys (and keyword-list keys) are nearly always semantically
-        # load-bearing. Two helpers that only differ in their map keys
-        # are not really clones — they construct different things.
-        # Consolidating them produces a misleading helper name and
-        # actively misleading parameter names (`%{name => …, logo_asset_id => …}`
-        # called for a mass-asset).
-        {[], state}
+    if holes_land_on_map_keys?(skeleton, holes) do
+      # Map keys (and keyword-list keys) are nearly always semantically
+      # load-bearing. Two helpers that only differ in their map keys
+      # are not really clones — they construct different things.
+      # Consolidating them produces a misleading helper name and
+      # actively misleading parameter names (`%{name => …, logo_asset_id => …}`
+      # called for a mass-asset).
+      {[], state}
+    else
+      case pick_target(indexed_entries) do
+        :skip ->
+          {[], state}
 
-      true ->
-        case pick_target(indexed_entries) do
-          :skip ->
-            {[], state}
+        {:intra, target_module} ->
+          emit_intra_plan(indexed_entries, target_module, skeleton, holes, state)
 
-          {:intra, target_module} ->
-            emit_intra_plan(indexed_entries, target_module, skeleton, holes, state)
+        {:suffix, target_module} ->
+          emit_cross_file_plan(:suffix, indexed_entries, target_module, skeleton, holes, state)
 
-          {:suffix, target_module} ->
-            emit_cross_file_plan(:suffix, indexed_entries, target_module, skeleton, holes, state)
-
-          {:lcp_shared, target_module} ->
-            emit_cross_file_plan(
-              :lcp_shared,
-              indexed_entries,
-              target_module,
-              skeleton,
-              holes,
-              state
-            )
-        end
+        {:lcp_shared, target_module} ->
+          emit_cross_file_plan(
+            :lcp_shared,
+            indexed_entries,
+            target_module,
+            skeleton,
+            holes,
+            state
+          )
+      end
     end
   end
 

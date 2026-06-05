@@ -115,9 +115,10 @@ defmodule Number42.Refactors.Ex.IfElseToCond do
   defp if_shape({:if, meta, [cond_ast, kw]}) when is_list(kw) do
     {do_body, else_body} = extract_do_else(kw)
 
-    cond do
-      do_body && else_body -> {:ok, %{cond: cond_ast, do: do_body, else: else_body, meta: meta}}
-      true -> :error
+    if do_body && else_body do
+      {:ok, %{cond: cond_ast, do: do_body, else: else_body, meta: meta}}
+    else
+      :error
     end
   end
 
@@ -137,17 +138,15 @@ defmodule Number42.Refactors.Ex.IfElseToCond do
   # nil-cond marks the terminal `true ->` branch.
   # Decomposes nested if/else recursively.
   defp collect_branches(%{cond: cond_ast, do: do_body, else: else_body}) do
-    cond do
-      ast_eq?(do_body, else_body) ->
-        # Outer if is dead — both branches identical. Drop outer condition,
-        # try to make a cond from the inner shape directly.
-        collect_from_branch(do_body, [])
-
-      true ->
-        with {:ok, do_branches} <- collect_from_branch(do_body, []),
-             {:ok, else_branches} <- collect_from_branch(else_body, []) do
-          merge_branches(cond_ast, do_branches, else_branches)
-        end
+    if ast_eq?(do_body, else_body) do
+      # Outer if is dead — both branches identical. Drop outer condition,
+      # try to make a cond from the inner shape directly.
+      collect_from_branch(do_body, [])
+    else
+      with {:ok, do_branches} <- collect_from_branch(do_body, []),
+           {:ok, else_branches} <- collect_from_branch(else_body, []) do
+        merge_branches(cond_ast, do_branches, else_branches)
+      end
     end
   end
 

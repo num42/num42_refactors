@@ -386,14 +386,7 @@ defmodule Number42.Refactors.Ex.LengthInGuard do
     pairs
     |> Enum.find_value(:skip, fn
       {key_ast, {name, _, ctx}} when is_atom(name) and is_atom(ctx) ->
-        if name == var do
-          case map_key_atom(key_ast) do
-            {:ok, atom} -> {:ok, {:map_key, atom}}
-            :skip -> :skip
-          end
-        else
-          nil
-        end
+        if name == var, do: map_key_path(key_ast), else: nil
 
       _ ->
         nil
@@ -404,6 +397,14 @@ defmodule Number42.Refactors.Ex.LengthInGuard do
     do: find_var_in_pattern(lhs, var) |> find_var_or_recurse_rhs(rhs, var)
 
   defp find_var_in_pattern(_, _), do: :skip
+
+  defp map_key_path(key_ast) do
+    case map_key_atom(key_ast) do
+      {:ok, atom} -> {:ok, {:map_key, atom}}
+      :skip -> :skip
+    end
+  end
+
   defp find_var_or_recurse_rhs({:ok, _} = ok, _rhs, _var), do: ok
   defp find_var_or_recurse_rhs(:skip, rhs, var), do: rhs |> find_var_in_pattern(var)
 

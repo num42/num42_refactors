@@ -124,11 +124,7 @@ defmodule Number42.Refactors.Ex.MergeAssignKeywords do
   defp callee_signature(_), do: :error
 
   defp chain_patch(pipe_node, head_ast, merged_steps, source) do
-    head_text =
-      case slice_node(source, head_ast) do
-        {:ok, t} -> t
-        :error -> ""
-      end
+    head_text = head_text(source, head_ast)
 
     steps_text =
       merged_steps
@@ -150,6 +146,13 @@ defmodule Number42.Refactors.Ex.MergeAssignKeywords do
       |> Enum.join("\n" <> indent)
 
     Patch.new(%{end: end_pos, start: pipe_range.start}, body, false)
+  end
+
+  defp head_text(source, head_ast) do
+    case slice_node(source, head_ast) do
+      {:ok, t} -> t
+      :error -> ""
+    end
   end
 
   defp classify_step({callee_form, _, [key_ast, value_ast]} = step) do

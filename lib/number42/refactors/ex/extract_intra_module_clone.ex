@@ -202,8 +202,10 @@ defmodule Number42.Refactors.Ex.ExtractIntraModuleClone do
 
     eligible =
       clauses
-      |> Enum.reject(&MapSet.member?(multi_clause_keys, name_arity(&1)))
-      |> Enum.reject(&body_uses_module_attribute?/1)
+      |> Enum.reject(fn clause ->
+        MapSet.member?(multi_clause_keys, name_arity(clause)) or
+          body_uses_module_attribute?(clause)
+      end)
       |> Enum.filter(&(clause_mass(&1) >= min_mass))
 
     eligible

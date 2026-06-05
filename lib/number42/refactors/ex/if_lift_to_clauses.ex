@@ -211,12 +211,10 @@ defmodule Number42.Refactors.Ex.IfLiftToClauses do
        when is_atom(pred) and is_atom(name) and is_atom(ctx) do
     pred_str = Atom.to_string(pred)
 
-    cond do
-      String.starts_with?(pred_str, "is_") and length(rest) in [0, 1] ->
-        {:is_guard, {pred, name, rest}}
-
-      true ->
-        nil
+    if String.starts_with?(pred_str, "is_") and length(rest) in [0, 1] do
+      {:is_guard, {pred, name, rest}}
+    else
+      nil
     end
   end
 
@@ -815,34 +813,32 @@ defmodule Number42.Refactors.Ex.IfLiftToClauses do
   defp render_head_slots(params, patterns, head_uses) do
     params
     |> Enum.map(fn {name, ast, _default} ->
-      cond do
-        name == nil ->
-          # Anonymous slot (literal, `_name`, or pattern). Pass through.
-          {Sourceror.to_string(ast), :pattern}
+      if name == nil do
+        # Anonymous slot (literal, `_name`, or pattern). Pass through.
+        {Sourceror.to_string(ast), :pattern}
+      else
+        case Map.get(patterns, name) do
+          nil ->
+            if MapSet.member?(head_uses, name),
+              do: {Atom.to_string(name), :bare},
+              else: {underscore_for(name), :bare}
 
-        true ->
-          case Map.get(patterns, name) do
-            nil ->
-              if MapSet.member?(head_uses, name),
-                do: {Atom.to_string(name), :bare},
-                else: {underscore_for(name), :bare}
+          {:eq, lit} ->
+            {Sourceror.to_string(lit), :literal}
 
-            {:eq, lit} ->
-              {Sourceror.to_string(lit), :literal}
+          {:fields, _} = tree ->
+            # Only emit `= name` binder when the do-body actually
+            # references the whole param; otherwise the pattern
+            # alone is enough (no `= _foo` noise).
+            text =
+              if MapSet.member?(head_uses, name) do
+                render_pattern_tree(tree) <> " = " <> Atom.to_string(name)
+              else
+                render_pattern_tree(tree)
+              end
 
-            {:fields, _} = tree ->
-              # Only emit `= name` binder when the do-body actually
-              # references the whole param; otherwise the pattern
-              # alone is enough (no `= _foo` noise).
-              text =
-                if MapSet.member?(head_uses, name) do
-                  render_pattern_tree(tree) <> " = " <> Atom.to_string(name)
-                else
-                  render_pattern_tree(tree)
-                end
-
-              {text, :pattern}
-          end
+            {text, :pattern}
+        end
       end
     end)
   end

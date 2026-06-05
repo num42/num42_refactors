@@ -178,11 +178,7 @@ defmodule Mix.Tasks.Refactor.HeexClones do
           "\n  ##{idx}  mass=#{cluster.mass} × #{length(cluster.occurrences)} occurrences"
         )
 
-        cluster.occurrences
-        |> Enum.reduce(c, fn occ, c2 ->
-          Mix.shell().info("       #{occ.file}:#{occ.line}")
-          if code?, do: print_snippet(occ, cluster.mass, context, c2), else: c2
-        end)
+        render_occurrences(cluster, code?, context, c)
       end)
 
     if length(clusters) > top do
@@ -190,6 +186,14 @@ defmodule Mix.Tasks.Refactor.HeexClones do
     end
 
     cache
+  end
+
+  defp render_occurrences(cluster, code?, context, cache) do
+    cluster.occurrences
+    |> Enum.reduce(cache, fn occ, c2 ->
+      Mix.shell().info("       #{occ.file}:#{occ.line}")
+      if code?, do: print_snippet(occ, cluster.mass, context, c2), else: c2
+    end)
   end
 
   defp resolve_modes([]), do: [:exact, :class_stripped, :attrs_stripped]

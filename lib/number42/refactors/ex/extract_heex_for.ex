@@ -284,15 +284,13 @@ defmodule Number42.Refactors.Ex.ExtractHeexFor do
 
     named
     |> Enum.flat_map(fn block ->
-      cond do
-        MapSet.member?(intra_pass_dupes, block.name) ->
-          []
-
-        true ->
-          case resolve_collision(Atom.to_string(block.name), existing_index, on_collision: :skip) do
-            :skip -> []
-            {:ok, _name} -> [block]
-          end
+      if MapSet.member?(intra_pass_dupes, block.name) do
+        []
+      else
+        case resolve_collision(Atom.to_string(block.name), existing_index, on_collision: :skip) do
+          :skip -> []
+          {:ok, _name} -> [block]
+        end
       end
     end)
   end

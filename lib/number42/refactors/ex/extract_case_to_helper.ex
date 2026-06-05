@@ -752,40 +752,46 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelper do
     # is `defp`. Callers stay through the public host.
     _ = def_kind
 
-    clause_texts =
-      branches
-      |> Enum.map(fn %{body: body, guard: guard, pattern: pattern, used_in_body: used} ->
-        pattern_text = render_pattern_text(pattern, source)
-        body_text = render_body_text(body, source)
+    branches
+    |> Enum.map_join("\n", &render_clause(&1, helper_name, free_vars, source))
+  end
 
-        # Per-clause: prefix `_` on extra params not referenced in this
-        # clause's body or guard. The pipe call site keeps the real
-        # names — this only affects the signature, mirroring the
-        # compiler's "variable X is unused" hint.
-        extra_params =
-          free_vars
-          |> Enum.map(fn var ->
-            name = Atom.to_string(var)
-            if MapSet.member?(used, var), do: name, else: "_" <> name
-          end)
+  defp render_clause(
+         %{body: body, guard: guard, pattern: pattern, used_in_body: used},
+         helper_name,
+         free_vars,
+         source
+       ) do
+    pattern_text = render_pattern_text(pattern, source)
+    body_text = render_body_text(body, source)
+    extra_params = render_extra_params(free_vars, used)
 
-        params = [pattern_text | extra_params]
-        params_str = params |> Enum.join(", ")
+    params = [pattern_text | extra_params]
+    params_str = params |> Enum.join(", ")
 
-        guard_clause =
-          case guard do
-            nil -> ""
-            node -> " when " <> render_guard_text(node, source)
-          end
+    guard_clause =
+      case guard do
+        nil -> ""
+        node -> " when " <> render_guard_text(node, source)
+      end
 
-        """
-          defp #{helper_name}(#{params_str})#{guard_clause} do
-        #{indent_body(body_text)}
-          end\
-        """
-      end)
+    """
+      defp #{helper_name}(#{params_str})#{guard_clause} do
+    #{indent_body(body_text)}
+      end\
+    """
+  end
 
-    clause_texts |> Enum.join("\n")
+  # Per-clause: prefix `_` on extra params not referenced in this
+  # clause's body or guard. The pipe call site keeps the real
+  # names — this only affects the signature, mirroring the
+  # compiler's "variable X is unused" hint.
+  defp render_extra_params(free_vars, used) do
+    free_vars
+    |> Enum.map(fn var ->
+      name = Atom.to_string(var)
+      if MapSet.member?(used, var), do: name, else: "_" <> name
+    end)
   end
 
   defp render_pattern_text(pattern, source),

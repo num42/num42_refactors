@@ -1,4 +1,5 @@
 defmodule Number42.Refactors.Ex.ExpandShortFormParams do
+  alias Number42.Refactors.IdentifierExpansion
   alias Sourceror.Patch
 
   @moduledoc """
@@ -559,7 +560,7 @@ defmodule Number42.Refactors.Ex.ExpandShortFormParams do
       min_score: 80
     }
 
-    case Number42.Refactors.IdentifierExpansion.resolve(short, candidates, opts) do
+    case IdentifierExpansion.resolve(short, candidates, opts) do
       {:ok, long} -> {:ok, long}
       :skip -> :skip
     end

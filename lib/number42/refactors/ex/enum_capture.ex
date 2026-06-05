@@ -303,17 +303,15 @@ defmodule Number42.Refactors.Ex.EnumCapture do
          {:fn, _, [{:->, _, [fn_args, body]}]} = fn_node <- List.last(args),
          true <- length(fn_args) == arity,
          {:ok, capture_text} <- try_capture(fn_args, body) do
-      cond do
-        not in_pipe? and length(args) == 2 ->
-          [coll, _lambda] = args
-          coll_text = Sourceror.to_string(coll)
-          mod_str = Atom.to_string(mod)
-          fun_str = Atom.to_string(fun)
-          replacement = "#{coll_text} |> #{mod_str}.#{fun_str}(#{capture_text})"
-          {:patch, Patch.replace(call_node, replacement)}
-
-        true ->
-          {:patch, Patch.replace(fn_node, capture_text)}
+      if not in_pipe? and length(args) == 2 do
+        [coll, _lambda] = args
+        coll_text = Sourceror.to_string(coll)
+        mod_str = Atom.to_string(mod)
+        fun_str = Atom.to_string(fun)
+        replacement = "#{coll_text} |> #{mod_str}.#{fun_str}(#{capture_text})"
+        {:patch, Patch.replace(call_node, replacement)}
+      else
+        {:patch, Patch.replace(fn_node, capture_text)}
       end
     else
       _ -> :no_patch

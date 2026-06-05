@@ -1,4 +1,5 @@
 defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
+  alias Number42.Refactors.IdentifierExpansion
   alias Sourceror.Patch
 
   @moduledoc """
@@ -359,13 +360,11 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
     expanded =
       parts
       |> Enum.reduce_while([], fn part, acc ->
-        cond do
-          # Long enough: keep as-is.
-          String.length(part) > 3 ->
-            {:cont, [part | acc]}
-
-          true ->
-            resolve_part(part, candidates, resolve_opts, other_parts, acc)
+        # Long enough: keep as-is.
+        if String.length(part) > 3 do
+          {:cont, [part | acc]}
+        else
+          resolve_part(part, candidates, resolve_opts, other_parts, acc)
         end
       end)
 
@@ -396,7 +395,7 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
   end
 
   defp resolve_part(part, candidates, resolve_opts, other_parts, acc) do
-    case Number42.Refactors.IdentifierExpansion.resolve(part, candidates, resolve_opts) do
+    case IdentifierExpansion.resolve(part, candidates, resolve_opts) do
       {:ok, expansion} ->
         cond do
           # Weak singular/plural flip — the expansion is just

@@ -264,26 +264,24 @@ defmodule Number42.Refactors.Ex.ExtractInlineBlock do
     arg_names = arg_names_of(first)
     available = MapSet.new(arg_names)
 
-    cond do
-      not body_self_contained?(group, available) ->
-        []
+    if body_self_contained?(group, available) do
+      helper_args = arg_names
+      helper_body = body_of(first)
 
-      true ->
-        helper_args = arg_names
-        helper_body = body_of(first)
-
-        callsite_patches =
-          group
-          |> Enum.map(
-            &clause_callsite_patch(
-              &1,
-              helper_args
-            )
+      callsite_patches =
+        group
+        |> Enum.map(
+          &clause_callsite_patch(
+            &1,
+            helper_args
           )
-          |> Enum.reject(&is_nil/1)
+        )
+        |> Enum.reject(&is_nil/1)
 
-        helper_text = render_helper_text(helper_args, helper_body)
-        [%{callsite_patches: callsite_patches, helper_text: helper_text}]
+      helper_text = render_helper_text(helper_args, helper_body)
+      [%{callsite_patches: callsite_patches, helper_text: helper_text}]
+    else
+      []
     end
   end
 
@@ -294,25 +292,25 @@ defmodule Number42.Refactors.Ex.ExtractInlineBlock do
 
     eligible =
       clauses
-      |> Enum.reject(&MapSet.member?(multi_clause_keys, name_arity(&1)))
-      |> Enum.reject(&body_uses_module_attribute?/1)
-      |> Enum.reject(&head_has_guard?/1)
-      |> Enum.reject(&(not head_is_plain_vars?(&1)))
+      |> Enum.reject(fn clause ->
+        MapSet.member?(multi_clause_keys, name_arity(clause)) or
+          body_uses_module_attribute?(clause) or
+          head_has_guard?(clause) or
+          not head_is_plain_vars?(clause)
+      end)
       |> Enum.filter(&(clause_mass(&1) >= min_mass))
 
-    cond do
-      helper_taken? ->
-        []
-
-      true ->
-        eligible
-        |> Enum.group_by(&body_hash/1)
-        |> Enum.flat_map(fn {_hash, group} ->
-          case group do
-            [_only] -> []
-            [first | _] = group -> plan_for_group(group, first)
-          end
-        end)
+    if helper_taken? do
+      []
+    else
+      eligible
+      |> Enum.group_by(&body_hash/1)
+      |> Enum.flat_map(fn {_hash, group} ->
+        case group do
+          [_only] -> []
+          [first | _] = group -> plan_for_group(group, first)
+        end
+      end)
     end
   end
 

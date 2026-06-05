@@ -116,28 +116,32 @@ defmodule Number42.Refactors.Ex.ExtractHeexExactClone do
     if paths == [] do
       :no_cache
     else
-      min_mass = Keyword.get(opts, :min_mass, @default_min_mass)
-
-      sources =
-        paths
-        |> Enum.flat_map(fn p ->
-          case File.read(p) do
-            {:ok, src} -> [{p, src}]
-            _ -> []
-          end
-        end)
-        |> Map.new()
-
-      plans = build_plan(sources, min_mass: min_mass)
-
-      source_to_file =
-        for {path, src} <- sources do
-          {src, path}
-        end
-        |> Map.new()
-
-      {:ok, %{plans: plans, source_to_file: source_to_file}}
+      prepare_from_paths(paths, opts)
     end
+  end
+
+  defp prepare_from_paths(paths, opts) do
+    min_mass = Keyword.get(opts, :min_mass, @default_min_mass)
+
+    sources =
+      paths
+      |> Enum.flat_map(fn p ->
+        case File.read(p) do
+          {:ok, src} -> [{p, src}]
+          _ -> []
+        end
+      end)
+      |> Map.new()
+
+    plans = build_plan(sources, min_mass: min_mass)
+
+    source_to_file =
+      for {path, src} <- sources do
+        {src, path}
+      end
+      |> Map.new()
+
+    {:ok, %{plans: plans, source_to_file: source_to_file}}
   end
 
   @impl Number42.Refactors.Refactor

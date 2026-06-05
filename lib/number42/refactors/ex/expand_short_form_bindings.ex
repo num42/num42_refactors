@@ -59,6 +59,8 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
 
   use Number42.Refactors.Refactor
 
+  alias Number42.Refactors.IdentifierExpansion
+
   @impl Number42.Refactors.Refactor
   def description, do: "Expand short-form local bindings to long forms"
   @impl Number42.Refactors.Refactor
@@ -462,23 +464,21 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
     |> Macro.prewalker()
     |> Enum.flat_map(fn
       {name, _meta, context_compound} = node when is_atom(name) and is_atom(context_compound) ->
-        cond do
-          MapSet.member?(pre_shadow_refs, node) ->
-            []
+        if MapSet.member?(pre_shadow_refs, node) do
+          []
+        else
+          case Map.fetch(resolutions, name) do
+            {:ok, long_atom} ->
+              replacement = Atom.to_string(long_atom)
 
-          true ->
-            case Map.fetch(resolutions, name) do
-              {:ok, long_atom} ->
-                replacement = Atom.to_string(long_atom)
+              case build_patch(node, replacement) do
+                nil -> []
+                patch -> [patch]
+              end
 
-                case build_patch(node, replacement) do
-                  nil -> []
-                  patch -> [patch]
-                end
-
-              :error ->
-                []
-            end
+            :error ->
+              []
+          end
         end
 
       _ ->
@@ -684,7 +684,7 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
           min_score: 80
         }
 
-        Number42.Refactors.IdentifierExpansion.resolve_ranked(string, candidates_with_rhs, opts)
+        IdentifierExpansion.resolve_ranked(string, candidates_with_rhs, opts)
     end
   end
 
@@ -754,15 +754,13 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
   # to decide what *needs* expanding (catches `brnd`, `mngr`), but
   # legit English words like `string`/`script` also trip it.
   defp cryptic_target?(long, ctx) do
-    cond do
-      MapSet.member?(ctx.whitelist, String.to_atom(long)) ->
-        false
-
-      true ->
-        case long |> String.split("_", trim: true) do
-          [] -> true
-          [first | _] -> String.length(first) <= 3
-        end
+    if MapSet.member?(ctx.whitelist, String.to_atom(long)) do
+      false
+    else
+      case long |> String.split("_", trim: true) do
+        [] -> true
+        [first | _] -> String.length(first) <= 3
+      end
     end
   end
 

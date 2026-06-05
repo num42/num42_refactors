@@ -86,15 +86,7 @@ defmodule Number42.Refactors.Ex.ExtractLambdaBlock do
     plans =
       ast
       |> Macro.prewalker()
-      |> Enum.flat_map(fn
-        {:defmodule, _, [_name_ast, [{_do, body}]]} ->
-          body
-          |> body_to_exprs()
-          |> plans_for_module(min_mass)
-
-        _ ->
-          []
-      end)
+      |> Enum.flat_map(&plans_for_node(&1, min_mass))
 
     case plans do
       [] ->
@@ -109,6 +101,11 @@ defmodule Number42.Refactors.Ex.ExtractLambdaBlock do
         |> splice_helpers_before_module_end(helpers)
     end
   end
+
+  defp plans_for_node({:defmodule, _, [_name_ast, [{_do, body}]]}, min_mass),
+    do: body |> body_to_exprs() |> plans_for_module(min_mass)
+
+  defp plans_for_node(_node, _min_mass), do: []
 
   defp apply_to_parse_result({:ok, ast}, min_mass, source),
     do: ast |> apply_to_ast(source, min_mass)

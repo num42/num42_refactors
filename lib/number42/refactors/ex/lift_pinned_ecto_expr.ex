@@ -196,13 +196,11 @@ defmodule Number42.Refactors.Ex.LiftPinnedEctoExpr do
     do: {[{:transparent, [dot | args]}], in_ecto?}
 
   defp collect_extractions(node, host_stack, in_ecto?) do
-    cond do
-      pinned_ecto_expr_to_lift?(node) and in_ecto? and host_stack != [] ->
-        {kind, stmt} = hd(host_stack)
-        [%{host_kind: kind, host_stmt: stmt, pin_node: node}]
-
-      true ->
-        descend(node, host_stack, in_ecto?)
+    if pinned_ecto_expr_to_lift?(node) and in_ecto? and host_stack != [] do
+      {kind, stmt} = hd(host_stack)
+      [%{host_kind: kind, host_stmt: stmt, pin_node: node}]
+    else
+      descend(node, host_stack, in_ecto?)
     end
   end
 

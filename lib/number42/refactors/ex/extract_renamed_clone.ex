@@ -201,22 +201,26 @@ defmodule Number42.Refactors.Ex.ExtractRenamedClone do
         []
 
       true ->
-        # Plain-var clauses guarantee usable original arg names —
-        # nicer to read in the wrapper than synthetic `arg_0`s.
-        args = clause_arg_names(hd(clauses))
-
-        [
-          %{
-            args: args,
-            arity: arity,
-            clauses: clauses,
-            hash: hash_clauses(clauses),
-            kind: kind,
-            module: module,
-            name: name
-          }
-        ]
+        function_entry(module, kind, name, arity, clauses)
     end
+  end
+
+  defp function_entry(module, kind, name, arity, clauses) do
+    # Plain-var clauses guarantee usable original arg names —
+    # nicer to read in the wrapper than synthetic `arg_0`s.
+    args = clause_arg_names(hd(clauses))
+
+    [
+      %{
+        args: args,
+        arity: arity,
+        clauses: clauses,
+        hash: hash_clauses(clauses),
+        kind: kind,
+        module: module,
+        name: name
+      }
+    ]
   end
 
   defp clause_arg_names({_kind, _, [head | _]}), do: strip_when(head) |> arg_names_or_empty()

@@ -568,17 +568,15 @@ defmodule Number42.Refactors.AstHelpers do
 
     lines = String.split(source, "\n", trim: false)
 
-    cond do
-      l1 == l2 ->
-        line = lines |> Enum.at(l1 - 1, "")
-        String.slice(line, (c1 - 1)..(c2 - 2)//1)
+    if l1 == l2 do
+      line = lines |> Enum.at(l1 - 1, "")
+      String.slice(line, (c1 - 1)..(c2 - 2)//1)
+    else
+      first_line = lines |> Enum.at(l1 - 1, "") |> String.slice((c1 - 1)..-1//1)
+      middle_lines = lines |> Enum.slice(l1..(l2 - 2)//1)
+      last_line = lines |> Enum.at(l2 - 1, "") |> String.slice(0..(c2 - 2)//1)
 
-      true ->
-        first_line = lines |> Enum.at(l1 - 1, "") |> String.slice((c1 - 1)..-1//1)
-        middle_lines = lines |> Enum.slice(l1..(l2 - 2)//1)
-        last_line = lines |> Enum.at(l2 - 1, "") |> String.slice(0..(c2 - 2)//1)
-
-        ([first_line | middle_lines] ++ [last_line]) |> Enum.join("\n")
+      ([first_line | middle_lines] ++ [last_line]) |> Enum.join("\n")
     end
   end
 
@@ -696,10 +694,7 @@ defmodule Number42.Refactors.AstHelpers do
   def cryptic_subtoken?(part) do
     length = String.length(part)
 
-    cond do
-      length <= 3 -> true
-      true -> consonant_heavy?(part)
-    end
+    if length <= 3, do: true, else: consonant_heavy?(part)
   end
 
   defp end_of_expression_line_get(nil, meta), do: meta |> Keyword.get(:line, 1)
@@ -860,19 +855,18 @@ defmodule Number42.Refactors.AstHelpers do
     base = drop_bang_or_question(word)
 
     cond do
-      String.ends_with?(base, "y") and not String.ends_with?(base, "ay") and
-        not String.ends_with?(base, "ey") and not String.ends_with?(base, "iy") and
-        not String.ends_with?(base, "oy") and not String.ends_with?(base, "uy") ->
-        String.slice(base, 0..-2//1) <> "ies"
-
-      String.ends_with?(base, "s") or String.ends_with?(base, "x") or
-          String.ends_with?(base, "z") ->
-        base <> "es"
-
-      true ->
-        base <> "s"
+      consonant_y_ending?(base) -> String.slice(base, 0..-2//1) <> "ies"
+      sibilant_ending?(base) -> base <> "es"
+      true -> base <> "s"
     end
   end
+
+  defp consonant_y_ending?(base) do
+    String.ends_with?(base, "y") and
+      not String.ends_with?(base, ["ay", "ey", "iy", "oy", "uy"])
+  end
+
+  defp sibilant_ending?(base), do: String.ends_with?(base, ["s", "x", "z"])
 
   @doc """
   Appends `suffix` to `name`, dealing with a trailing `?` or `!`
@@ -1020,32 +1014,29 @@ defmodule Number42.Refactors.AstHelpers do
   """
   @spec collect_bound_vars(term()) :: MapSet.t(atom())
   def collect_bound_vars(ast) do
-    {_, vars} =
-      Macro.prewalk(ast, MapSet.new(), fn node, acc ->
-        case node do
-          # Match operator: LHS is a pattern, RHS is a value.
-          {:=, _, [lhs, _rhs]} ->
-            {node, collect_pattern_vars(lhs, acc)}
-
-          # Generator (`<-`) in `with` / `for`: LHS is a pattern.
-          {:<-, _, [lhs, _rhs]} ->
-            {node, collect_pattern_vars(lhs, acc)}
-
-          # Clause head (`->`): LHS list is a tuple of patterns
-          # (could be guarded via `when`).
-          {:->, _, [lhs_args, _body]} when is_list(lhs_args) ->
-            acc =
-              lhs_args |> Enum.reduce(acc, fn arg, a -> collect_pattern_vars(arg, a) end)
-
-            {node, acc}
-
-          _ ->
-            {node, acc}
-        end
-      end)
+    {_, vars} = Macro.prewalk(ast, MapSet.new(), &collect_bound_vars_step/2)
 
     vars
   end
+
+  # Match operator: LHS is a pattern, RHS is a value.
+  defp collect_bound_vars_step({:=, _, [lhs, _rhs]} = node, acc) do
+    {node, collect_pattern_vars(lhs, acc)}
+  end
+
+  # Generator (`<-`) in `with` / `for`: LHS is a pattern.
+  defp collect_bound_vars_step({:<-, _, [lhs, _rhs]} = node, acc) do
+    {node, collect_pattern_vars(lhs, acc)}
+  end
+
+  # Clause head (`->`): LHS list is a tuple of patterns
+  # (could be guarded via `when`).
+  defp collect_bound_vars_step({:->, _, [lhs_args, _body]} = node, acc)
+       when is_list(lhs_args) do
+    {node, Enum.reduce(lhs_args, acc, &collect_pattern_vars/2)}
+  end
+
+  defp collect_bound_vars_step(node, acc), do: {node, acc}
 
   @doc """
   Latch-match a short string against a snake_case compound's subtokens.
@@ -1089,26 +1080,24 @@ defmodule Number42.Refactors.AstHelpers do
         :error
 
       _ ->
-        candidates =
-          0..(length(subtokens) - 1)
-          |> Enum.flat_map(fn idx ->
-            case latch_try_at(short_chars, subtokens, idx) do
-              {:ok, starts_hit} -> [{idx, starts_hit}]
-              :error -> []
-            end
-          end)
-
-        case candidates do
-          [] ->
-            :error
-
-          _ ->
-            {idx, starts_hit} =
-              candidates |> Enum.max_by(fn {idx, starts_hit} -> {starts_hit, idx} end)
-
-            {:ok, idx, starts_hit}
-        end
+        0..(length(subtokens) - 1)
+        |> Enum.flat_map(&latch_candidate_at(short_chars, subtokens, &1))
+        |> latch_best_candidate()
     end
+  end
+
+  defp latch_candidate_at(short_chars, subtokens, idx) do
+    case latch_try_at(short_chars, subtokens, idx) do
+      {:ok, starts_hit} -> [{idx, starts_hit}]
+      :error -> []
+    end
+  end
+
+  defp latch_best_candidate([]), do: :error
+
+  defp latch_best_candidate(candidates) do
+    {idx, starts_hit} = Enum.max_by(candidates, fn {idx, starts_hit} -> {starts_hit, idx} end)
+    {:ok, idx, starts_hit}
   end
 
   @doc """
@@ -1433,13 +1422,11 @@ defmodule Number42.Refactors.AstHelpers do
   defp latch_consume_starts([c | rest] = remaining, subtokens, next_idx, last_sub, starts) do
     next_sub = subtokens |> Enum.at(next_idx)
 
-    cond do
-      next_sub != nil and String.first(next_sub) == c ->
-        latch_consume_starts(rest, subtokens, next_idx + 1, next_sub, starts + 1)
-
-      true ->
-        last_sub_rest = String.slice(last_sub, 1..-1//1)
-        if subsequence?(remaining, last_sub_rest), do: {:ok, starts}, else: :error
+    if next_sub != nil and String.first(next_sub) == c do
+      latch_consume_starts(rest, subtokens, next_idx + 1, next_sub, starts + 1)
+    else
+      last_sub_rest = String.slice(last_sub, 1..-1//1)
+      if subsequence?(remaining, last_sub_rest), do: {:ok, starts}, else: :error
     end
   end
 

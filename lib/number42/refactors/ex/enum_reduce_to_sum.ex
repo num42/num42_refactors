@@ -102,9 +102,10 @@ defmodule Number42.Refactors.Ex.EnumReduceToSum do
          {:ok, projection} <- pick_projection(lhs, rhs, acc),
          true <- pattern_introduces_referenced_name?(arg_pat, projection),
          false <- references_var?(projection, acc) do
-      cond do
-        bare_var_match?(arg_pat, projection) -> {:ok, :sum}
-        true -> {:ok, {:sum_by, arg_pat, projection}}
+      if bare_var_match?(arg_pat, projection) do
+        {:ok, :sum}
+      else
+        {:ok, {:sum_by, arg_pat, projection}}
       end
     else
       _ -> :skip

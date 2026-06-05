@@ -92,13 +92,11 @@ defmodule Number42.Refactors.Ex.MultiAliasExpand do
         _ -> []
       end)
 
-    cond do
-      expanded == [] ->
-        []
-
-      true ->
-        rendered = expanded |> Enum.intersperse("\n" <> indent) |> IO.iodata_to_binary()
-        [Patch.new(range, rendered, false)]
+    if expanded == [] do
+      []
+    else
+      rendered = expanded |> Enum.intersperse("\n" <> indent) |> IO.iodata_to_binary()
+      [Patch.new(range, rendered, false)]
     end
   end
 

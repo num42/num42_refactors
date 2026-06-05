@@ -372,11 +372,9 @@ defmodule Number42.Refactors.Heex.Tree do
   end
 
   defp parse_html_or_error(events) do
-    try do
-      {:ok, nest_elements(events)}
-    rescue
-      _ -> :error
-    end
+    {:ok, nest_elements(events)}
+  rescue
+    _ -> :error
   end
 
   defp parse_sigil_or_skip(%{body: body} = sigil),
@@ -427,19 +425,20 @@ defmodule Number42.Refactors.Heex.Tree do
       {acc |> Enum.reverse(), false, bin, line}
     else
       {after_name, line} = skip_ws_nl(after_name, line)
-
-      case after_name do
-        "=" <> rest ->
-          {rest, line} = skip_ws_nl(rest, line)
-          {value, after_value, line} = read_attr_value(rest, line)
-          {after_value, line} = skip_ws_nl(after_value, line)
-          read_attrs_loop(after_value, line, [{name, value} | acc])
-
-        _ ->
-          {after_name, line} = skip_ws_nl(after_name, line)
-          read_attrs_loop(after_name, line, [{name, {:string, ""}} | acc])
-      end
+      read_named_attr(after_name, line, name, acc)
     end
+  end
+
+  defp read_named_attr("=" <> rest, line, name, acc) do
+    {rest, line} = skip_ws_nl(rest, line)
+    {value, after_value, line} = read_attr_value(rest, line)
+    {after_value, line} = skip_ws_nl(after_value, line)
+    read_attrs_loop(after_value, line, [{name, value} | acc])
+  end
+
+  defp read_named_attr(after_name, line, name, acc) do
+    {after_name, line} = skip_ws_nl(after_name, line)
+    read_attrs_loop(after_name, line, [{name, {:string, ""}} | acc])
   end
 
   defp read_curly("", _depth, acc, line),

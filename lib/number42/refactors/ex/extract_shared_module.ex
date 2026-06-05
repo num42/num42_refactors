@@ -292,53 +292,51 @@ defmodule Number42.Refactors.Ex.ExtractSharedModule do
          source,
          min_mass
        ) do
-    cond do
-      total_mass(clauses) < min_mass ->
-        []
+    if total_mass(clauses) < min_mass do
+      []
+    else
+      # All clauses are plain-var? Then we can render `defdelegate`
+      # in the original. Otherwise we'll need a wrapper-`def`.
+      all_plain = clauses |> Enum.all?(&plain_var_clause?/1)
 
-      true ->
-        # All clauses are plain-var? Then we can render `defdelegate`
-        # in the original. Otherwise we'll need a wrapper-`def`.
-        all_plain = clauses |> Enum.all?(&plain_var_clause?/1)
+      # Generate synthetic arg names `arg_0, arg_1, ...` for the
+      # wrapper. (For plain-var clauses we still use the original
+      # arg names — that's nicer to read in `defdelegate`.)
+      wrapper_args = generate_wrapper_args(arity)
 
-        # Generate synthetic arg names `arg_0, arg_1, ...` for the
-        # wrapper. (For plain-var clauses we still use the original
-        # arg names — that's nicer to read in `defdelegate`.)
-        wrapper_args = generate_wrapper_args(arity)
+      delegate_args =
+        if all_plain, do: clause_arg_names(hd(clauses)), else: wrapper_args
 
-        delegate_args =
-          if all_plain, do: clause_arg_names(hd(clauses)), else: wrapper_args
+      hashed_clause = hash_clauses(clauses)
 
-        hashed_clause = hash_clauses(clauses)
+      # Helpers reachable only from these clauses (transitively),
+      # collected for migration.
+      helper_clauses = reachable_helper_clauses(body_exprs, name, arity)
 
-        # Helpers reachable only from these clauses (transitively),
-        # collected for migration.
-        helper_clauses = reachable_helper_clauses(body_exprs, name, arity)
-
-        with false <- body_calls_unmigratable_local?(clauses, helper_clauses, body_exprs),
-             {:ok, attrs_to_migrate} <-
-               resolve_attrs_for_migration(clauses, helper_clauses, module_attrs) do
-          [
-            %{
-              aliases: aliases,
-              all_plain: all_plain,
-              args: delegate_args,
-              arity: arity,
-              attrs: attrs_to_migrate,
-              clauses: clauses,
-              has_use: has_use,
-              hash: hashed_clause,
-              helper_clauses: helper_clauses,
-              imports: imports,
-              kind: kind,
-              module: module,
-              name: name,
-              source: source
-            }
-          ]
-        else
-          _ -> []
-        end
+      with false <- body_calls_unmigratable_local?(clauses, helper_clauses, body_exprs),
+           {:ok, attrs_to_migrate} <-
+             resolve_attrs_for_migration(clauses, helper_clauses, module_attrs) do
+        [
+          %{
+            aliases: aliases,
+            all_plain: all_plain,
+            args: delegate_args,
+            arity: arity,
+            attrs: attrs_to_migrate,
+            clauses: clauses,
+            has_use: has_use,
+            hash: hashed_clause,
+            helper_clauses: helper_clauses,
+            imports: imports,
+            kind: kind,
+            module: module,
+            name: name,
+            source: source
+          }
+        ]
+      else
+        _ -> []
+      end
     end
   end
 
