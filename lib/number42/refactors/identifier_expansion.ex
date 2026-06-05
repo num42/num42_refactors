@@ -364,26 +364,26 @@ defmodule Number42.Refactors.IdentifierExpansion do
         :error
 
       _ ->
-        candidates =
-          0..(length(subtokens) - 1)
-          |> Enum.flat_map(fn idx ->
-            case latch_try_at(short_chars, subtokens, idx) do
-              {:ok, starts_hit} -> [{idx, starts_hit}]
-              :error -> []
-            end
-          end)
-
-        case candidates do
-          [] ->
-            :error
-
-          _ ->
-            {idx, starts_hit} =
-              candidates |> Enum.max_by(fn {idx, starts_hit} -> {starts_hit, idx} end)
-
-            {:ok, idx, starts_hit}
-        end
+        0..(length(subtokens) - 1)
+        |> Enum.flat_map(&latch_candidate_at(short_chars, subtokens, &1))
+        |> latch_best_candidate()
     end
+  end
+
+  defp latch_candidate_at(short_chars, subtokens, idx) do
+    case latch_try_at(short_chars, subtokens, idx) do
+      {:ok, starts_hit} -> [{idx, starts_hit}]
+      :error -> []
+    end
+  end
+
+  defp latch_best_candidate([]), do: :error
+
+  defp latch_best_candidate(candidates) do
+    {idx, starts_hit} =
+      candidates |> Enum.max_by(fn {idx, starts_hit} -> {starts_hit, idx} end)
+
+    {:ok, idx, starts_hit}
   end
 
   defp latch_try_at([first | rest], subtokens, idx) do

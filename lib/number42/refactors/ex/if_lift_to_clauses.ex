@@ -141,17 +141,21 @@ defmodule Number42.Refactors.Ex.IfLiftToClauses do
       |> Enum.flat_map(&maybe_patch(&1, source))
 
   defp classify_atom(leaf, neg) do
-    cond do
-      r = match_is_guard(leaf) -> {:ok, put_neg(r, neg)}
-      r = match_bif_op_lit(leaf) -> {:ok, put_neg(r, neg)}
-      r = match_param_in_list(leaf) -> {:ok, put_neg(r, neg)}
-      r = match_param_eq_lit(leaf) -> {:ok, put_neg(r, neg)}
-      r = match_field_eq_lit(leaf) -> {:ok, put_neg(r, neg)}
-      r = match_eq_two_sides(leaf) -> {:ok, put_neg(r, neg)}
-      r = match_param_op_lift_to_clauses(leaf) -> {:ok, put_neg(r, neg)}
-      r = match_field_truthy(leaf) -> {:ok, put_neg(r, neg)}
-      r = match_param_truthy(leaf) -> {:ok, put_neg(r, neg)}
-      true -> :error
+    matchers = [
+      &match_is_guard/1,
+      &match_bif_op_lit/1,
+      &match_param_in_list/1,
+      &match_param_eq_lit/1,
+      &match_field_eq_lit/1,
+      &match_eq_two_sides/1,
+      &match_param_op_lift_to_clauses/1,
+      &match_field_truthy/1,
+      &match_param_truthy/1
+    ]
+
+    case Enum.find_value(matchers, & &1.(leaf)) do
+      nil -> :error
+      r -> {:ok, put_neg(r, neg)}
     end
   end
 

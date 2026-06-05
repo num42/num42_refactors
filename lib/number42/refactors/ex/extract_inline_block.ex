@@ -305,14 +305,12 @@ defmodule Number42.Refactors.Ex.ExtractInlineBlock do
     else
       eligible
       |> Enum.group_by(&body_hash/1)
-      |> Enum.flat_map(fn {_hash, group} ->
-        case group do
-          [_only] -> []
-          [first | _] = group -> plan_for_group(group, first)
-        end
-      end)
+      |> Enum.flat_map(fn {_hash, group} -> plan_for_clone_group(group) end)
     end
   end
+
+  defp plan_for_clone_group([_only]), do: []
+  defp plan_for_clone_group([first | _] = group), do: plan_for_group(group, first)
 
   defp references_attribute?(ast) do
     ast

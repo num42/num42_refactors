@@ -329,21 +329,23 @@ defmodule Number42.Refactors.Ex.IfElseToCond do
         # (the local-fn case ensures it doesn't appear in its own branch body —
         # prepare_branch already guards that).
         Enum.reduce_while(prepared, :ok, fn p, :ok ->
-          if p.kind == :fn do
-            var = extract_fn_var_name(p.fn_def)
-
-            other_uses =
-              prepared
-              |> Enum.reject(&(&1 == p))
-              |> Enum.any?(fn other -> branch_uses_var?(other.branch, var) end)
-
-            if other_uses, do: {:halt, :error}, else: {:cont, :ok}
-          else
-            {:cont, :ok}
-          end
+          check_fn_var_not_shared(p, prepared)
         end)
     end
   end
+
+  defp check_fn_var_not_shared(%{kind: :fn} = p, prepared) do
+    var = extract_fn_var_name(p.fn_def)
+
+    other_uses =
+      prepared
+      |> Enum.reject(&(&1 == p))
+      |> Enum.any?(fn other -> branch_uses_var?(other.branch, var) end)
+
+    if other_uses, do: {:halt, :error}, else: {:cont, :ok}
+  end
+
+  defp check_fn_var_not_shared(_p, _prepared), do: {:cont, :ok}
 
   defp render_block_with_fns(prepared) do
     fn_defs =

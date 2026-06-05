@@ -745,18 +745,17 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
          target_module
        ),
        do:
-         entries
-         |> do_emit_cross_file_plan_with_classification(
-           target_module,
-           skeleton,
-           outer_holes,
-           local_groups,
-           all_bound,
-           first,
-           helper_name,
-           new_used,
-           state
-         )
+         do_emit_cross_file_plan_with_classification(entries, %{
+           target_module: target_module,
+           skeleton: skeleton,
+           outer_holes: outer_holes,
+           local_groups: local_groups,
+           all_bound: all_bound,
+           first: first,
+           helper_name: helper_name,
+           new_used: new_used,
+           state: state
+         })
 
   defp clause_in_multi_clause_set?(clause, set),
     do: set |> MapSet.member?(clause_signature(clause))
@@ -950,18 +949,19 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
     )
   end
 
-  defp do_emit_cross_file_plan_with_classification(
-         entries,
-         target_module,
-         skeleton,
-         outer_holes,
-         local_groups,
-         all_bound,
-         first,
-         helper_name,
-         new_used,
-         state
-       ) do
+  defp do_emit_cross_file_plan_with_classification(entries, ctx) do
+    %{
+      target_module: target_module,
+      skeleton: skeleton,
+      outer_holes: outer_holes,
+      local_groups: local_groups,
+      all_bound: all_bound,
+      first: first,
+      helper_name: helper_name,
+      new_used: new_used,
+      state: state
+    } = ctx
+
     outer_groups = dedupe_outer_holes(outer_holes)
 
     used_arg_names = arg_names_used_in_skeleton(skeleton, first.arg_names)
@@ -1149,34 +1149,34 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
             {[], state}
 
           {outer_holes, local_groups, all_bound} ->
-            emit_intra_plan_with_classification(
-              intra_entries,
-              target_module,
-              skeleton,
-              outer_holes,
-              local_groups,
-              all_bound,
-              first,
-              helper_name,
-              new_used,
-              state
-            )
+            emit_intra_plan_with_classification(intra_entries, %{
+              target_module: target_module,
+              skeleton: skeleton,
+              outer_holes: outer_holes,
+              local_groups: local_groups,
+              all_bound: all_bound,
+              first: first,
+              helper_name: helper_name,
+              new_used: new_used,
+              state: state
+            })
         end
     end
   end
 
-  defp emit_intra_plan_with_classification(
-         intra_entries,
-         target_module,
-         skeleton,
-         outer_holes,
-         local_groups,
-         all_bound,
-         first,
-         helper_name,
-         new_used,
-         state
-       ) do
+  defp emit_intra_plan_with_classification(intra_entries, ctx) do
+    %{
+      target_module: target_module,
+      skeleton: skeleton,
+      outer_holes: outer_holes,
+      local_groups: local_groups,
+      all_bound: all_bound,
+      first: first,
+      helper_name: helper_name,
+      new_used: new_used,
+      state: state
+    } = ctx
+
     # Dedup: holes whose per-clone value vector is identical
     # collapse into one helper param (the same value is used at
     # every path).

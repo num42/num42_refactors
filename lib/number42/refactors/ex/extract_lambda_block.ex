@@ -252,6 +252,9 @@ defmodule Number42.Refactors.Ex.ExtractLambdaBlock do
     [%{callsite_patches: callsite_patches, helper_text: helper_text}]
   end
 
+  defp plan_for_hash_group([_only]), do: []
+  defp plan_for_hash_group(group), do: plan_for_group(group)
+
   defp plans_for_module(body_exprs, min_mass) do
     helper_taken? = helper_name_taken?(body_exprs)
 
@@ -264,12 +267,7 @@ defmodule Number42.Refactors.Ex.ExtractLambdaBlock do
       |> Enum.filter(&(&1.mass >= min_mass))
       |> Enum.reject(& &1.has_closure?)
       |> Enum.group_by(& &1.hash)
-      |> Enum.flat_map(fn {_hash, group} ->
-        case group do
-          [_only] -> []
-          group -> plan_for_group(group)
-        end
-      end)
+      |> Enum.flat_map(fn {_hash, group} -> plan_for_hash_group(group) end)
     end
   end
 

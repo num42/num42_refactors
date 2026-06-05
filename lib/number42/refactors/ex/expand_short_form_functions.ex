@@ -326,19 +326,7 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
       |> Enum.reduce({[], MapSet.new()}, fn
         {kind, _, [head, _body_kw]} = node, {pairs, names}
         when kind in [:def, :defp, :defmacro, :defmacrop] ->
-          case extract_fn_signature(head) do
-            {name, params} ->
-              names = names |> MapSet.put(name)
-
-              if kind in [:defp, :defmacrop] do
-                {[{{name, length(params)}, node} | pairs], names}
-              else
-                {pairs, names}
-              end
-
-            :error ->
-              {pairs, names}
-          end
+          reduce_def_node(kind, node, head, pairs, names)
 
         _, acc ->
           acc
@@ -346,6 +334,22 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
 
     grouped = priv_pairs |> Enum.group_by(fn {key, _} -> key end, fn {_, node} -> node end)
     {grouped, all_names}
+  end
+
+  defp reduce_def_node(kind, node, head, pairs, names) do
+    case extract_fn_signature(head) do
+      {name, params} ->
+        names = names |> MapSet.put(name)
+
+        if kind in [:defp, :defmacrop] do
+          {[{{name, length(params)}, node} | pairs], names}
+        else
+          {pairs, names}
+        end
+
+      :error ->
+        {pairs, names}
+    end
   end
 
   # Try to expand each short non-whitelisted subtoken of the function
@@ -442,16 +446,20 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
         end
 
       :skip ->
-        # If the part itself is whitelisted or stop-word, IdentifierExpansion
-        # returns :skip — but for those we want to keep the part verbatim,
-        # not abandon the whole name. Disambiguate.
-        part_atom = String.to_atom(part)
+        resolve_skipped_part(part, resolve_opts, acc)
+    end
+  end
 
-        cond do
-          MapSet.member?(resolve_opts.whitelist, part_atom) -> {:cont, [part | acc]}
-          MapSet.member?(resolve_opts.stop_words, part_atom) -> {:cont, [part | acc]}
-          true -> {:halt, :skip}
-        end
+  # If the part itself is whitelisted or stop-word, IdentifierExpansion
+  # returns :skip — but for those we want to keep the part verbatim,
+  # not abandon the whole name. Disambiguate.
+  defp resolve_skipped_part(part, resolve_opts, acc) do
+    part_atom = String.to_atom(part)
+
+    cond do
+      MapSet.member?(resolve_opts.whitelist, part_atom) -> {:cont, [part | acc]}
+      MapSet.member?(resolve_opts.stop_words, part_atom) -> {:cont, [part | acc]}
+      true -> {:halt, :skip}
     end
   end
 
@@ -537,19 +545,21 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
     |> Enum.flat_map(fn
       {:sigil_H, meta, [{:<<>>, _, [content]}, _]} = node when is_binary(content) ->
         new_content = patch_heex_content(content, resolutions)
-
-        if new_content == content do
-          []
-        else
-          delim = Keyword.get(meta, :delimiter, "\"")
-          prefix = if delim in ["\"\"\"", "'''"], do: "\n", else: ""
-          new_text = "~H#{delim}#{prefix}#{new_content}#{delim}"
-          [Patch.new(Sourceror.get_range(node), new_text)]
-        end
+        heex_patch_for_sigil(node, meta, content, new_content)
 
       _ ->
         []
     end)
+  end
+
+  defp heex_patch_for_sigil(_node, _meta, content, new_content) when new_content == content,
+    do: []
+
+  defp heex_patch_for_sigil(node, meta, _content, new_content) do
+    delim = Keyword.get(meta, :delimiter, "\"")
+    prefix = if delim in ["\"\"\"", "'''"], do: "\n", else: ""
+    new_text = "~H#{delim}#{prefix}#{new_content}#{delim}"
+    [Patch.new(Sourceror.get_range(node), new_text)]
   end
 
   defp patch_heex_content(content, resolutions) do

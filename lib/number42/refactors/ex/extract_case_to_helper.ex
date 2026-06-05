@@ -311,73 +311,69 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelper do
 
   defp collect_in_binding(other, bound), do: {collect_outer_uses(other, bound), bound}
 
-  defp collect_outer_uses(ast, bound) do
-    case ast do
-      {name, _, ctx} when is_atom(name) and is_atom(ctx) ->
-        string = Atom.to_string(name)
+  defp collect_outer_uses({name, _, ctx}, bound) when is_atom(name) and is_atom(ctx),
+    do: outer_var_use(name, bound)
 
-        cond do
-          String.starts_with?(string, "_") -> MapSet.new()
-          name in [:__MODULE__, :__CALLER__, :__ENV__] -> MapSet.new()
-          MapSet.member?(bound, name) -> MapSet.new()
-          true -> MapSet.new([name])
-        end
+  defp collect_outer_uses({:fn, _, clauses}, bound) when is_list(clauses) do
+    clauses
+    |> Enum.map(&collect_fn_clause_uses(&1, bound))
+    |> Enum.reduce(MapSet.new(), &MapSet.union/2)
+  end
 
-      {:fn, _, clauses} when is_list(clauses) ->
-        clauses
-        |> Enum.map(&collect_fn_clause_uses(&1, bound))
-        |> Enum.reduce(MapSet.new(), &MapSet.union/2)
+  defp collect_outer_uses({:for, _, args}, bound) when is_list(args),
+    do: collect_comprehension_uses(args, bound)
 
-      {:for, _, args} when is_list(args) ->
-        collect_comprehension_uses(args, bound)
+  defp collect_outer_uses({:with, _, args}, bound) when is_list(args),
+    do: collect_comprehension_uses(args, bound)
 
-      {:with, _, args} when is_list(args) ->
-        collect_comprehension_uses(args, bound)
+  defp collect_outer_uses({{:., _, [_, _]} = dotcall, _, args}, bound) when is_list(args) do
+    # Remote call: `Mod.fun(args)`. Don't descend into the dotcall
+    # head's atom — `Mod` is already an `__aliases__` and `fun` is
+    # an atom literal. Just walk args.
+    collect_child_uses(args, bound, collect_outer_uses(dotcall, bound))
+  end
 
-      {{:., _, [_, _]} = dotcall, _, args} when is_list(args) ->
-        # Remote call: `Mod.fun(args)`. Don't descend into the dotcall
-        # head's atom — `Mod` is already an `__aliases__` and `fun` is
-        # an atom literal. Just walk args.
-        args
-        |> Enum.reduce(collect_outer_uses(dotcall, bound), fn a, acc ->
-          MapSet.union(acc, collect_outer_uses(a, bound))
-        end)
+  defp collect_outer_uses({:from, _, [src | rest]}, bound) do
+    # Ecto.Query.from/2: first arg is `binding in src` or just `src`,
+    # rest is a keyword list whose `:join` entries also bind via
+    # `… in …`. We sequentially collect uses; each `in` LHS adds
+    # to bound for the remainder of the call.
+    {first_uses, bound1} = collect_in_binding(src, bound)
+    {rest_uses, _} = collect_from_rest(rest, bound1)
+    MapSet.union(first_uses, rest_uses)
+  end
 
-      {:from, _, [src | rest]} ->
-        # Ecto.Query.from/2: first arg is `binding in src` or just `src`,
-        # rest is a keyword list whose `:join` entries also bind via
-        # `… in …`. We sequentially collect uses; each `in` LHS adds
-        # to bound for the remainder of the call.
-        {first_uses, bound1} = collect_in_binding(src, bound)
-        {rest_uses, _} = collect_from_rest(rest, bound1)
-        MapSet.union(first_uses, rest_uses)
+  defp collect_outer_uses({form, _, args}, bound) when is_list(args) do
+    # Generic call/special form: walk children with same scope.
+    collect_child_uses(args, bound, collect_form_head_uses(form, bound))
+  end
 
-      {form, _, args} when is_list(args) ->
-        # Generic call/special form: walk children with same scope.
-        head_uses =
-          case form do
-            atom when is_atom(atom) -> MapSet.new()
-            other -> collect_outer_uses(other, bound)
-          end
+  defp collect_outer_uses(list, bound) when is_list(list),
+    do: collect_child_uses(list, bound, MapSet.new())
 
-        args
-        |> Enum.reduce(head_uses, fn a, acc ->
-          MapSet.union(acc, collect_outer_uses(a, bound))
-        end)
+  defp collect_outer_uses({l, r}, bound),
+    do: MapSet.union(collect_outer_uses(l, bound), collect_outer_uses(r, bound))
 
-      list when is_list(list) ->
-        list
-        |> Enum.reduce(MapSet.new(), fn item, acc ->
-          MapSet.union(acc, collect_outer_uses(item, bound))
-        end)
+  defp collect_outer_uses(_atom_or_literal, _bound), do: MapSet.new()
 
-      {l, r} ->
-        MapSet.union(collect_outer_uses(l, bound), collect_outer_uses(r, bound))
+  defp collect_child_uses(children, bound, acc) do
+    children
+    |> Enum.reduce(acc, fn child, acc -> MapSet.union(acc, collect_outer_uses(child, bound)) end)
+  end
 
-      _atom_or_literal ->
-        MapSet.new()
+  defp outer_var_use(name, bound) do
+    string = Atom.to_string(name)
+
+    cond do
+      String.starts_with?(string, "_") -> MapSet.new()
+      name in [:__MODULE__, :__CALLER__, :__ENV__] -> MapSet.new()
+      MapSet.member?(bound, name) -> MapSet.new()
+      true -> MapSet.new([name])
     end
   end
+
+  defp collect_form_head_uses(form, _bound) when is_atom(form), do: MapSet.new()
+  defp collect_form_head_uses(form, bound), do: collect_outer_uses(form, bound)
 
   defp collect_fn_clause_uses({:->, _, [args, body]}, bound) do
     inner_bound =

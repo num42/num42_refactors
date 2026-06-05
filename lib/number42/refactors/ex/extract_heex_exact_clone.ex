@@ -343,17 +343,21 @@ defmodule Number42.Refactors.Ex.ExtractHeexExactClone do
 
     case trimmed do
       "for " <> rest ->
-        case Code.string_to_quoted("for " <> rest <> " do :ok end") do
-          {:ok, {:for, _, args}} ->
-            generators = args |> Enum.filter(&match?({:<-, _, _}, &1))
+        parse_for_comprehension(rest)
 
-            case generators do
-              [{:<-, _, [pattern, coll]}] ->
-                {:ok, pattern_var_names(pattern), assign_names(coll)}
+      _ ->
+        :error
+    end
+  end
 
-              _ ->
-                :error
-            end
+  defp parse_for_comprehension(rest) do
+    case Code.string_to_quoted("for " <> rest <> " do :ok end") do
+      {:ok, {:for, _, args}} ->
+        generators = args |> Enum.filter(&match?({:<-, _, _}, &1))
+
+        case generators do
+          [{:<-, _, [pattern, coll]}] ->
+            {:ok, pattern_var_names(pattern), assign_names(coll)}
 
           _ ->
             :error

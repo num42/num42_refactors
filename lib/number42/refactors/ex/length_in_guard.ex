@@ -247,30 +247,20 @@ defmodule Number42.Refactors.Ex.LengthInGuard do
 
   defp combine_with_lhs(:skip, _lhs), do: :skip
 
-  defp def_clause_patch_or_nil(
-         :skip,
-         _catch_all_body_ast,
-         _catch_all_kind,
-         _def_kind,
-         _do_kw,
-         _fn_args,
-         _name,
-         _node,
-         _source
-       ),
-       do: nil
+  defp def_clause_patch_or_nil(:skip, _ctx), do: nil
 
-  defp def_clause_patch_or_nil(
-         {:ok, var_index, op, n, remaining_guard},
-         catch_all_body_ast,
-         catch_all_kind,
-         def_kind,
-         do_kw,
-         fn_args,
-         name,
-         node,
-         source
-       ) do
+  defp def_clause_patch_or_nil({:ok, var_index, op, n, remaining_guard}, ctx) do
+    %{
+      catch_all_body_ast: catch_all_body_ast,
+      catch_all_kind: catch_all_kind,
+      def_kind: def_kind,
+      do_kw: do_kw,
+      fn_args: fn_args,
+      name: name,
+      node: node,
+      source: source
+    } = ctx
+
     sizes = fallback_sizes(op, n) |> Enum.to_list()
 
     rendered =
@@ -485,16 +475,16 @@ defmodule Number42.Refactors.Ex.LengthInGuard do
        )
        when length(fn_args) == arity do
     classify_guard(fn_args, guard)
-    |> def_clause_patch_or_nil(
-      catch_all_body_ast,
-      catch_all_kind,
-      def_kind,
-      do_kw,
-      fn_args,
-      name,
-      node,
-      source
-    )
+    |> def_clause_patch_or_nil(%{
+      catch_all_body_ast: catch_all_body_ast,
+      catch_all_kind: catch_all_kind,
+      def_kind: def_kind,
+      do_kw: do_kw,
+      fn_args: fn_args,
+      name: name,
+      node: node,
+      source: source
+    })
   end
 
   defp maybe_def_clause_patch(_, _, _, _, _, _), do: nil
