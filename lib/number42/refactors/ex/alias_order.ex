@@ -143,27 +143,25 @@ defmodule Number42.Refactors.Ex.AliasOrder do
     range = Sourceror.get_range(node)
     lines = String.split(source, "\n")
 
-    cond do
-      range.start[:line] == range.end[:line] ->
-        line = lines |> Enum.at(range.start[:line] - 1)
-        String.slice(line, (range.start[:column] - 1)..(range.end[:column] - 2))
+    if range.start[:line] == range.end[:line] do
+      line = lines |> Enum.at(range.start[:line] - 1)
+      String.slice(line, (range.start[:column] - 1)..(range.end[:column] - 2))
+    else
+      first_line =
+        lines
+        |> Enum.at(range.start[:line] - 1)
+        |> String.slice((range.start[:column] - 1)..-1//1)
 
-      true ->
-        first_line =
-          lines
-          |> Enum.at(range.start[:line] - 1)
-          |> String.slice((range.start[:column] - 1)..-1//1)
+      middle_lines =
+        lines
+        |> Enum.slice(range.start[:line]..(range.end[:line] - 2))
 
-        middle_lines =
-          lines
-          |> Enum.slice(range.start[:line]..(range.end[:line] - 2))
+      last_line =
+        lines
+        |> Enum.at(range.end[:line] - 1)
+        |> String.slice(0..(range.end[:column] - 2))
 
-        last_line =
-          lines
-          |> Enum.at(range.end[:line] - 1)
-          |> String.slice(0..(range.end[:column] - 2))
-
-        ([first_line | middle_lines] ++ [last_line]) |> Enum.join("\n")
+      ([first_line | middle_lines] ++ [last_line]) |> Enum.join("\n")
     end
   end
 

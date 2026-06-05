@@ -97,24 +97,27 @@ defmodule Number42.Refactors.AstDiff do
   defp data_node?(node) do
     case node do
       list when is_list(list) ->
-        list |> Enum.all?(&(literal_node?(&1) or data_node?(&1)))
+        all_lit_or_data?(list)
 
       {:__block__, _, [list]} when is_list(list) ->
-        list |> Enum.all?(&(literal_node?(&1) or data_node?(&1)))
+        all_lit_or_data?(list)
 
       {:{}, _, args} when is_list(args) ->
-        args |> Enum.all?(&(literal_node?(&1) or data_node?(&1)))
+        all_lit_or_data?(args)
 
       {:%{}, _, pairs} when is_list(pairs) ->
-        pairs
-        |> Enum.all?(fn {k, v} ->
-          (literal_node?(k) or data_node?(k)) and (literal_node?(v) or data_node?(v))
-        end)
+        pairs |> Enum.all?(&data_pair?/1)
 
       _ ->
         false
     end
   end
+
+  defp all_lit_or_data?(nodes), do: nodes |> Enum.all?(&lit_or_data?/1)
+
+  defp lit_or_data?(node), do: literal_node?(node) or data_node?(node)
+
+  defp data_pair?({k, v}), do: lit_or_data?(k) and lit_or_data?(v)
 
   defp descend([{form, meta, args} | _] = nodes, path, holes_acc) when is_list(args) do
     children_per_node = nodes |> Enum.map(fn {_, _, a} -> a end)
@@ -147,14 +150,7 @@ defmodule Number42.Refactors.AstDiff do
     [size | _] = sizes
 
     if sizes |> Enum.all?(&(&1 == size)) do
-      {new_components, holes_acc} =
-        0..(size - 1)
-        |> Enum.reduce({[], holes_acc}, fn i, {acc, h} ->
-          components = nodes |> Enum.map(&elem(&1, i))
-          {new, h} = walk(components, path ++ [i], h)
-          {[new | acc], h}
-        end)
-
+      {new_components, holes_acc} = walk_tuple_components(nodes, path, size, holes_acc)
       {List.to_tuple(new_components |> Enum.reverse()), holes_acc}
     else
       hole = build_hole(nodes, path)
@@ -171,6 +167,15 @@ defmodule Number42.Refactors.AstDiff do
       hole = build_hole(nodes, path)
       {placeholder(path), [hole | holes_acc]}
     end
+  end
+
+  defp walk_tuple_components(nodes, path, size, holes_acc) do
+    0..(size - 1)
+    |> Enum.reduce({[], holes_acc}, fn i, {acc, h} ->
+      components = nodes |> Enum.map(&elem(&1, i))
+      {new, h} = walk(components, path ++ [i], h)
+      {[new | acc], h}
+    end)
   end
 
   defp literal_node?({:__block__, _, [v]})
@@ -194,24 +199,25 @@ defmodule Number42.Refactors.AstDiff do
 
   defp same_outer_shape?([first | rest]) do
     cond do
-      is_tuple(first) and tuple_size(first) == 3 ->
-        rest |> Enum.all?(fn n -> tuple3?(n) and same_3tuple_shape?(first, n) end)
-
-      is_tuple(first) and tuple_size(first) == 2 ->
-        rest |> Enum.all?(fn n -> is_tuple(n) and tuple_size(n) == 2 end)
-
-      is_tuple(first) ->
-        size = tuple_size(first)
-        rest |> Enum.all?(fn n -> is_tuple(n) and tuple_size(n) == size end)
-
-      is_list(first) ->
-        len = length(first)
-        rest |> Enum.all?(fn n -> is_list(n) and length(n) == len end)
-
-      true ->
-        false
+      is_tuple(first) and tuple_size(first) == 3 -> same_3tuple_shape_all?(first, rest)
+      is_tuple(first) and tuple_size(first) == 2 -> all_2tuples?(rest)
+      is_tuple(first) -> all_tuples_of_size?(rest, tuple_size(first))
+      is_list(first) -> all_lists_of_length?(rest, length(first))
+      true -> false
     end
   end
+
+  defp same_3tuple_shape_all?(first, rest),
+    do: rest |> Enum.all?(fn n -> tuple3?(n) and same_3tuple_shape?(first, n) end)
+
+  defp all_2tuples?(rest),
+    do: rest |> Enum.all?(fn n -> is_tuple(n) and tuple_size(n) == 2 end)
+
+  defp all_tuples_of_size?(rest, size),
+    do: rest |> Enum.all?(fn n -> is_tuple(n) and tuple_size(n) == size end)
+
+  defp all_lists_of_length?(rest, len),
+    do: rest |> Enum.all?(fn n -> is_list(n) and length(n) == len end)
 
   defp strip(ast) do
     Macro.prewalk(ast, fn

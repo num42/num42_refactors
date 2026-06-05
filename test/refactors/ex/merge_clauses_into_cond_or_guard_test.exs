@@ -164,7 +164,7 @@ defmodule Number42.Refactors.Ex.MergeClausesIntoCondOrGuardTest do
   describe "output is valid Elixir" do
     test "merged cond compiles" do
       before_source = """
-      defmodule CompileCheck do
+      defmodule CompileCheckMergeClauses do
         def classify(n) when n < 0, do: {:neg, abs(n)}
         def classify(n) when n == 0, do: :zero
         def classify(n), do: {:pos, n}

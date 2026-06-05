@@ -141,17 +141,21 @@ defmodule Number42.Refactors.Ex.IfLiftToClauses do
       |> Enum.flat_map(&maybe_patch(&1, source))
 
   defp classify_atom(leaf, neg) do
-    cond do
-      r = match_is_guard(leaf) -> {:ok, put_neg(r, neg)}
-      r = match_bif_op_lit(leaf) -> {:ok, put_neg(r, neg)}
-      r = match_param_in_list(leaf) -> {:ok, put_neg(r, neg)}
-      r = match_param_eq_lit(leaf) -> {:ok, put_neg(r, neg)}
-      r = match_field_eq_lit(leaf) -> {:ok, put_neg(r, neg)}
-      r = match_eq_two_sides(leaf) -> {:ok, put_neg(r, neg)}
-      r = match_param_op_lift_to_clauses(leaf) -> {:ok, put_neg(r, neg)}
-      r = match_field_truthy(leaf) -> {:ok, put_neg(r, neg)}
-      r = match_param_truthy(leaf) -> {:ok, put_neg(r, neg)}
-      true -> :error
+    matchers = [
+      &match_is_guard/1,
+      &match_bif_op_lit/1,
+      &match_param_in_list/1,
+      &match_param_eq_lit/1,
+      &match_field_eq_lit/1,
+      &match_eq_two_sides/1,
+      &match_param_op_lift_to_clauses/1,
+      &match_field_truthy/1,
+      &match_param_truthy/1
+    ]
+
+    case Enum.find_value(matchers, & &1.(leaf)) do
+      nil -> :error
+      r -> {:ok, put_neg(r, neg)}
     end
   end
 
@@ -211,12 +215,10 @@ defmodule Number42.Refactors.Ex.IfLiftToClauses do
        when is_atom(pred) and is_atom(name) and is_atom(ctx) do
     pred_str = Atom.to_string(pred)
 
-    cond do
-      String.starts_with?(pred_str, "is_") and length(rest) in [0, 1] ->
-        {:is_guard, {pred, name, rest}}
-
-      true ->
-        nil
+    if String.starts_with?(pred_str, "is_") and length(rest) in [0, 1] do
+      {:is_guard, {pred, name, rest}}
+    else
+      nil
     end
   end
 
@@ -814,37 +816,36 @@ defmodule Number42.Refactors.Ex.IfLiftToClauses do
 
   defp render_head_slots(params, patterns, head_uses) do
     params
-    |> Enum.map(fn {name, ast, _default} ->
-      cond do
-        name == nil ->
-          # Anonymous slot (literal, `_name`, or pattern). Pass through.
-          {Sourceror.to_string(ast), :pattern}
+    |> Enum.map(&render_head_slot_entry(&1, patterns, head_uses))
+  end
 
-        true ->
-          case Map.get(patterns, name) do
-            nil ->
-              if MapSet.member?(head_uses, name),
-                do: {Atom.to_string(name), :bare},
-                else: {underscore_for(name), :bare}
+  # Anonymous slot (literal, `_name`, or pattern). Pass through.
+  defp render_head_slot_entry({nil, ast, _default}, _patterns, _head_uses),
+    do: {Sourceror.to_string(ast), :pattern}
 
-            {:eq, lit} ->
-              {Sourceror.to_string(lit), :literal}
+  defp render_head_slot_entry({name, _ast, _default}, patterns, head_uses) do
+    case Map.get(patterns, name) do
+      nil ->
+        if MapSet.member?(head_uses, name),
+          do: {Atom.to_string(name), :bare},
+          else: {underscore_for(name), :bare}
 
-            {:fields, _} = tree ->
-              # Only emit `= name` binder when the do-body actually
-              # references the whole param; otherwise the pattern
-              # alone is enough (no `= _foo` noise).
-              text =
-                if MapSet.member?(head_uses, name) do
-                  render_pattern_tree(tree) <> " = " <> Atom.to_string(name)
-                else
-                  render_pattern_tree(tree)
-                end
+      {:eq, lit} ->
+        {Sourceror.to_string(lit), :literal}
 
-              {text, :pattern}
-          end
-      end
-    end)
+      {:fields, _} = tree ->
+        {render_fields_slot(tree, name, head_uses), :pattern}
+    end
+  end
+
+  # Only emit `= name` binder when the do-body actually references the whole
+  # param; otherwise the pattern alone is enough (no `= _foo` noise).
+  defp render_fields_slot(tree, name, head_uses) do
+    if MapSet.member?(head_uses, name) do
+      render_pattern_tree(tree) <> " = " <> Atom.to_string(name)
+    else
+      render_pattern_tree(tree)
+    end
   end
 
   defp render_leaf({:value, lit}), do: Sourceror.to_string(lit)

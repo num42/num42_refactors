@@ -182,26 +182,30 @@ defmodule Number42.Refactors.Ex.ExtractSharedModule do
     |> Macro.prewalker()
     |> Enum.flat_map(fn
       {:defmodule, _, [name_ast, [{_do, body}]]} ->
-        case alias_to_module(name_ast) do
-          {:ok, mod} ->
-            if shared_module?(mod) do
-              # `*.Shared` is the target of this refactor — never patch
-              # one as a loser. Otherwise we'd inject `import Self, only:
-              # [...]` and rewrite the function we just extracted into a
-              # delegate to itself.
-              []
-            else
-              patches_for_module(mod, body_to_exprs(body), plan)
-            end
-
-          :error ->
-            []
-        end
+        patches_for_defmodule(name_ast, body, plan)
 
       _ ->
         []
     end)
     |> patch_or_passthrough(source)
+  end
+
+  defp patches_for_defmodule(name_ast, body, plan) do
+    case alias_to_module(name_ast) do
+      {:ok, mod} ->
+        if shared_module?(mod) do
+          # `*.Shared` is the target of this refactor — never patch
+          # one as a loser. Otherwise we'd inject `import Self, only:
+          # [...]` and rewrite the function we just extracted into a
+          # delegate to itself.
+          []
+        else
+          patches_for_module(mod, body_to_exprs(body), plan)
+        end
+
+      :error ->
+        []
+    end
   end
 
   defp apply_plan_to_parse_result({:ok, ast}, plan, source),
@@ -238,15 +242,15 @@ defmodule Number42.Refactors.Ex.ExtractSharedModule do
     first.attrs
     |> Enum.all?(fn {name, value} ->
       stripped = strip_meta(value)
-
-      rest
-      |> Enum.all?(fn e ->
-        case Map.fetch(e.attrs, name) do
-          {:ok, other} -> strip_meta(other) == stripped
-          :error -> false
-        end
-      end)
+      rest |> Enum.all?(&attr_matches?(&1, name, stripped))
     end)
+  end
+
+  defp attr_matches?(entry, name, stripped) do
+    case Map.fetch(entry.attrs, name) do
+      {:ok, other} -> strip_meta(other) == stripped
+      :error -> false
+    end
   end
 
   defp body_calls_unmigratable_local?(clauses, helper_clauses, body_exprs) do
@@ -279,66 +283,66 @@ defmodule Number42.Refactors.Ex.ExtractSharedModule do
   end
 
   defp build_function_entry(
-         module,
+         %{
+           aliases: aliases,
+           body_exprs: body_exprs,
+           has_use: has_use,
+           imports: imports,
+           module: module,
+           module_attrs: module_attrs,
+           source: source
+         },
          kind,
          name,
          arity,
          clauses,
-         body_exprs,
-         aliases,
-         imports,
-         module_attrs,
-         has_use,
-         source,
          min_mass
        ) do
-    cond do
-      total_mass(clauses) < min_mass ->
-        []
+    if total_mass(clauses) < min_mass do
+      []
+    else
+      # All clauses are plain-var? Then we can render `defdelegate`
+      # in the original. Otherwise we'll need a wrapper-`def`.
+      all_plain = clauses |> Enum.all?(&plain_var_clause?/1)
 
-      true ->
-        # All clauses are plain-var? Then we can render `defdelegate`
-        # in the original. Otherwise we'll need a wrapper-`def`.
-        all_plain = clauses |> Enum.all?(&plain_var_clause?/1)
+      # Generate synthetic arg names `arg_0, arg_1, ...` for the
+      # wrapper. (For plain-var clauses we still use the original
+      # arg names — that's nicer to read in `defdelegate`.)
+      wrapper_args = generate_wrapper_args(arity)
 
-        # Generate synthetic arg names `arg_0, arg_1, ...` for the
-        # wrapper. (For plain-var clauses we still use the original
-        # arg names — that's nicer to read in `defdelegate`.)
-        wrapper_args = generate_wrapper_args(arity)
+      delegate_args =
+        if all_plain, do: clause_arg_names(hd(clauses)), else: wrapper_args
 
-        delegate_args =
-          if all_plain, do: clause_arg_names(hd(clauses)), else: wrapper_args
+      hashed_clause = hash_clauses(clauses)
 
-        hashed_clause = hash_clauses(clauses)
+      # Helpers reachable only from these clauses (transitively),
+      # collected for migration.
+      helper_clauses = reachable_helper_clauses(body_exprs, name, arity)
 
-        # Helpers reachable only from these clauses (transitively),
-        # collected for migration.
-        helper_clauses = reachable_helper_clauses(body_exprs, name, arity)
-
-        with false <- body_calls_unmigratable_local?(clauses, helper_clauses, body_exprs),
-             {:ok, attrs_to_migrate} <-
-               resolve_attrs_for_migration(clauses, helper_clauses, module_attrs) do
-          [
-            %{
-              aliases: aliases,
-              all_plain: all_plain,
-              args: delegate_args,
-              arity: arity,
-              attrs: attrs_to_migrate,
-              clauses: clauses,
-              has_use: has_use,
-              hash: hashed_clause,
-              helper_clauses: helper_clauses,
-              imports: imports,
-              kind: kind,
-              module: module,
-              name: name,
-              source: source
-            }
-          ]
-        else
-          _ -> []
-        end
+      with false <- body_calls_unmigratable_local?(clauses, helper_clauses, body_exprs),
+           {:ok, attrs_to_migrate} <-
+             resolve_attrs_for_migration(clauses, helper_clauses, module_attrs) do
+        [
+          %{
+            aliases: aliases,
+            all_plain: all_plain,
+            args: delegate_args,
+            arity: arity,
+            attrs: attrs_to_migrate,
+            clauses: clauses,
+            has_use: has_use,
+            hash: hashed_clause,
+            helper_clauses: helper_clauses,
+            imports: imports,
+            kind: kind,
+            module: module,
+            name: name,
+            source: source
+          }
+        ]
+      else
+        _ -> []
+      end
     end
   end
 
@@ -348,72 +352,85 @@ defmodule Number42.Refactors.Ex.ExtractSharedModule do
     if defp_entries == [] do
       []
     else
-      grouped = defp_entries |> Enum.group_by(& &1.target)
-
-      grouped
+      defp_entries
+      |> Enum.group_by(& &1.target)
       |> Enum.flat_map(fn {target, group_entries} ->
-        new_pairs =
-          group_entries
-          |> Enum.map(fn e -> {e.name, e.arity} end)
-          |> Enum.uniq()
-
-        case find_existing_import_for_target(body_exprs, target) do
-          {:full, _node} ->
-            # The loser already does `import Target` without `only:`.
-            # Migrated helpers are reachable through the wide import —
-            # nothing to patch.
-            []
-
-          {:only, node, existing_pairs} ->
-            # Extend the existing `only:` list to include the new
-            # helpers. Anything already imported stays imported, so we
-            # never break callers of pre-existing functions.
-            merged =
-              (existing_pairs ++ new_pairs)
-              |> Enum.uniq()
-              |> Enum.sort()
-
-            only_list =
-              merged |> Enum.map_join(", ", fn {n, a} -> "#{n}: #{a}" end)
-
-            replacement = "import #{inspect(target)}, only: [#{only_list}]"
-
-            case Sourceror.get_range(node) do
-              %{end: end_pos, start: start_pos} ->
-                [%{change: replacement, range: %{end: end_pos, start: start_pos}}]
-
-              _ ->
-                []
-            end
-
-          :none ->
-            only_list =
-              new_pairs |> Enum.sort() |> Enum.map_join(", ", fn {n, a} -> "#{n}: #{a}" end)
-
-            replacement = "import #{inspect(target)}, only: [#{only_list}]"
-            # IMPORTANT: anchor on the *first def/defp in the module*, not
-            # on the first removed clause. `import` is positionally scoped
-            # — a `defp` that calls the migrated helper appears earlier in
-            # the source and would not see the import otherwise. Inserting
-            # at the very first definition guarantees every later body
-            # picks up the new import.
-            insertion_anchor = first_def_in_module(body_exprs)
-
-            case insertion_anchor do
-              nil ->
-                []
-
-              anchor ->
-                case Sourceror.get_range(anchor) do
-                  %{start: pos} ->
-                    [%{change: replacement <> "\n\n  ", range: %{end: pos, start: pos}}]
-
-                  _ ->
-                    []
-                end
-            end
-        end
+        import_patch_for_target(body_exprs, target, group_entries)
       end)
+    end
+  end
+
+  defp import_patch_for_target(body_exprs, target, group_entries) do
+    new_pairs =
+      group_entries
+      |> Enum.map(fn e -> {e.name, e.arity} end)
+      |> Enum.uniq()
+
+    case find_existing_import_for_target(body_exprs, target) do
+      {:full, _node} ->
+        # The loser already does `import Target` without `only:`.
+        # Migrated helpers are reachable through the wide import —
+        # nothing to patch.
+        []
+
+      {:only, node, existing_pairs} ->
+        extend_only_import_patch(target, node, existing_pairs, new_pairs)
+
+      :none ->
+        insert_only_import_patch(body_exprs, target, new_pairs)
+    end
+  end
+
+  defp extend_only_import_patch(target, node, existing_pairs, new_pairs) do
+    # Extend the existing `only:` list to include the new helpers.
+    # Anything already imported stays imported, so we never break
+    # callers of pre-existing functions.
+    merged =
+      (existing_pairs ++ new_pairs)
+      |> Enum.uniq()
+      |> Enum.sort()
+
+    only_list =
+      merged |> Enum.map_join(", ", fn {n, a} -> "#{n}: #{a}" end)
+
+    replacement = "import #{inspect(target)}, only: [#{only_list}]"
+
+    case Sourceror.get_range(node) do
+      %{end: end_pos, start: start_pos} ->
+        [%{change: replacement, range: %{end: end_pos, start: start_pos}}]
+
+      _ ->
+        []
+    end
+  end
+
+  defp insert_only_import_patch(body_exprs, target, new_pairs) do
+    only_list =
+      new_pairs |> Enum.sort() |> Enum.map_join(", ", fn {n, a} -> "#{n}: #{a}" end)
+
+    replacement = "import #{inspect(target)}, only: [#{only_list}]"
+    # IMPORTANT: anchor on the *first def/defp in the module*, not
+    # on the first removed clause. `import` is positionally scoped
+    # — a `defp` that calls the migrated helper appears earlier in
+    # the source and would not see the import otherwise. Inserting
+    # at the very first definition guarantees every later body
+    # picks up the new import.
+    case first_def_in_module(body_exprs) do
+      nil ->
+        []
+
+      anchor ->
+        anchor_insert_patch(anchor, replacement)
+    end
+  end
+
+  defp anchor_insert_patch(anchor, replacement) do
+    case Sourceror.get_range(anchor) do
+      %{start: pos} ->
+        [%{change: replacement <> "\n\n  ", range: %{end: pos, start: pos}}]
+
+      _ ->
+        []
     end
   end
 
@@ -552,100 +569,6 @@ defmodule Number42.Refactors.Ex.ExtractSharedModule do
       |> Enum.flat_map(&attr_refs_in/1)
     end)
     |> MapSet.new()
-  end
-
-  defp collect_calls(ast) do
-    {_, pipe_rhs_set} =
-      Macro.prewalk(ast, MapSet.new(), fn
-        {:|>, _, [_lhs, rhs]} = node, acc -> {node, MapSet.put(acc, rhs)}
-        node, acc -> {node, acc}
-      end)
-
-    {_, calls} =
-      Macro.prewalk(ast, [], fn
-        {:|>, _, [_lhs, rhs]} = node, acc ->
-          case rhs do
-            {{:., _, [_, _]}, _, _} ->
-              {node, acc}
-
-            {name, _, args} when is_atom(name) and is_list(args) ->
-              if local_call_candidate?(name) do
-                {node, [{name, length(args) + 1} | acc]}
-              else
-                {node, acc}
-              end
-
-            {name, _, nil} when is_atom(name) ->
-              if local_call_candidate?(name), do: {node, [{name, 1} | acc]}, else: {node, acc}
-
-            _ ->
-              {node, acc}
-          end
-
-        {:&, _, [{:/, _, [{name, _, ctx}, arity]}]} = node, acc
-        when is_atom(name) and is_atom(ctx) and is_integer(arity) ->
-          {node, [{name, arity} | acc]}
-
-        {:&, _, [{:/, _, [{name, _, ctx}, {:__block__, _, [arity]}]}]} = node, acc
-        when is_atom(name) and is_atom(ctx) and is_integer(arity) ->
-          {node, [{name, arity} | acc]}
-
-        {name, _, args} = node, acc when is_atom(name) and is_list(args) ->
-          cond do
-            MapSet.member?(pipe_rhs_set, node) ->
-              {node, acc}
-
-            local_call_candidate?(name) ->
-              {node, [{name, length(args)} | acc]}
-
-            true ->
-              {node, acc}
-          end
-
-        node, acc ->
-          {node, acc}
-      end)
-
-    calls
-  end
-
-  defp collect_calls_in_clauses(clauses) do
-    clauses
-    |> Enum.flat_map(fn
-      {_, _, [_h, body_kw]} when is_list(body_kw) ->
-        body_kw |> Keyword.values() |> Enum.flat_map(&collect_calls/1)
-
-      _ ->
-        # Bodyless def (e.g. default-argument stub `def foo(x \\ [])`).
-        # No body to walk.
-        []
-    end)
-    |> MapSet.new()
-  end
-
-  defp collect_definitions(body_exprs) do
-    body_exprs
-    |> Enum.filter(fn
-      {kind, _, [_h, body_kw]} when kind in [:def, :defp] and is_list(body_kw) -> true
-      _ -> false
-    end)
-    |> Enum.group_by(fn {kind, _, [head | _]} ->
-      case strip_when(head) do
-        {name, _, args} when is_atom(name) and is_list(args) -> {kind, name, length(args)}
-        {name, _, nil} when is_atom(name) -> {kind, name, 0}
-        _ -> :skip
-      end
-    end)
-    |> Enum.reject(fn {key, _} -> key == :skip end)
-    |> Enum.map(fn {{kind, name, arity}, clauses} ->
-      %{
-        arity: arity,
-        calls: collect_calls_in_clauses(clauses),
-        clauses: clauses,
-        kind: kind,
-        name: name
-      }
-    end)
   end
 
   defp collect_imports(body_exprs) do
@@ -882,15 +805,6 @@ defmodule Number42.Refactors.Ex.ExtractSharedModule do
     |> is_map()
   end
 
-  defp do_closure(reached, _graph, []), do: reached
-
-  defp do_closure(reached, graph, [current | rest]) do
-    callees = Map.get(graph, current, MapSet.new())
-    new = callees |> Enum.reject(&MapSet.member?(reached, &1))
-    next = new |> Enum.reduce(reached, &MapSet.put(&2, &1))
-    do_closure(next, graph, rest ++ new)
-  end
-
   defp drop_entries_blocked_by_existing_privates(loser_entries, write_root, source_paths) do
     targets =
       loser_entries
@@ -990,27 +904,31 @@ defmodule Number42.Refactors.Ex.ExtractSharedModule do
     |> Macro.prewalker()
     |> Enum.flat_map(fn
       {:defmodule, _, [name_ast, [{_do, body}]]} ->
-        case alias_to_module(name_ast) do
-          {:ok, mod} ->
-            if shared_module?(mod) do
-              # `*.Shared` modules are this refactor's own output. Treating
-              # their bodies as clone candidates would re-extract functions
-              # we already extracted in a previous run and emit imports
-              # pointing at the same module being defined — a self-import
-              # that fails to compile.
-              []
-            else
-              body_exprs = body_to_exprs(body)
-              functions_in_module(mod, body_exprs, source, min_mass)
-            end
-
-          :error ->
-            []
-        end
+        functions_in_defmodule(name_ast, body, source, min_mass)
 
       _ ->
         []
     end)
+  end
+
+  defp functions_in_defmodule(name_ast, body, source, min_mass) do
+    case alias_to_module(name_ast) do
+      {:ok, mod} ->
+        if shared_module?(mod) do
+          # `*.Shared` modules are this refactor's own output. Treating
+          # their bodies as clone candidates would re-extract functions
+          # we already extracted in a previous run and emit imports
+          # pointing at the same module being defined — a self-import
+          # that fails to compile.
+          []
+        else
+          body_exprs = body_to_exprs(body)
+          functions_in_module(mod, body_exprs, source, min_mass)
+        end
+
+      :error ->
+        []
+    end
   end
 
   defp extract_from_parse_result({:ok, ast}, min_mass, source),
@@ -1062,23 +980,26 @@ defmodule Number42.Refactors.Ex.ExtractSharedModule do
 
   defp find_existing_import_for_target(body_exprs, target) do
     body_exprs
-    |> Enum.find_value(:none, fn node ->
-      case node do
-        {:import, _, [{:__aliases__, _, parts}]} ->
-          if Module.concat(parts) == target, do: {:full, node}, else: nil
+    |> Enum.find_value(:none, &import_node_match(&1, target))
+  end
 
-        {:import, _, [{:__aliases__, _, parts}, opts]} ->
-          if Module.concat(parts) == target do
-            case extract_only_pairs(opts) do
-              :no_only -> {:full, node}
-              {:ok, pairs} -> {:only, node, pairs}
-            end
-          end
+  defp import_node_match({:import, _, [{:__aliases__, _, parts}]} = node, target) do
+    if Module.concat(parts) == target, do: {:full, node}, else: nil
+  end
 
-        _ ->
-          nil
+  defp import_node_match({:import, _, [{:__aliases__, _, parts}, opts]} = node, target) do
+    import_with_opts_match(parts, opts, target, node)
+  end
+
+  defp import_node_match(_node, _target), do: nil
+
+  defp import_with_opts_match(parts, opts, target, node) do
+    if Module.concat(parts) == target do
+      case extract_only_pairs(opts) do
+        :no_only -> {:full, node}
+        {:ok, pairs} -> {:only, node, pairs}
       end
-    end)
+    end
   end
 
   defp find_target_module_body(ast, target_module) do
@@ -1105,30 +1026,22 @@ defmodule Number42.Refactors.Ex.ExtractSharedModule do
   end
 
   defp functions_in_module(module, body_exprs, source, min_mass) do
-    aliases = collect_aliases(body_exprs)
-    imports = collect_imports(body_exprs)
-    module_attrs = collect_module_attributes(body_exprs)
-    has_use = has_use_statements?(body_exprs)
+    module_ctx = %{
+      aliases: collect_aliases(body_exprs),
+      body_exprs: body_exprs,
+      has_use: has_use_statements?(body_exprs),
+      imports: collect_imports(body_exprs),
+      module: module,
+      module_attrs: collect_module_attributes(body_exprs),
+      source: source
+    }
 
     body_exprs
     |> Enum.filter(&def_clause?/1)
     |> Enum.group_by(&def_name_arity_or_skip/1)
     |> Enum.reject(fn {key, _} -> key == :skip end)
     |> Enum.flat_map(fn {{kind, name, arity}, clauses} ->
-      build_function_entry(
-        module,
-        kind,
-        name,
-        arity,
-        clauses,
-        body_exprs,
-        aliases,
-        imports,
-        module_attrs,
-        has_use,
-        source,
-        min_mass
-      )
+      build_function_entry(module_ctx, kind, name, arity, clauses, min_mass)
     end)
   end
 
@@ -1180,14 +1093,6 @@ defmodule Number42.Refactors.Ex.ExtractSharedModule do
 
   defp load_default_sources,
     do: File.read(".refactor.exs") |> parse_inputs_from_config()
-
-  defp local_call_candidate?(name),
-    do:
-      not Macro.special_form?(name, 0) and
-        not Macro.special_form?(name, 1) and
-        not Macro.special_form?(name, 2) and
-        not Macro.operator?(name, 1) and
-        not Macro.operator?(name, 2)
 
   defp local_call_in_value?(name),
     do:
@@ -1439,45 +1344,53 @@ defmodule Number42.Refactors.Ex.ExtractSharedModule do
 
   defp reachable_helper_clauses(body_exprs, target_name, target_arity) do
     definitions = collect_definitions(body_exprs)
+    call_graph = build_call_graph(definitions)
 
-    target_calls =
-      definitions
-      |> Enum.find(fn d ->
-        d.kind == :def and d.name == target_name and d.arity == target_arity
-      end)
-      |> case do
-        nil -> MapSet.new()
-        d -> d.calls
-      end
-
-    call_graph =
-      for d <- definitions do
-        {{d.name, d.arity}, d.calls}
-      end
-      |> Map.new()
-
+    target_calls = target_def_calls(definitions, target_name, target_arity)
     reachable_from_target = transitive_closure(target_calls, call_graph)
 
     # A defp is "owned" by the target if it's reachable from the
     # target AND not reachable from any *other* def. That second check
     # is what makes the helper safe to migrate.
-    other_defs =
-      definitions
-      |> Enum.filter(fn d ->
-        d.kind == :def and not (d.name == target_name and d.arity == target_arity)
-      end)
-      |> Enum.map(&{&1.name, &1.arity})
-      |> MapSet.new()
-
+    other_defs = other_def_keys(definitions, target_name, target_arity)
     reachable_from_others = transitive_closure(other_defs, call_graph)
 
     definitions
-    |> Enum.filter(fn d ->
-      d.kind == :defp and
-        MapSet.member?(reachable_from_target, {d.name, d.arity}) and
-        not MapSet.member?(reachable_from_others, {d.name, d.arity})
-    end)
+    |> Enum.filter(&owned_helper?(&1, reachable_from_target, reachable_from_others))
     |> Enum.flat_map(& &1.clauses)
+  end
+
+  defp build_call_graph(definitions) do
+    for d <- definitions do
+      {{d.name, d.arity}, d.calls}
+    end
+    |> Map.new()
+  end
+
+  defp target_def_calls(definitions, target_name, target_arity) do
+    definitions
+    |> Enum.find(fn d ->
+      d.kind == :def and d.name == target_name and d.arity == target_arity
+    end)
+    |> case do
+      nil -> MapSet.new()
+      d -> d.calls
+    end
+  end
+
+  defp other_def_keys(definitions, target_name, target_arity) do
+    definitions
+    |> Enum.filter(fn d ->
+      d.kind == :def and not (d.name == target_name and d.arity == target_arity)
+    end)
+    |> Enum.map(&{&1.name, &1.arity})
+    |> MapSet.new()
+  end
+
+  defp owned_helper?(d, reachable_from_target, reachable_from_others) do
+    d.kind == :defp and
+      MapSet.member?(reachable_from_target, {d.name, d.arity}) and
+      not MapSet.member?(reachable_from_others, {d.name, d.arity})
   end
 
   defp read_existing_shared(path, target_module) do
@@ -1744,7 +1657,6 @@ defmodule Number42.Refactors.Ex.ExtractSharedModule do
   defp strip_when({:when, _, [inner | _]}), do: inner
   defp strip_when(other), do: other
   defp total_mass(clauses), do: clauses |> Enum.map(&clause_mass/1) |> Enum.sum()
-  defp transitive_closure(roots, graph), do: roots |> do_closure(graph, MapSet.to_list(roots))
   defp unblock_atom({:__block__, _, [a]}) when is_atom(a), do: a
   defp unblock_atom(a) when is_atom(a), do: a
   defp unblock_atom(_), do: nil

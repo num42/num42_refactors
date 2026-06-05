@@ -216,15 +216,16 @@ defmodule Number42.Refactors.Ex.LengthInGuard do
     catch_all = find_clause_list_catch_all(clauses)
 
     if catch_all do
-      clauses
-      |> Enum.flat_map(
-        &case maybe_arm_patch(&1, catch_all, source) do
-          nil -> []
-          patch -> [patch]
-        end
-      )
+      clauses |> Enum.flat_map(&arm_patch_list(&1, catch_all, source))
     else
       []
+    end
+  end
+
+  defp arm_patch_list(clause, catch_all, source) do
+    case maybe_arm_patch(clause, catch_all, source) do
+      nil -> []
+      patch -> [patch]
     end
   end
 
@@ -246,30 +247,20 @@ defmodule Number42.Refactors.Ex.LengthInGuard do
 
   defp combine_with_lhs(:skip, _lhs), do: :skip
 
-  defp def_clause_patch_or_nil(
-         :skip,
-         _catch_all_body_ast,
-         _catch_all_kind,
-         _def_kind,
-         _do_kw,
-         _fn_args,
-         _name,
-         _node,
-         _source
-       ),
-       do: nil
+  defp def_clause_patch_or_nil(:skip, _ctx), do: nil
 
-  defp def_clause_patch_or_nil(
-         {:ok, var_index, op, n, remaining_guard},
-         catch_all_body_ast,
-         catch_all_kind,
-         def_kind,
-         do_kw,
-         fn_args,
-         name,
-         node,
-         source
-       ) do
+  defp def_clause_patch_or_nil({:ok, var_index, op, n, remaining_guard}, ctx) do
+    %{
+      catch_all_body_ast: catch_all_body_ast,
+      catch_all_kind: catch_all_kind,
+      def_kind: def_kind,
+      do_kw: do_kw,
+      fn_args: fn_args,
+      name: name,
+      node: node,
+      source: source
+    } = ctx
+
     sizes = fallback_sizes(op, n) |> Enum.to_list()
 
     rendered =
@@ -386,14 +377,7 @@ defmodule Number42.Refactors.Ex.LengthInGuard do
     pairs
     |> Enum.find_value(:skip, fn
       {key_ast, {name, _, ctx}} when is_atom(name) and is_atom(ctx) ->
-        if name == var do
-          case map_key_atom(key_ast) do
-            {:ok, atom} -> {:ok, {:map_key, atom}}
-            :skip -> :skip
-          end
-        else
-          nil
-        end
+        if name == var, do: map_key_path(key_ast), else: nil
 
       _ ->
         nil
@@ -404,6 +388,14 @@ defmodule Number42.Refactors.Ex.LengthInGuard do
     do: find_var_in_pattern(lhs, var) |> find_var_or_recurse_rhs(rhs, var)
 
   defp find_var_in_pattern(_, _), do: :skip
+
+  defp map_key_path(key_ast) do
+    case map_key_atom(key_ast) do
+      {:ok, atom} -> {:ok, {:map_key, atom}}
+      :skip -> :skip
+    end
+  end
+
   defp find_var_or_recurse_rhs({:ok, _} = ok, _rhs, _var), do: ok
   defp find_var_or_recurse_rhs(:skip, rhs, var), do: rhs |> find_var_in_pattern(var)
 
@@ -483,16 +475,16 @@ defmodule Number42.Refactors.Ex.LengthInGuard do
        )
        when length(fn_args) == arity do
     classify_guard(fn_args, guard)
-    |> def_clause_patch_or_nil(
-      catch_all_body_ast,
-      catch_all_kind,
-      def_kind,
-      do_kw,
-      fn_args,
-      name,
-      node,
-      source
-    )
+    |> def_clause_patch_or_nil(%{
+      catch_all_body_ast: catch_all_body_ast,
+      catch_all_kind: catch_all_kind,
+      def_kind: def_kind,
+      do_kw: do_kw,
+      fn_args: fn_args,
+      name: name,
+      node: node,
+      source: source
+    })
   end
 
   defp maybe_def_clause_patch(_, _, _, _, _, _), do: nil
@@ -550,14 +542,16 @@ defmodule Number42.Refactors.Ex.LengthInGuard do
 
     if catch_all do
       clauses
-      |> Enum.flat_map(
-        &case maybe_def_clause_patch(&1, def_kind, name, arity, catch_all, source) do
-          nil -> []
-          patch -> [patch]
-        end
-      )
+      |> Enum.flat_map(&def_clause_patch_list(&1, def_kind, name, arity, catch_all, source))
     else
       []
+    end
+  end
+
+  defp def_clause_patch_list(clause, def_kind, name, arity, catch_all, source) do
+    case maybe_def_clause_patch(clause, def_kind, name, arity, catch_all, source) do
+      nil -> []
+      patch -> [patch]
     end
   end
 

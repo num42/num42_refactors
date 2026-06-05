@@ -115,9 +115,10 @@ defmodule Number42.Refactors.Ex.IfElseToCond do
   defp if_shape({:if, meta, [cond_ast, kw]}) when is_list(kw) do
     {do_body, else_body} = extract_do_else(kw)
 
-    cond do
-      do_body && else_body -> {:ok, %{cond: cond_ast, do: do_body, else: else_body, meta: meta}}
-      true -> :error
+    if do_body && else_body do
+      {:ok, %{cond: cond_ast, do: do_body, else: else_body, meta: meta}}
+    else
+      :error
     end
   end
 
@@ -137,17 +138,15 @@ defmodule Number42.Refactors.Ex.IfElseToCond do
   # nil-cond marks the terminal `true ->` branch.
   # Decomposes nested if/else recursively.
   defp collect_branches(%{cond: cond_ast, do: do_body, else: else_body}) do
-    cond do
-      ast_eq?(do_body, else_body) ->
-        # Outer if is dead — both branches identical. Drop outer condition,
-        # try to make a cond from the inner shape directly.
-        collect_from_branch(do_body, [])
-
-      true ->
-        with {:ok, do_branches} <- collect_from_branch(do_body, []),
-             {:ok, else_branches} <- collect_from_branch(else_body, []) do
-          merge_branches(cond_ast, do_branches, else_branches)
-        end
+    if ast_eq?(do_body, else_body) do
+      # Outer if is dead — both branches identical. Drop outer condition,
+      # try to make a cond from the inner shape directly.
+      collect_from_branch(do_body, [])
+    else
+      with {:ok, do_branches} <- collect_from_branch(do_body, []),
+           {:ok, else_branches} <- collect_from_branch(else_body, []) do
+        merge_branches(cond_ast, do_branches, else_branches)
+      end
     end
   end
 
@@ -169,44 +168,49 @@ defmodule Number42.Refactors.Ex.IfElseToCond do
 
       # Case B: do nests, else terminal.
       true ->
-        guarded =
-          Enum.map(do_branches, fn b ->
-            new_cond =
-              case b.cond do
-                nil -> cond_ast
-                inner -> combine_and(cond_ast, inner)
-              end
-
-            %{b | cond: new_cond}
-          end)
-
+        guarded = Enum.map(do_branches, &guard_branch(cond_ast, &1))
         {:ok, guarded ++ else_branches}
     end
+  end
+
+  defp guard_branch(cond_ast, b) do
+    new_cond =
+      case b.cond do
+        nil -> cond_ast
+        inner -> combine_and(cond_ast, inner)
+      end
+
+    %{b | cond: new_cond}
   end
 
   # Decompose a single branch body. If body is `if/else`, recurse. Otherwise it's a terminal branch.
   defp collect_from_branch(body, pre_stmts) do
     case if_shape(body) do
-      {:ok, inner} ->
-        # Nested if/else — collect its branches, prepend pre_stmts to first one.
-        case collect_branches(inner) do
-          {:ok, [first | rest]} ->
-            {:ok, [%{first | pre: pre_stmts ++ first.pre} | rest]}
+      {:ok, inner} -> collect_from_nested_if(inner, pre_stmts)
+      :error -> collect_from_non_if(body, pre_stmts)
+    end
+  end
 
-          err ->
-            err
-        end
+  # Nested if/else — collect its branches, prepend pre_stmts to first one.
+  defp collect_from_nested_if(inner, pre_stmts) do
+    case collect_branches(inner) do
+      {:ok, [first | rest]} ->
+        {:ok, [%{first | pre: pre_stmts ++ first.pre} | rest]}
 
-      :error ->
-        # Maybe it's a block with statements + a final if/else?
-        case extract_block_tail_if(body) do
-          {:ok, leading, inner_if} ->
-            collect_from_branch(inner_if, pre_stmts ++ leading)
+      err ->
+        err
+    end
+  end
 
-          :no ->
-            # Terminal — this branch is the final body.
-            {:ok, [%{cond: nil, body: body, pre: pre_stmts}]}
-        end
+  # Maybe it's a block with statements + a final if/else?
+  defp collect_from_non_if(body, pre_stmts) do
+    case extract_block_tail_if(body) do
+      {:ok, leading, inner_if} ->
+        collect_from_branch(inner_if, pre_stmts ++ leading)
+
+      :no ->
+        # Terminal — this branch is the final body.
+        {:ok, [%{cond: nil, body: body, pre: pre_stmts}]}
     end
   end
 
@@ -325,21 +329,23 @@ defmodule Number42.Refactors.Ex.IfElseToCond do
         # (the local-fn case ensures it doesn't appear in its own branch body —
         # prepare_branch already guards that).
         Enum.reduce_while(prepared, :ok, fn p, :ok ->
-          if p.kind == :fn do
-            var = extract_fn_var_name(p.fn_def)
-
-            other_uses =
-              prepared
-              |> Enum.reject(&(&1 == p))
-              |> Enum.any?(fn other -> branch_uses_var?(other.branch, var) end)
-
-            if other_uses, do: {:halt, :error}, else: {:cont, :ok}
-          else
-            {:cont, :ok}
-          end
+          check_fn_var_not_shared(p, prepared)
         end)
     end
   end
+
+  defp check_fn_var_not_shared(%{kind: :fn} = p, prepared) do
+    var = extract_fn_var_name(p.fn_def)
+
+    other_uses =
+      prepared
+      |> Enum.reject(&(&1 == p))
+      |> Enum.any?(fn other -> branch_uses_var?(other.branch, var) end)
+
+    if other_uses, do: {:halt, :error}, else: {:cont, :ok}
+  end
+
+  defp check_fn_var_not_shared(_p, _prepared), do: {:cont, :ok}
 
   defp render_block_with_fns(prepared) do
     fn_defs =

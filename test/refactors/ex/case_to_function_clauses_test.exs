@@ -323,7 +323,7 @@ defmodule Number42.Refactors.Ex.CaseToFunctionClausesTest do
   describe "output compiles" do
     test "lifted clauses are valid Elixir" do
       before_source = """
-      defmodule CompileCheck do
+      defmodule CompileCheckCaseToFn do
         def handle(msg, ctx) do
           case msg do
             {:ok, v} -> {:logged, v, ctx}

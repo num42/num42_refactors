@@ -294,21 +294,23 @@ defmodule Number42.Refactors.IdentifierExpansion do
   # In either case we ask AstHelpers.maybe_past_participle whether the
   # verb qualifies (verb-shaped suffix OR explicit pp_verbs entry).
   defp maybe_pp_transform(start_idx, starts_hit, subtokens, opts) do
-    cond do
-      start_idx == 0 and starts_hit < 2 ->
-        :skip
+    if start_idx == 0 and starts_hit < 2 do
+      :skip
+    else
+      pp_transform_from(start_idx, starts_hit, subtokens, opts)
+    end
+  end
 
-      true ->
-        last_idx = start_idx + starts_hit - 1
-        last = Enum.at(subtokens, last_idx)
-        head = Enum.take(subtokens, last_idx)
+  defp pp_transform_from(start_idx, starts_hit, subtokens, opts) do
+    last_idx = start_idx + starts_hit - 1
+    last = Enum.at(subtokens, last_idx)
+    head = Enum.take(subtokens, last_idx)
 
-        singular_last = AstHelpers.singularize(last)
+    singular_last = AstHelpers.singularize(last)
 
-        case AstHelpers.maybe_past_participle(head, [last], singular_last, opts.pp_verbs) do
-          {:ok, pp} -> {:ok, "#{pp}_#{singular_last}"}
-          :skip -> :skip
-        end
+    case AstHelpers.maybe_past_participle(head, [last], singular_last, opts.pp_verbs) do
+      {:ok, pp} -> {:ok, "#{pp}_#{singular_last}"}
+      :skip -> :skip
     end
   end
 
@@ -362,26 +364,26 @@ defmodule Number42.Refactors.IdentifierExpansion do
         :error
 
       _ ->
-        candidates =
-          0..(length(subtokens) - 1)
-          |> Enum.flat_map(fn idx ->
-            case latch_try_at(short_chars, subtokens, idx) do
-              {:ok, starts_hit} -> [{idx, starts_hit}]
-              :error -> []
-            end
-          end)
-
-        case candidates do
-          [] ->
-            :error
-
-          _ ->
-            {idx, starts_hit} =
-              candidates |> Enum.max_by(fn {idx, starts_hit} -> {starts_hit, idx} end)
-
-            {:ok, idx, starts_hit}
-        end
+        0..(length(subtokens) - 1)
+        |> Enum.flat_map(&latch_candidate_at(short_chars, subtokens, &1))
+        |> latch_best_candidate()
     end
+  end
+
+  defp latch_candidate_at(short_chars, subtokens, idx) do
+    case latch_try_at(short_chars, subtokens, idx) do
+      {:ok, starts_hit} -> [{idx, starts_hit}]
+      :error -> []
+    end
+  end
+
+  defp latch_best_candidate([]), do: :error
+
+  defp latch_best_candidate(candidates) do
+    {idx, starts_hit} =
+      candidates |> Enum.max_by(fn {idx, starts_hit} -> {starts_hit, idx} end)
+
+    {:ok, idx, starts_hit}
   end
 
   defp latch_try_at([first | rest], subtokens, idx) do
@@ -399,13 +401,11 @@ defmodule Number42.Refactors.IdentifierExpansion do
   defp latch_consume_starts([c | rest] = remaining, subtokens, next_idx, last_sub, starts) do
     next_sub = Enum.at(subtokens, next_idx)
 
-    cond do
-      next_sub != nil and String.first(next_sub) == c ->
-        latch_consume_starts(rest, subtokens, next_idx + 1, next_sub, starts + 1)
-
-      true ->
-        last_sub_rest = String.slice(last_sub, 1..-1//1)
-        if subsequence?(remaining, last_sub_rest), do: {:ok, starts}, else: :error
+    if next_sub != nil and String.first(next_sub) == c do
+      latch_consume_starts(rest, subtokens, next_idx + 1, next_sub, starts + 1)
+    else
+      last_sub_rest = String.slice(last_sub, 1..-1//1)
+      if subsequence?(remaining, last_sub_rest), do: {:ok, starts}, else: :error
     end
   end
 
@@ -549,20 +549,18 @@ defmodule Number42.Refactors.IdentifierExpansion do
     tail_len = short_len - starts_hit
     chars_in_last_sub = 1 + tail_len
 
-    cond do
-      chars_in_last_sub <= 2 ->
-        true
+    if chars_in_last_sub <= 2 do
+      true
+    else
+      # Take the first `chars_in_last_sub` chars from `short` starting
+      # at the last consumed initial's index. Those are the chars that
+      # ended up in the last subtoken.
+      last_sub_chars =
+        short
+        |> String.graphemes()
+        |> Enum.drop(starts_hit - 1)
 
-      true ->
-        # Take the first `chars_in_last_sub` chars from `short` starting
-        # at the last consumed initial's index. Those are the chars that
-        # ended up in the last subtoken.
-        last_sub_chars =
-          short
-          |> String.graphemes()
-          |> Enum.drop(starts_hit - 1)
-
-        Enum.all?(last_sub_chars, &consonant?/1)
+      Enum.all?(last_sub_chars, &consonant?/1)
     end
   end
 

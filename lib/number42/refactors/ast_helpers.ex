@@ -568,17 +568,15 @@ defmodule Number42.Refactors.AstHelpers do
 
     lines = String.split(source, "\n", trim: false)
 
-    cond do
-      l1 == l2 ->
-        line = lines |> Enum.at(l1 - 1, "")
-        String.slice(line, (c1 - 1)..(c2 - 2)//1)
+    if l1 == l2 do
+      line = lines |> Enum.at(l1 - 1, "")
+      String.slice(line, (c1 - 1)..(c2 - 2)//1)
+    else
+      first_line = lines |> Enum.at(l1 - 1, "") |> String.slice((c1 - 1)..-1//1)
+      middle_lines = lines |> Enum.slice(l1..(l2 - 2)//1)
+      last_line = lines |> Enum.at(l2 - 1, "") |> String.slice(0..(c2 - 2)//1)
 
-      true ->
-        first_line = lines |> Enum.at(l1 - 1, "") |> String.slice((c1 - 1)..-1//1)
-        middle_lines = lines |> Enum.slice(l1..(l2 - 2)//1)
-        last_line = lines |> Enum.at(l2 - 1, "") |> String.slice(0..(c2 - 2)//1)
-
-        ([first_line | middle_lines] ++ [last_line]) |> Enum.join("\n")
+      ([first_line | middle_lines] ++ [last_line]) |> Enum.join("\n")
     end
   end
 
@@ -696,10 +694,7 @@ defmodule Number42.Refactors.AstHelpers do
   def cryptic_subtoken?(part) do
     length = String.length(part)
 
-    cond do
-      length <= 3 -> true
-      true -> consonant_heavy?(part)
-    end
+    if length <= 3, do: true, else: consonant_heavy?(part)
   end
 
   defp end_of_expression_line_get(nil, meta), do: meta |> Keyword.get(:line, 1)
@@ -860,19 +855,18 @@ defmodule Number42.Refactors.AstHelpers do
     base = drop_bang_or_question(word)
 
     cond do
-      String.ends_with?(base, "y") and not String.ends_with?(base, "ay") and
-        not String.ends_with?(base, "ey") and not String.ends_with?(base, "iy") and
-        not String.ends_with?(base, "oy") and not String.ends_with?(base, "uy") ->
-        String.slice(base, 0..-2//1) <> "ies"
-
-      String.ends_with?(base, "s") or String.ends_with?(base, "x") or
-          String.ends_with?(base, "z") ->
-        base <> "es"
-
-      true ->
-        base <> "s"
+      consonant_y_ending?(base) -> String.slice(base, 0..-2//1) <> "ies"
+      sibilant_ending?(base) -> base <> "es"
+      true -> base <> "s"
     end
   end
+
+  defp consonant_y_ending?(base) do
+    String.ends_with?(base, "y") and
+      not String.ends_with?(base, ["ay", "ey", "iy", "oy", "uy"])
+  end
+
+  defp sibilant_ending?(base), do: String.ends_with?(base, ["s", "x", "z"])
 
   @doc """
   Appends `suffix` to `name`, dealing with a trailing `?` or `!`
@@ -1020,32 +1014,29 @@ defmodule Number42.Refactors.AstHelpers do
   """
   @spec collect_bound_vars(term()) :: MapSet.t(atom())
   def collect_bound_vars(ast) do
-    {_, vars} =
-      Macro.prewalk(ast, MapSet.new(), fn node, acc ->
-        case node do
-          # Match operator: LHS is a pattern, RHS is a value.
-          {:=, _, [lhs, _rhs]} ->
-            {node, collect_pattern_vars(lhs, acc)}
-
-          # Generator (`<-`) in `with` / `for`: LHS is a pattern.
-          {:<-, _, [lhs, _rhs]} ->
-            {node, collect_pattern_vars(lhs, acc)}
-
-          # Clause head (`->`): LHS list is a tuple of patterns
-          # (could be guarded via `when`).
-          {:->, _, [lhs_args, _body]} when is_list(lhs_args) ->
-            acc =
-              lhs_args |> Enum.reduce(acc, fn arg, a -> collect_pattern_vars(arg, a) end)
-
-            {node, acc}
-
-          _ ->
-            {node, acc}
-        end
-      end)
+    {_, vars} = Macro.prewalk(ast, MapSet.new(), &collect_bound_vars_step/2)
 
     vars
   end
+
+  # Match operator: LHS is a pattern, RHS is a value.
+  defp collect_bound_vars_step({:=, _, [lhs, _rhs]} = node, acc) do
+    {node, collect_pattern_vars(lhs, acc)}
+  end
+
+  # Generator (`<-`) in `with` / `for`: LHS is a pattern.
+  defp collect_bound_vars_step({:<-, _, [lhs, _rhs]} = node, acc) do
+    {node, collect_pattern_vars(lhs, acc)}
+  end
+
+  # Clause head (`->`): LHS list is a tuple of patterns
+  # (could be guarded via `when`).
+  defp collect_bound_vars_step({:->, _, [lhs_args, _body]} = node, acc)
+       when is_list(lhs_args) do
+    {node, Enum.reduce(lhs_args, acc, &collect_pattern_vars/2)}
+  end
+
+  defp collect_bound_vars_step(node, acc), do: {node, acc}
 
   @doc """
   Latch-match a short string against a snake_case compound's subtokens.
@@ -1089,26 +1080,24 @@ defmodule Number42.Refactors.AstHelpers do
         :error
 
       _ ->
-        candidates =
-          0..(length(subtokens) - 1)
-          |> Enum.flat_map(fn idx ->
-            case latch_try_at(short_chars, subtokens, idx) do
-              {:ok, starts_hit} -> [{idx, starts_hit}]
-              :error -> []
-            end
-          end)
-
-        case candidates do
-          [] ->
-            :error
-
-          _ ->
-            {idx, starts_hit} =
-              candidates |> Enum.max_by(fn {idx, starts_hit} -> {starts_hit, idx} end)
-
-            {:ok, idx, starts_hit}
-        end
+        0..(length(subtokens) - 1)
+        |> Enum.flat_map(&latch_candidate_at(short_chars, subtokens, &1))
+        |> latch_best_candidate()
     end
+  end
+
+  defp latch_candidate_at(short_chars, subtokens, idx) do
+    case latch_try_at(short_chars, subtokens, idx) do
+      {:ok, starts_hit} -> [{idx, starts_hit}]
+      :error -> []
+    end
+  end
+
+  defp latch_best_candidate([]), do: :error
+
+  defp latch_best_candidate(candidates) do
+    {idx, starts_hit} = Enum.max_by(candidates, fn {idx, starts_hit} -> {starts_hit, idx} end)
+    {:ok, idx, starts_hit}
   end
 
   @doc """
@@ -1433,13 +1422,11 @@ defmodule Number42.Refactors.AstHelpers do
   defp latch_consume_starts([c | rest] = remaining, subtokens, next_idx, last_sub, starts) do
     next_sub = subtokens |> Enum.at(next_idx)
 
-    cond do
-      next_sub != nil and String.first(next_sub) == c ->
-        latch_consume_starts(rest, subtokens, next_idx + 1, next_sub, starts + 1)
-
-      true ->
-        last_sub_rest = String.slice(last_sub, 1..-1//1)
-        if subsequence?(remaining, last_sub_rest), do: {:ok, starts}, else: :error
+    if next_sub != nil and String.first(next_sub) == c do
+      latch_consume_starts(rest, subtokens, next_idx + 1, next_sub, starts + 1)
+    else
+      last_sub_rest = String.slice(last_sub, 1..-1//1)
+      if subsequence?(remaining, last_sub_rest), do: {:ok, starts}, else: :error
     end
   end
 
@@ -1595,6 +1582,569 @@ defmodule Number42.Refactors.AstHelpers do
       other -> other
     end)
   end
+
+  # ── Call-graph (Layer 1, issue #34) ──────────────────────────────
+  #
+  # Local call-graph analysis shared by the cross-file refactor family
+  # (DelegateExactDuplicates, ExtractSharedModule, ExtractParametricClone).
+  # Three modules carried byte-identical private copies before this; the
+  # canonical implementation lives here and adds conservative `apply/3`
+  # handling.
+
+  @dynamic_dispatch {:__dynamic_dispatch__, 0}
+
+  @doc """
+  Collect the local function calls inside `ast` as `{name, arity}`
+  pairs.
+
+  "Local" means an unqualified call to a name that is not a special
+  form or operator — i.e. a candidate for a sibling `def`/`defp` in the
+  same module. Remote calls (`Foo.bar(...)`) are ignored. Both
+  `&name/arity` capture forms are recognised, and pipe right-hand sides
+  get their arity corrected (`x |> f(y)` records `{:f, 2}`).
+
+  ## `apply/3` handling (conservative)
+
+  A dynamic dispatch — `apply(__MODULE__, name, args)` or
+  `Kernel.apply(...)` where the function name is **not** a literal atom
+  — cannot be resolved to a single `{name, arity}`, so it could reach
+  *any* local function. Such a call contributes the sentinel
+  `#{inspect(@dynamic_dispatch)}` to the result. `reachable_defs/2`
+  treats that sentinel as "every local def is reachable"; callers doing
+  dead-code elimination must not delete a private function when the
+  sentinel is present in a reachable body.
+
+  An `apply/3` whose function name *is* a literal atom and whose module
+  is `__MODULE__` resolves statically to a concrete `{name, arity}`
+  (arity from a literal argument list, otherwise the sentinel).
+  """
+  @spec collect_calls(term()) :: [{atom(), non_neg_integer()}]
+  def collect_calls(ast) do
+    {_, pipe_rhs_set} =
+      Macro.prewalk(ast, MapSet.new(), fn
+        {:|>, _, [_lhs, rhs]} = node, acc -> {node, MapSet.put(acc, rhs)}
+        node, acc -> {node, acc}
+      end)
+
+    {_, calls} =
+      Macro.prewalk(ast, [], fn
+        # Dynamic / static `apply/3` dispatch — handled before the
+        # generic local-call clause so `apply` is never recorded as a
+        # plain `{:apply, 3}` local call.
+        {:apply, _, [mod, fn_name, args]} = node, acc ->
+          {node, prepend_apply_calls(mod, fn_name, args, acc)}
+
+        {{:., _, [{:__aliases__, _, [:Kernel]}, :apply]}, _, [mod, fn_name, args]} = node, acc ->
+          {node, prepend_apply_calls(mod, fn_name, args, acc)}
+
+        {:|>, _, [_lhs, rhs]} = node, acc ->
+          {node, prepend_pipe_call(rhs, acc)}
+
+        {:&, _, [{:/, _, [{name, _, ctx}, arity]}]} = node, acc
+        when is_atom(name) and is_atom(ctx) and is_integer(arity) ->
+          {node, [{name, arity} | acc]}
+
+        {:&, _, [{:/, _, [{name, _, ctx}, {:__block__, _, [arity]}]}]} = node, acc
+        when is_atom(name) and is_atom(ctx) and is_integer(arity) ->
+          {node, [{name, arity} | acc]}
+
+        {name, _, args} = node, acc when is_atom(name) and is_list(args) ->
+          cond do
+            MapSet.member?(pipe_rhs_set, node) -> {node, acc}
+            local_call_candidate?(name) -> {node, [{name, length(args)} | acc]}
+            true -> {node, acc}
+          end
+
+        node, acc ->
+          {node, acc}
+      end)
+
+    calls
+  end
+
+  @doc """
+  Collect every local call made across a list of `def`/`defp` clause
+  nodes, as a `MapSet` of `{name, arity}` pairs.
+
+  Bodyless clauses (default-argument stubs like `def foo(x \\\\ [])`)
+  have no body to walk and contribute nothing.
+  """
+  @spec collect_calls_in_clauses([term()]) :: MapSet.t({atom(), non_neg_integer()})
+  def collect_calls_in_clauses(clauses) do
+    clauses
+    |> Enum.flat_map(fn
+      {_kind, _, [_head, body_kw]} when is_list(body_kw) ->
+        body_kw |> Keyword.values() |> Enum.flat_map(&collect_calls/1)
+
+      _ ->
+        []
+    end)
+    |> MapSet.new()
+  end
+
+  @doc """
+  Group the `def`/`defp` nodes in `body_exprs` into per-function
+  definition maps.
+
+  Each map carries `:kind` (`:def`/`:defp`), `:name`, `:arity`, the
+  list of `:clauses` for that name/arity, and `:calls` — the set of
+  local calls those clauses make (via `collect_calls_in_clauses/1`).
+  Suitable as the node set for a call-graph: build the graph as
+  `{{name, arity} => calls}` and feed it to `transitive_closure/2`.
+  """
+  @spec collect_definitions([term()]) :: [
+          %{
+            kind: :def | :defp,
+            name: atom(),
+            arity: non_neg_integer(),
+            clauses: [term()],
+            calls: MapSet.t({atom(), non_neg_integer()})
+          }
+        ]
+  def collect_definitions(body_exprs) do
+    body_exprs
+    |> Enum.filter(fn
+      {kind, _, [_head | _]} when kind in [:def, :defp] -> true
+      _ -> false
+    end)
+    |> Enum.group_by(fn {kind, _, [head | _]} ->
+      case strip_when_head(head) do
+        {name, _, args} when is_atom(name) and is_list(args) -> {kind, name, length(args)}
+        {name, _, nil} when is_atom(name) -> {kind, name, 0}
+        _ -> :skip
+      end
+    end)
+    |> Enum.reject(fn {key, _} -> key == :skip end)
+    |> Enum.map(fn {{kind, name, arity}, clauses} ->
+      %{
+        arity: arity,
+        calls: collect_calls_in_clauses(clauses),
+        clauses: clauses,
+        kind: kind,
+        name: name
+      }
+    end)
+  end
+
+  @doc """
+  Compute the transitive closure of `roots` over a call-`graph`.
+
+  `graph` maps each `{name, arity}` to the `MapSet` of `{name, arity}`
+  it calls. Returns the `MapSet` of every node reachable from `roots`
+  (roots included). Pure set reachability — `apply/3` conservatism is
+  applied by `reachable_defs/2`, not here.
+  """
+  @spec transitive_closure(MapSet.t(), %{optional(term()) => MapSet.t()}) :: MapSet.t()
+  def transitive_closure(roots, graph),
+    do: do_closure(roots, graph, MapSet.to_list(roots))
+
+  @doc """
+  Return the set of definitions reachable from `roots`, applying
+  conservative `apply/3` handling.
+
+  `definitions` is a list of maps as produced by `collect_definitions/1`
+  (each must carry `:name`, `:arity`, `:calls`). `roots` is the set of
+  `{name, arity}` entry points known to be live (typically the public
+  `def`s). The result is the `MapSet` of `{name, arity}` reachable from
+  those roots.
+
+  If any reachable body performs a dynamic dispatch (the
+  `#{inspect(@dynamic_dispatch)}` sentinel appears in its calls), every
+  defined `{name, arity}` is considered reachable — a dynamic
+  `apply/3` could target any of them, so none may be treated as dead.
+  """
+  @spec reachable_defs([map()], MapSet.t()) :: MapSet.t()
+  def reachable_defs(definitions, roots) do
+    graph =
+      Map.new(definitions, fn %{name: name, arity: arity, calls: calls} ->
+        {{name, arity}, calls}
+      end)
+
+    reachable = transitive_closure(roots, graph)
+
+    if dynamic_dispatch_reachable?(definitions, reachable) do
+      definitions |> Enum.map(&{&1.name, &1.arity}) |> MapSet.new()
+    else
+      reachable
+    end
+  end
+
+  @doc """
+  Whether a set of collected calls contains a dynamic-dispatch sentinel
+  — i.e. an `apply/3` whose function name could not be resolved
+  statically. See `collect_calls/1`.
+  """
+  @spec dynamic_dispatch?(Enumerable.t()) :: boolean()
+  def dynamic_dispatch?(calls), do: Enum.member?(calls, @dynamic_dispatch)
+
+  defp dynamic_dispatch_reachable?(definitions, reachable) do
+    definitions
+    |> Enum.filter(&MapSet.member?(reachable, {&1.name, &1.arity}))
+    |> Enum.any?(&dynamic_dispatch?(&1.calls))
+  end
+
+  defp prepend_apply_calls(mod, fn_name, args, acc) do
+    case static_apply_target(mod, fn_name, args) do
+      {:ok, name, arity} -> [{name, arity} | acc]
+      :dynamic -> [@dynamic_dispatch | acc]
+      :remote -> acc
+    end
+  end
+
+  # `apply(__MODULE__, :literal, [a, b])` → a concrete local call.
+  defp static_apply_target({:__MODULE__, _, ctx}, fn_name, args) when is_atom(ctx) do
+    case {literal_atom(fn_name), literal_arity(args)} do
+      {{:ok, name}, {:ok, arity}} -> {:ok, name, arity}
+      {{:ok, _name}, :error} -> :dynamic
+      {:error, _} -> :dynamic
+    end
+  end
+
+  # Any other target with a non-literal function name is a conservative
+  # dynamic dispatch; with a literal name it is a remote call we ignore.
+  defp static_apply_target(_mod, fn_name, _args) do
+    case literal_atom(fn_name) do
+      {:ok, _name} -> :remote
+      :error -> :dynamic
+    end
+  end
+
+  defp literal_atom({:__block__, _, [atom]}) when is_atom(atom) and not is_nil(atom),
+    do: {:ok, atom}
+
+  defp literal_atom(atom) when is_atom(atom) and not is_nil(atom), do: {:ok, atom}
+  defp literal_atom(_), do: :error
+
+  defp literal_arity({:__block__, _, [list]}) when is_list(list), do: {:ok, length(list)}
+  defp literal_arity(list) when is_list(list), do: {:ok, length(list)}
+  defp literal_arity(_), do: :error
+
+  defp prepend_pipe_call(rhs, acc) do
+    case rhs do
+      {{:., _, [_remote, _name]}, _, _} ->
+        acc
+
+      {name, _, args} when is_atom(name) and is_list(args) ->
+        if local_call_candidate?(name), do: [{name, length(args) + 1} | acc], else: acc
+
+      {name, _, nil} when is_atom(name) ->
+        if local_call_candidate?(name), do: [{name, 1} | acc], else: acc
+
+      _ ->
+        acc
+    end
+  end
+
+  defp local_call_candidate?(name),
+    do:
+      not Macro.special_form?(name, 0) and
+        not Macro.special_form?(name, 1) and
+        not Macro.special_form?(name, 2) and
+        not Macro.operator?(name, 1) and
+        not Macro.operator?(name, 2)
+
+  defp do_closure(reached, _graph, []), do: reached
+
+  defp do_closure(reached, graph, [current | rest]) do
+    callees = Map.get(graph, current, MapSet.new())
+    new = Enum.reject(callees, &MapSet.member?(reached, &1))
+    next = Enum.reduce(new, reached, &MapSet.put(&2, &1))
+    do_closure(next, graph, rest ++ new)
+  end
+
+  defp strip_when_head({:when, _, [inner | _]}), do: inner
+  defp strip_when_head(other), do: other
+
+  # ── Purity / totality (Layer 2, issue #34) ───────────────────────
+  #
+  # "Pure" here is the strong form the refactor family needs before it
+  # may move, duplicate, or drop an expression: **total**
+  # (always returns), **exception-free** (never raises), and **eager**
+  # (no lazy source whose traversal is deferred). It is NOT merely
+  # "no visible side effects".
+  #
+  # The predicate is conservative: anything not provably pure is
+  # reported impure. A false "impure" only costs a missed optimisation;
+  # a false "pure" would let a refactor hoist code that raises, or fuse
+  # a lazy traversal, changing observable behaviour.
+
+  # Binary/unary operators that are total and exception-free for all
+  # terms. Division (`/`) and integer-division/remainder (`div`/`rem`)
+  # are deliberately absent — they raise on a zero divisor.
+  @pure_operators MapSet.new([
+                    :+,
+                    :-,
+                    :*,
+                    :==,
+                    :!=,
+                    :===,
+                    :!==,
+                    :<,
+                    :>,
+                    :<=,
+                    :>=,
+                    :and,
+                    :or,
+                    :not,
+                    :&&,
+                    :||,
+                    :!,
+                    :++,
+                    :--,
+                    :<>,
+                    :in,
+                    :|>,
+                    :=,
+                    :|
+                  ])
+
+  # Special forms / constructs that are themselves pure containers —
+  # purity then depends on their children (checked by the walk).
+  @pure_constructs MapSet.new([
+                     :{},
+                     :%{},
+                     :%,
+                     :__block__,
+                     :__aliases__,
+                     :->,
+                     :fn,
+                     :case,
+                     :cond,
+                     :if,
+                     :unless,
+                     :with,
+                     :for,
+                     :when,
+                     :<-,
+                     :&,
+                     :"::",
+                     :.
+                   ])
+
+  # Remote modules whose every public function we treat as pure for
+  # this analysis — total, exception-free, eager. `Stream` is pointedly
+  # excluded (lazy); `Map`/`List`/`Keyword`/`String`/`Integer` have
+  # raising members and are gated per-function via `@impure_remote`.
+  @pure_modules MapSet.new([Kernel, Enum, Tuple, Function, Access])
+
+  # Functions that raise, defer, or otherwise break totality/eagerness
+  # even though their module is otherwise pure-ish. `{Module, name}`.
+  @impure_remote MapSet.new([
+                   {Kernel, :raise},
+                   {Kernel, :throw},
+                   {Kernel, :exit},
+                   {Kernel, :send},
+                   {Kernel, :spawn},
+                   {Kernel, :apply},
+                   {Kernel, :hd},
+                   {Kernel, :tl},
+                   {Kernel, :elem},
+                   {Enum, :fetch!},
+                   {Enum, :at},
+                   {Enum, :random},
+                   {Enum, :shuffle}
+                 ])
+
+  # Local special forms / macros that introduce laziness or effects and
+  # cannot be treated as pure containers.
+  @impure_locals MapSet.new([:raise, :throw, :exit, :send, :spawn, :receive, :apply])
+
+  @doc """
+  Whether `ast` is **pure** in the strong sense the move/inline/drop
+  refactors require: total, exception-free, and eager (no lazy source).
+
+  This is intentionally stricter than "no visible side effects":
+
+    * `String.to_integer("x")` raises → impure.
+    * any `Stream.*` source is traversed lazily → impure.
+    * any bang function (`Map.fetch!/2`, `File.read!/1`) can raise → impure.
+    * division (`a / b`, `div`, `rem`) raises on a zero divisor → impure.
+
+  The check is **conservative**: an expression is pure only if every
+  node is provably pure. Unknown remote calls, captures of unknown
+  functions, and anything not on the pure allow-list are reported
+  impure. A literal, variable, or pure-operator tree over pure leaves
+  is pure.
+
+      iex> #{__MODULE__}.pure?(Sourceror.parse_string!("a + b * 2"))
+      true
+
+      iex> #{__MODULE__}.pure?(Sourceror.parse_string!("String.to_integer(s)"))
+      false
+  """
+  @spec pure?(term()) :: boolean()
+  def pure?(ast), do: pure_node?(ast)
+
+  # Literals and bare leaves.
+  defp pure_node?(lit) when is_atom(lit) or is_integer(lit) or is_float(lit) or is_binary(lit),
+    do: true
+
+  defp pure_node?(list) when is_list(list), do: Enum.all?(list, &pure_node?/1)
+
+  defp pure_node?({a, b}), do: pure_node?(a) and pure_node?(b)
+
+  # Sourceror-wrapped literal leaf.
+  defp pure_node?({:__block__, _, args}) when is_list(args), do: Enum.all?(args, &pure_node?/1)
+
+  # Bare variable: `{name, meta, ctx}` with atom context.
+  defp pure_node?({name, _, ctx}) when is_atom(name) and is_atom(ctx), do: true
+
+  # Remote call `Mod.fun(args)`.
+  defp pure_node?({{:., _, [mod_ast, fun]}, _, args}) when is_atom(fun) and is_list(args) do
+    case alias_to_module(mod_ast) do
+      {:ok, module} -> pure_remote_call?(module, fun, args)
+      :error -> false
+    end
+  end
+
+  # Anonymous-function / capture dot-call `f.(args)` — target is opaque.
+  defp pure_node?({{:., _, [_callee]}, _, _args}), do: false
+
+  # Operators and pure special-form constructs: pure iff every child is.
+  defp pure_node?({form, _, args}) when is_atom(form) and is_list(args) do
+    cond do
+      MapSet.member?(@impure_locals, form) -> false
+      MapSet.member?(@pure_operators, form) -> Enum.all?(args, &pure_node?/1)
+      MapSet.member?(@pure_constructs, form) -> Enum.all?(args, &pure_node?/1)
+      # Any other operator (e.g. `/`, `div` as `:div` op shape) may raise.
+      Macro.operator?(form, length(args)) -> false
+      # A local call to a non-special-form name: opaque body, treat as impure.
+      local_call_candidate?(form) -> false
+      # Remaining special-form shells (`:do`/`:else` keywords, etc.) —
+      # purity is decided by their children.
+      true -> Enum.all?(args, &pure_node?/1)
+    end
+  end
+
+  # Two-tuple / three-tuple structural nodes not matched above.
+  defp pure_node?({form, _, ctx}) when is_atom(form) and is_atom(ctx), do: true
+  defp pure_node?(_), do: false
+
+  defp pure_remote_call?(module, fun, args) do
+    cond do
+      MapSet.member?(@impure_remote, {module, fun}) -> false
+      bang_function?(fun) -> false
+      module == Stream -> false
+      lazy_or_raising_arith?(module, fun) -> false
+      MapSet.member?(@pure_modules, module) -> Enum.all?(args, &pure_node?/1)
+      pure_safe_subset?(module, fun) -> Enum.all?(args, &pure_node?/1)
+      true -> false
+    end
+  end
+
+  # `div`/`rem` (and `Integer.mod`/`floor_div`) raise on a zero divisor.
+  defp lazy_or_raising_arith?(Kernel, fun) when fun in [:div, :rem], do: true
+  defp lazy_or_raising_arith?(Integer, fun) when fun in [:mod, :floor_div], do: true
+  defp lazy_or_raising_arith?(_, _), do: false
+
+  # Per-function allow-list for modules with mixed purity. Only the
+  # total, exception-free, eager members are listed.
+  @pure_safe MapSet.new([
+               {Map, :get},
+               {Map, :put},
+               {Map, :merge},
+               {Map, :keys},
+               {Map, :values},
+               {Map, :delete},
+               {Map, :has_key?},
+               {List, :first},
+               {List, :last},
+               {List, :flatten},
+               {List, :wrap},
+               {Keyword, :get},
+               {Keyword, :put},
+               {Keyword, :keys},
+               {Keyword, :values},
+               {Keyword, :has_key?},
+               {String, :length},
+               {String, :downcase},
+               {String, :upcase},
+               {String, :trim},
+               {String, :split},
+               {String, :replace},
+               {String, :contains?},
+               {String, :starts_with?},
+               {String, :ends_with?},
+               {Integer, :to_string},
+               {Atom, :to_string}
+             ])
+
+  defp pure_safe_subset?(module, fun), do: MapSet.member?(@pure_safe, {module, fun})
+
+  defp bang_function?(fun) when is_atom(fun), do: String.ends_with?(Atom.to_string(fun), "!")
+
+  # ── Position-sensitive liveness (Layer 3, issue #34) ─────────────
+  #
+  # `free_vars/2` and `collect_bound_vars/1` are set-based and
+  # position-less: they answer "which outer names does this block
+  # reference", not "is `x` still read *after* point P". The refactor
+  # family's move/extract/branch-narrowing passes need ordered-sequence
+  # liveness over `body_to_exprs/1`:
+  #
+  #   * is the value bound at statement P read by any *later* statement?
+  #   * which branches of a `case`/`cond` actually read `x`?
+  #
+  # A variable is "read" at an expression when it appears free there —
+  # used but not bound within that same expression (so a shadowing
+  # re-bind inside the expression doesn't count as a read of the outer
+  # value).
+
+  @doc """
+  Whether `var` is read by any expression located *after* `index` in
+  the ordered statement list `exprs` (as produced by `body_to_exprs/1`).
+
+  "Read" means `var` appears **free** in a later statement — used but
+  not bound within that statement. The statement at `index` itself is
+  not considered (the question is whether its result is still needed
+  downstream). Indices out of range simply yield `false`.
+
+  Use this to decide whether the value produced at a statement is live:
+  a `false` result means the binding is dead from `index` onward and
+  may be dropped or moved.
+  """
+  @spec read_after?(atom(), [term()], integer()) :: boolean()
+  def read_after?(var, exprs, index) when is_atom(var) and is_list(exprs) do
+    exprs
+    |> Enum.drop(index + 1)
+    |> Enum.any?(&MapSet.member?(free_in_expr(&1), var))
+  end
+
+  @doc """
+  Return the zero-based indices of the `branches` in which `var` is
+  read (appears free).
+
+  `branches` is a list of branch bodies — e.g. the right-hand sides of
+  `case`/`cond` clauses, or the `do`/`else` arms of an `if`. The result
+  is the sorted list of branch indices that read `var`; its length is
+  how many branches depend on `var`.
+
+  A caller wanting "live in exactly one branch" checks
+  `match?([_single], branches_reading(var, branches))`.
+  """
+  @spec branches_reading(atom(), [term()]) :: [non_neg_integer()]
+  def branches_reading(var, branches) when is_atom(var) and is_list(branches) do
+    branches
+    |> Enum.with_index()
+    |> Enum.filter(fn {branch, _i} -> MapSet.member?(free_in_expr(branch), var) end)
+    |> Enum.map(fn {_branch, i} -> i end)
+  end
+
+  @doc """
+  Whether `var` is read in **exactly one** of `branches`.
+
+  Convenience over `branches_reading/2` for the common
+  branch-narrowing predicate: a value used in a single arm can be sunk
+  into that arm.
+  """
+  @spec live_in_single_branch?(atom(), [term()]) :: boolean()
+  def live_in_single_branch?(var, branches),
+    do: match?([_one], branches_reading(var, branches))
+
+  # Free variables of a single expression: used minus bound-within.
+  # Reuses the existing set-based primitives; the ordering lives in the
+  # callers above, not here.
+  defp free_in_expr(expr),
+    do: MapSet.difference(used_var_names(expr), collect_bound_vars(expr))
 
   defp subsequence?([], _haystack), do: true
   defp subsequence?(_chars, ""), do: false

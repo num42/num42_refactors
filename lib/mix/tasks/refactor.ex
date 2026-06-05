@@ -189,6 +189,10 @@ defmodule Mix.Tasks.Refactor do
         process_files(files, engine_opts, run_opts)
       end
 
+    finalize_run(changed_files, reformat_triggered?, run_opts)
+  end
+
+  defp finalize_run(changed_files, reformat_triggered?, run_opts) do
     cond do
       run_opts.check? ->
         report_check(changed_files)
@@ -202,19 +206,23 @@ defmodule Mix.Tasks.Refactor do
         Mix.shell().info("[refactor] dry-run: #{length(changed_files)} file(s) would change")
 
       run_opts.auto? ->
-        # Per-unit commits already happened inline; just run the
-        # final reformat sweep so the tree ends in a formatted state.
-        # Any format-only changes are amended into the last commit
-        # so the history stays atomic.
-        if reformat_triggered? and changed_files != [] do
-          maybe_reformat(changed_files, true)
-          amend_format_into_last_commit(changed_files)
-        end
+        finalize_auto(changed_files, reformat_triggered?)
 
       true ->
         maybe_reformat(changed_files, reformat_triggered?)
         if run_opts.test?, do: maybe_run_tests(changed_files)
         if run_opts.compile?, do: maybe_compile()
+    end
+  end
+
+  # Per-unit commits already happened inline; just run the final
+  # reformat sweep so the tree ends in a formatted state. Any
+  # format-only changes are amended into the last commit so the
+  # history stays atomic.
+  defp finalize_auto(changed_files, reformat_triggered?) do
+    if reformat_triggered? and changed_files != [] do
+      maybe_reformat(changed_files, true)
+      amend_format_into_last_commit(changed_files)
     end
   end
 
@@ -596,23 +604,26 @@ defmodule Mix.Tasks.Refactor do
       case process_file(file, engine_opts, run_opts) do
         {:changed, reformat?, applied} ->
           new_acc = {[file | changed_acc], reformat_acc or reformat?}
-
-          cond do
-            run_opts.auto? ->
-              auto_commit_file(file, applied, reformat?, run_opts)
-              if run_opts.stop?, do: {:halt, new_acc}, else: {:cont, new_acc}
-
-            halt? ->
-              {:halt, new_acc}
-
-            true ->
-              {:cont, new_acc}
-          end
+          decide_file_step(file, applied, reformat?, new_acc, halt?, run_opts)
 
         :unchanged ->
           {:cont, acc}
       end
     end)
+  end
+
+  defp decide_file_step(file, applied, reformat?, new_acc, halt?, run_opts) do
+    cond do
+      run_opts.auto? ->
+        auto_commit_file(file, applied, reformat?, run_opts)
+        if run_opts.stop?, do: {:halt, new_acc}, else: {:cont, new_acc}
+
+      halt? ->
+        {:halt, new_acc}
+
+      true ->
+        {:cont, new_acc}
+    end
   end
 
   defp process_step_by_step(files, engine_opts, run_opts) do
@@ -634,22 +645,26 @@ defmodule Mix.Tasks.Refactor do
       new_changed = merge_unique(changed_acc, hits |> Enum.map(fn {path, _, _} -> path end))
       new_acc = {new_changed, reformat_acc or reformat?}
 
-      cond do
-        hits == [] ->
-          {:cont, new_acc}
-
-        run_opts.auto? ->
-          hit_paths = hits |> Enum.map(fn {p, _, _} -> p end)
-          auto_commit_refactor(module, hit_paths, reformat?, run_opts)
-          if run_opts.stop?, do: {:halt, new_acc}, else: {:cont, new_acc}
-
-        halt_on_hit? ->
-          {:halt, new_acc}
-
-        true ->
-          {:cont, new_acc}
-      end
+      decide_module_step(module, hits, reformat?, new_acc, halt_on_hit?, run_opts)
     end)
+  end
+
+  defp decide_module_step(module, hits, reformat?, new_acc, halt_on_hit?, run_opts) do
+    cond do
+      hits == [] ->
+        {:cont, new_acc}
+
+      run_opts.auto? ->
+        hit_paths = hits |> Enum.map(fn {p, _, _} -> p end)
+        auto_commit_refactor(module, hit_paths, reformat?, run_opts)
+        if run_opts.stop?, do: {:halt, new_acc}, else: {:cont, new_acc}
+
+      halt_on_hit? ->
+        {:halt, new_acc}
+
+      true ->
+        {:cont, new_acc}
+    end
   end
 
   defp reformat_files(paths) do
@@ -725,14 +740,10 @@ defmodule Mix.Tasks.Refactor do
 
   defp test_file_for(path) do
     candidate =
-      cond do
-        String.starts_with?(path, "lib/") ->
-          path
-          |> String.replace_prefix("lib/", "test/")
-          |> swap_ex_for_test_exs()
-
-        true ->
-          nil
+      if String.starts_with?(path, "lib/") do
+        path
+        |> String.replace_prefix("lib/", "test/")
+        |> swap_ex_for_test_exs()
       end
 
     if is_binary(candidate) and File.exists?(candidate), do: candidate, else: nil
@@ -742,38 +753,37 @@ defmodule Mix.Tasks.Refactor do
     do: System.tmp_dir!() |> Path.join("refactor-log-#{System.unique_integer([:positive])}")
 
   defp validate_or_halt!(paths, run_opts) do
-    if run_opts.test? do
-      test_files = paths |> Enum.map(&test_file_for/1) |> Enum.reject(&is_nil/1) |> Enum.uniq()
-
-      if test_files != [] do
-        case run_test_files(test_files) do
-          :ok ->
-            :ok
-
-          {:error, code} ->
-            Mix.raise(
-              "--auto: tests failed (exit #{code}) after rewriting #{paths |> Enum.join(", ")}. " <>
-                "Changes left on disk for inspection."
-            )
-        end
-      end
-    end
-
-    if run_opts.compile? do
-      case run_compile() do
-        :ok ->
-          :ok
-
-        {:error, code} ->
-          Mix.raise(
-            "--auto: compile failed (exit #{code}) after rewriting #{paths |> Enum.join(", ")}. " <>
-              "Changes left on disk for inspection."
-          )
-      end
-    end
+    if run_opts.test?, do: validate_tests_or_halt!(paths)
+    if run_opts.compile?, do: validate_compile_or_halt!(paths)
 
     :ok
   end
+
+  defp validate_tests_or_halt!(paths) do
+    test_files = paths |> Enum.map(&test_file_for/1) |> Enum.reject(&is_nil/1) |> Enum.uniq()
+
+    if test_files != [], do: raise_on_test_failure!(run_test_files(test_files), paths)
+  end
+
+  defp raise_on_test_failure!(:ok, _paths), do: :ok
+
+  defp raise_on_test_failure!({:error, code}, paths),
+    do:
+      Mix.raise(
+        "--auto: tests failed (exit #{code}) after rewriting #{paths |> Enum.join(", ")}. " <>
+          "Changes left on disk for inspection."
+      )
+
+  defp validate_compile_or_halt!(paths), do: raise_on_compile_failure!(run_compile(), paths)
+
+  defp raise_on_compile_failure!(:ok, _paths), do: :ok
+
+  defp raise_on_compile_failure!({:error, code}, paths),
+    do:
+      Mix.raise(
+        "--auto: compile failed (exit #{code}) after rewriting #{paths |> Enum.join(", ")}. " <>
+          "Changes left on disk for inspection."
+      )
 
   defp validate_run_opts!(%{auto?: true, check?: true}),
     do: "--auto cannot be combined with --check / --ci (nothing to commit)" |> Mix.raise()

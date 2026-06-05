@@ -482,25 +482,23 @@ defmodule Number42.Refactors.Ex.SortFunctions do
 
     lines = String.split(source, "\n")
 
-    cond do
-      l1 == l2 ->
-        line = lines |> Enum.at(l1 - 1)
-        String.slice(line, (c1 - 1)..(c2 - 2)//1)
+    if l1 == l2 do
+      line = lines |> Enum.at(l1 - 1)
+      String.slice(line, (c1 - 1)..(c2 - 2)//1)
+    else
+      first_line =
+        lines
+        |> Enum.at(l1 - 1)
+        |> String.slice((c1 - 1)..-1//1)
 
-      true ->
-        first_line =
-          lines
-          |> Enum.at(l1 - 1)
-          |> String.slice((c1 - 1)..-1//1)
+      middle_lines = lines |> Enum.slice(l1..(l2 - 2)//1)
 
-        middle_lines = lines |> Enum.slice(l1..(l2 - 2)//1)
+      last_line =
+        lines
+        |> Enum.at(l2 - 1)
+        |> String.slice(0..(c2 - 2)//1)
 
-        last_line =
-          lines
-          |> Enum.at(l2 - 1)
-          |> String.slice(0..(c2 - 2)//1)
-
-        ([first_line | middle_lines] ++ [last_line]) |> Enum.join("\n")
+      ([first_line | middle_lines] ++ [last_line]) |> Enum.join("\n")
     end
   end
 

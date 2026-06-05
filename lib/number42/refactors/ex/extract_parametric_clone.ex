@@ -250,34 +250,37 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
     |> Macro.prewalker()
     |> Enum.flat_map(fn
       {:defmodule, _, [name_ast, [{_do, body}]]} = mod_node ->
-        case alias_to_module(name_ast) do
-          {:ok, mod} ->
-            cond do
-              shared_module?(mod) ->
-                # `*.Shared` is the host file we write to, never a loser.
-                # If a stale plan still lists it, ignore — patching would
-                # inject a self-import and rewrite the helper into a
-                # delegate to itself.
-                []
-
-              true ->
-                case Map.get(plan, mod) do
-                  nil ->
-                    []
-
-                  {helpers, rewrites, imports} ->
-                    patches_for_module(mod_node, body, helpers, rewrites, imports)
-                end
-            end
-
-          :error ->
-            []
-        end
+        patches_for_module_node(mod_node, name_ast, body, plan)
 
       _ ->
         []
     end)
     |> patch_or_passthrough(source)
+  end
+
+  defp patches_for_module_node(mod_node, name_ast, body, plan) do
+    case alias_to_module(name_ast) do
+      {:ok, mod} -> patches_for_resolved_module(mod_node, mod, body, plan)
+      :error -> []
+    end
+  end
+
+  # `*.Shared` is the host file we write to, never a loser.
+  # If a stale plan still lists it, ignore — patching would
+  # inject a self-import and rewrite the helper into a
+  # delegate to itself.
+  defp patches_for_resolved_module(mod_node, mod, body, plan) do
+    if shared_module?(mod) do
+      []
+    else
+      case Map.get(plan, mod) do
+        nil ->
+          []
+
+        {helpers, rewrites, imports} ->
+          patches_for_module(mod_node, body, helpers, rewrites, imports)
+      end
+    end
   end
 
   defp apply_plan_to_parse_result({:ok, ast}, plan, source),
@@ -450,15 +453,15 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
     first.attrs
     |> Enum.all?(fn {name, value} ->
       stripped = strip_meta(value)
-
-      rest
-      |> Enum.all?(fn e ->
-        case Map.fetch(e.attrs, name) do
-          {:ok, other} -> strip_meta(other) == stripped
-          :error -> false
-        end
-      end)
+      rest |> Enum.all?(&entry_attr_matches?(&1, name, stripped))
     end)
+  end
+
+  defp entry_attr_matches?(entry, name, stripped) do
+    case Map.fetch(entry.attrs, name) do
+      {:ok, other} -> strip_meta(other) == stripped
+      :error -> false
+    end
   end
 
   defp bare_var_name(node), do: bare_var(node) |> var_name_or_error()
@@ -519,100 +522,108 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
          module_attrs,
          body_exprs
        ) do
-    cond do
-      head_has_guard?(head) ->
-        # `when`-guards would have to be replicated by the helper.
-        # Out of scope for v1.
-        []
-
-      true ->
-        case extract_fn_signature(head) do
-          {name, args} when is_list(args) ->
-            arg_bindings = args |> Enum.map(&extract_arg_binding/1)
-
-            cond do
-              arg_bindings |> Enum.any?(&(&1 == :error)) ->
-                []
-
-              clause_mass(clause) < min_mass ->
-                []
-
-              contains_binding_macro_call?(body_kw) ->
-                # Macros that bind a variable inside a compile-time
-                # keyword list (Ecto `from(bind in Schema, where: …)`,
-                # similar query DSLs) cannot be parametrised: their
-                # bind name and keyword keys must be atoms at compile
-                # time. Skip the clause rather than emit broken code.
-                []
-
-              contains_unsafe_lexical_macro?(body_kw) ->
-                # `__ENV__`/`__CALLER__`/`__DIR__`/`__STACKTRACE__` have
-                # no runtime value to pass as a parameter. Lifting them
-                # into a `*.Shared` module silently rebinds them, so
-                # skip the clause. `__MODULE__` is NOT in this set — it
-                # is parametrised in the cross-file emitter (intra-module
-                # extraction leaves it alone, where it stays correct).
-                []
-
-              true ->
-                arg_names = arg_bindings |> Enum.map(fn {:ok, n} -> n end)
-                body_ast = body_kw |> Keyword.values() |> List.first()
-
-                # Reachable defp helpers: those that this clone can
-                # call AND that no other public def in the module
-                # also calls (otherwise migrating them orphans the
-                # other caller). When a clone references a defp that
-                # is *also* used by a non-clone def, the clone group
-                # gets rejected at emit-time — we record the conflict
-                # via `reject_helpers?`.
-                {migratable_helpers, helpers_conflict?} =
-                  reachable_helper_clauses(body_exprs, name, length(args))
-
-                # A migrated `defp` carries its body into the Shared
-                # module too. An unsafe lexical macro there is as bad as
-                # in the clone body; `__MODULE__` in a migrated helper is
-                # also rejected because this change parametrises only the
-                # clone body, not migrated helpers.
-                reject_helpers? =
-                  helpers_conflict? or
-                    Enum.any?(migratable_helpers, &clause_uses_unsafe_lexical_macro?/1) or
-                    Enum.any?(migratable_helpers, &clause_uses_module_macro?/1)
-
-                # Module attrs referenced from body or migratable
-                # helpers. A non-literal value or a missing attr
-                # (e.g. attr declared with `Module.put_attribute`,
-                # not `@`) makes migration unsafe.
-                attrs_used = collect_attrs_used([body_ast], migratable_helpers)
-
-                {attrs_to_migrate, reject_attrs?} =
-                  resolve_attrs_for_migration(attrs_used, module_attrs)
-
-                [
-                  %{
-                    aliases: aliases,
-                    arg_names: arg_names,
-                    arity: length(args),
-                    attrs: attrs_to_migrate,
-                    attrs_rejected?: reject_attrs?,
-                    body_ast: body_ast,
-                    bucket_index: nil,
-                    clause: clause,
-                    helpers: migratable_helpers,
-                    helpers_rejected?: reject_helpers?,
-                    imports: imports,
-                    kind: kind,
-                    module: module,
-                    name: name,
-                    path: path,
-                    skeleton_hash: skeleton_hash(body_ast)
-                  }
-                ]
-            end
-
-          _ ->
-            []
-        end
+    if head_has_guard?(head) do
+      # `when`-guards would have to be replicated by the helper.
+      # Out of scope for v1.
+      []
+    else
+      build_clause_entry_for_signature(
+        extract_fn_signature(head),
+        clause,
+        body_kw,
+        min_mass,
+        %{
+          aliases: aliases,
+          body_exprs: body_exprs,
+          imports: imports,
+          kind: kind,
+          module: module,
+          module_attrs: module_attrs,
+          path: path
+        }
+      )
     end
+  end
+
+  defp build_clause_entry_for_signature({name, args}, clause, body_kw, min_mass, ctx)
+       when is_list(args) do
+    arg_bindings = args |> Enum.map(&extract_arg_binding/1)
+
+    if clause_unparametrisable?(arg_bindings, clause, body_kw, min_mass) do
+      []
+    else
+      [build_parametric_entry(name, args, arg_bindings, clause, body_kw, ctx)]
+    end
+  end
+
+  defp build_clause_entry_for_signature(_signature, _clause, _body_kw, _min_mass, _ctx), do: []
+
+  # A clause is skipped when any of these hold:
+  #   * an argument isn't a plain/var-bindable pattern (default arg, bare literal)
+  #   * the clause is below the minimum-mass threshold
+  #   * its body uses a binding macro (`from(bind in …)`) — bind/keys must be
+  #     compile-time atoms, so it can't be parametrised
+  #   * its body uses an unsafe lexical macro (`__ENV__`/`__CALLER__`/…) — no
+  #     runtime value to thread through as a parameter. `__MODULE__` is NOT in
+  #     this set; the cross-file emitter parametrises it.
+  defp clause_unparametrisable?(arg_bindings, clause, body_kw, min_mass) do
+    Enum.any?(arg_bindings, &(&1 == :error)) or
+      clause_mass(clause) < min_mass or
+      contains_binding_macro_call?(body_kw) or
+      contains_unsafe_lexical_macro?(body_kw)
+  end
+
+  defp build_parametric_entry(name, args, arg_bindings, clause, body_kw, ctx) do
+    arg_names = arg_bindings |> Enum.map(fn {:ok, n} -> n end)
+    body_ast = body_kw |> Keyword.values() |> List.first()
+
+    # Reachable defp helpers: those that this clone can
+    # call AND that no other public def in the module
+    # also calls (otherwise migrating them orphans the
+    # other caller). When a clone references a defp that
+    # is *also* used by a non-clone def, the clone group
+    # gets rejected at emit-time — we record the conflict
+    # via `reject_helpers?`.
+    {migratable_helpers, helpers_conflict?} =
+      reachable_helper_clauses(ctx.body_exprs, name, length(args))
+
+    # A migrated `defp` carries its body into the Shared
+    # module too. An unsafe lexical macro there is as bad as
+    # in the clone body; `__MODULE__` in a migrated helper is
+    # also rejected because this change parametrises only the
+    # clone body, not migrated helpers.
+    reject_helpers? =
+      helpers_conflict? or
+        Enum.any?(migratable_helpers, &clause_uses_unsafe_lexical_macro?/1) or
+        Enum.any?(migratable_helpers, &clause_uses_module_macro?/1)
+
+    # Module attrs referenced from body or migratable
+    # helpers. A non-literal value or a missing attr
+    # (e.g. attr declared with `Module.put_attribute`,
+    # not `@`) makes migration unsafe.
+    attrs_used = collect_attrs_used([body_ast], migratable_helpers)
+
+    {attrs_to_migrate, reject_attrs?} =
+      resolve_attrs_for_migration(attrs_used, ctx.module_attrs)
+
+    %{
+      aliases: ctx.aliases,
+      arg_names: arg_names,
+      arity: length(args),
+      attrs: attrs_to_migrate,
+      attrs_rejected?: reject_attrs?,
+      body_ast: body_ast,
+      bucket_index: nil,
+      clause: clause,
+      helpers: migratable_helpers,
+      helpers_rejected?: reject_helpers?,
+      imports: ctx.imports,
+      kind: ctx.kind,
+      module: ctx.module,
+      name: name,
+      path: ctx.path,
+      skeleton_hash: skeleton_hash(body_ast)
+    }
   end
 
   defp build_import_patches(body_exprs, imports) do
@@ -626,27 +637,26 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
           []
 
         true ->
-          only_str =
-            only_pairs |> Enum.map_join(", ", fn {n, a} -> "#{n}: #{a}" end)
-
-          replacement = "import #{inspect(target)}, only: [#{only_str}]"
-          insertion_anchor = first_body_expr(body_exprs)
-
-          case insertion_anchor do
-            nil ->
-              []
-
-            anchor ->
-              case Sourceror.get_range(anchor) do
-                %{start: pos} ->
-                  [%{change: replacement <> "\n\n  ", range: %{end: pos, start: pos}}]
-
-                _ ->
-                  []
-              end
-          end
+          import_patch_for_target(body_exprs, target, only_pairs)
       end
     end)
+  end
+
+  defp import_patch_for_target(body_exprs, target, only_pairs) do
+    only_str = only_pairs |> Enum.map_join(", ", fn {n, a} -> "#{n}: #{a}" end)
+    replacement = "import #{inspect(target)}, only: [#{only_str}]"
+
+    case insertion_anchor_range(body_exprs) do
+      %{start: pos} -> [%{change: replacement <> "\n\n  ", range: %{end: pos, start: pos}}]
+      _ -> []
+    end
+  end
+
+  defp insertion_anchor_range(body_exprs) do
+    case first_body_expr(body_exprs) do
+      nil -> :no_anchor
+      anchor -> Sourceror.get_range(anchor)
+    end
   end
 
   defp canonical_import_key(import_node),
@@ -735,18 +745,17 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
          target_module
        ),
        do:
-         entries
-         |> do_emit_cross_file_plan_with_classification(
-           target_module,
-           skeleton,
-           outer_holes,
-           local_groups,
-           all_bound,
-           first,
-           helper_name,
-           new_used,
-           state
-         )
+         do_emit_cross_file_plan_with_classification(entries, %{
+           target_module: target_module,
+           skeleton: skeleton,
+           outer_holes: outer_holes,
+           local_groups: local_groups,
+           all_bound: all_bound,
+           first: first,
+           helper_name: helper_name,
+           new_used: new_used,
+           state: state
+         })
 
   defp clause_in_multi_clause_set?(clause, set),
     do: set |> MapSet.member?(clause_signature(clause))
@@ -815,43 +824,6 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
     (body_attrs ++ helper_attrs) |> MapSet.new()
   end
 
-  defp collect_calls_in_clauses(clauses) do
-    clauses
-    |> Enum.flat_map(fn
-      {_, _, [_h, body_kw]} when is_list(body_kw) ->
-        body_kw |> Keyword.values() |> Enum.flat_map(&collect_local_calls/1)
-
-      _ ->
-        []
-    end)
-    |> MapSet.new()
-  end
-
-  defp collect_definitions(body_exprs) do
-    body_exprs
-    |> Enum.filter(fn
-      {kind, _, [_h, body_kw]} when kind in [:def, :defp] and is_list(body_kw) -> true
-      _ -> false
-    end)
-    |> Enum.group_by(fn {kind, _, [head | _]} ->
-      case strip_when(head) do
-        {name, _, args} when is_atom(name) and is_list(args) -> {kind, name, length(args)}
-        {name, _, nil} when is_atom(name) -> {kind, name, 0}
-        _ -> :skip
-      end
-    end)
-    |> Enum.reject(fn {key, _} -> key == :skip end)
-    |> Enum.map(fn {{kind, name, arity}, clauses} ->
-      %{
-        arity: arity,
-        calls: collect_calls_in_clauses(clauses),
-        clauses: clauses,
-        kind: kind,
-        name: name
-      }
-    end)
-  end
-
   defp collect_imports(body_exprs) do
     body_exprs
     |> Enum.flat_map(fn
@@ -859,56 +831,6 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
       _ -> []
     end)
     |> Enum.sort_by(fn {k, _} -> k end)
-  end
-
-  defp collect_local_calls(ast) do
-    {_, pipe_rhs_set} =
-      Macro.prewalk(ast, MapSet.new(), fn
-        {:|>, _, [_lhs, rhs]} = node, acc -> {node, MapSet.put(acc, rhs)}
-        node, acc -> {node, acc}
-      end)
-
-    {_, calls} =
-      Macro.prewalk(ast, [], fn
-        {:|>, _, [_lhs, rhs]} = node, acc ->
-          case rhs do
-            {{:., _, [_, _]}, _, _} ->
-              {node, acc}
-
-            {name, _, args} when is_atom(name) and is_list(args) ->
-              if local_call_candidate?(name) do
-                {node, [{name, length(args) + 1} | acc]}
-              else
-                {node, acc}
-              end
-
-            {name, _, nil} when is_atom(name) ->
-              if local_call_candidate?(name), do: {node, [{name, 1} | acc]}, else: {node, acc}
-
-            _ ->
-              {node, acc}
-          end
-
-        {:&, _, [{:/, _, [{name, _, ctx}, arity]}]} = node, acc
-        when is_atom(name) and is_atom(ctx) and is_integer(arity) ->
-          {node, [{name, arity} | acc]}
-
-        {:&, _, [{:/, _, [{name, _, ctx}, {:__block__, _, [arity]}]}]} = node, acc
-        when is_atom(name) and is_atom(ctx) and is_integer(arity) ->
-          {node, [{name, arity} | acc]}
-
-        {name, _, args} = node, acc when is_atom(name) and is_list(args) ->
-          cond do
-            MapSet.member?(pipe_rhs_set, node) -> {node, acc}
-            local_call_candidate?(name) -> {node, [{name, length(args)} | acc]}
-            true -> {node, acc}
-          end
-
-        node, acc ->
-          {node, acc}
-      end)
-
-    calls
   end
 
   defp collect_map_key_paths(skeleton) do
@@ -981,32 +903,26 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
 
   defp dedupe_outer_holes(holes) do
     holes
-    |> Enum.reduce([], fn hole, acc ->
-      key = strip_meta_for_dedup(hole.values)
-
-      case acc |> Enum.find_index(&(&1.dedup_key == key)) do
-        nil ->
-          [%{dedup_key: key, paths: [hole.path], values: hole.values} | acc]
-
-        idx ->
-          List.update_at(acc, idx, fn g -> %{g | paths: g.paths ++ [hole.path]} end)
-      end
-    end)
+    |> Enum.reduce([], &dedupe_outer_hole/2)
     |> Enum.reverse()
+  end
+
+  defp dedupe_outer_hole(hole, acc) do
+    key = strip_meta_for_dedup(hole.values)
+
+    case acc |> Enum.find_index(&(&1.dedup_key == key)) do
+      nil ->
+        [%{dedup_key: key, paths: [hole.path], values: hole.values} | acc]
+
+      idx ->
+        List.update_at(acc, idx, &%{&1 | paths: &1.paths ++ [hole.path]})
+    end
   end
 
   defp def_clause?({kind, _, [_head, body_kw]}) when kind in [:def, :defp] and is_list(body_kw),
     do: true
 
   defp def_clause?(_), do: false
-  defp do_closure(reached, _graph, []), do: reached
-
-  defp do_closure(reached, graph, [current | rest]) do
-    callees = Map.get(graph, current, MapSet.new())
-    new = callees |> Enum.reject(&MapSet.member?(reached, &1))
-    next = new |> Enum.reduce(reached, &MapSet.put(&2, &1))
-    do_closure(next, graph, rest ++ new)
-  end
 
   defp do_emit_cross_file_plan(entries, target_module, skeleton, holes, state) do
     [first | _] = entries
@@ -1033,18 +949,19 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
     )
   end
 
-  defp do_emit_cross_file_plan_with_classification(
-         entries,
-         target_module,
-         skeleton,
-         outer_holes,
-         local_groups,
-         all_bound,
-         first,
-         helper_name,
-         new_used,
-         state
-       ) do
+  defp do_emit_cross_file_plan_with_classification(entries, ctx) do
+    %{
+      target_module: target_module,
+      skeleton: skeleton,
+      outer_holes: outer_holes,
+      local_groups: local_groups,
+      all_bound: all_bound,
+      first: first,
+      helper_name: helper_name,
+      new_used: new_used,
+      state: state
+    } = ctx
+
     outer_groups = dedupe_outer_holes(outer_holes)
 
     used_arg_names = arg_names_used_in_skeleton(skeleton, first.arg_names)
@@ -1118,43 +1035,54 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
       rewrite_and_import_entries =
         entries
         |> Enum.flat_map(fn e ->
-          outer_values =
-            outer_groups |> Enum.map(fn g -> g.values |> Enum.at(e.bucket_index) end)
-
-          kept_args = kept_arg_indices |> Enum.map(&Enum.at(e.arg_names, &1))
-
-          # When the helper was parametrised on the module, each caller
-          # passes its own `__MODULE__` as the (first) module argument.
-          leading_module = if parametrise_module?, do: [{:__MODULE__, [], nil}], else: []
-          replacement = render_call(helper_name, leading_module ++ kept_args ++ outer_values)
-
-          rewrite_entry =
-            {e.module,
-             {:rewrite,
-              %{
-                args: e.arg_names,
-                arity: e.arity,
-                kind: e.kind,
-                name: e.name,
-                replacement: replacement
-              }}}
-
-          # The host module hosts the helper itself — it doesn't import
-          # itself.
-          if e.module == target_module do
-            [rewrite_entry]
-          else
-            import_entry =
-              {e.module, {:import, {target_module, [{helper_name, length(final_args)}]}}}
-
-            [rewrite_entry, import_entry]
-          end
+          cross_entries_for_clone(e, %{
+            outer_groups: outer_groups,
+            kept_arg_indices: kept_arg_indices,
+            parametrise_module?: parametrise_module?,
+            helper_name: helper_name,
+            target_module: target_module,
+            final_args: final_args
+          })
         end)
 
       {[cross_helper_entry | rewrite_and_import_entries], %{state | used: new_used}}
     else
       {[], state}
     end
+  end
+
+  defp cross_entries_for_clone(e, ctx) do
+    outer_values = ctx.outer_groups |> Enum.map(fn g -> g.values |> Enum.at(e.bucket_index) end)
+    kept_args = ctx.kept_arg_indices |> Enum.map(&Enum.at(e.arg_names, &1))
+
+    # When the helper was parametrised on the module, each caller
+    # passes its own `__MODULE__` as the (first) module argument.
+    leading_module = if ctx.parametrise_module?, do: [{:__MODULE__, [], nil}], else: []
+    replacement = render_call(ctx.helper_name, leading_module ++ kept_args ++ outer_values)
+
+    rewrite_entry =
+      {e.module,
+       {:rewrite,
+        %{
+          args: e.arg_names,
+          arity: e.arity,
+          kind: e.kind,
+          name: e.name,
+          replacement: replacement
+        }}}
+
+    cross_rewrite_and_import_entries(rewrite_entry, e, ctx)
+  end
+
+  # The host module hosts the helper itself — it doesn't import itself.
+  defp cross_rewrite_and_import_entries(rewrite_entry, %{module: target}, %{target_module: target}),
+       do: [rewrite_entry]
+
+  defp cross_rewrite_and_import_entries(rewrite_entry, e, ctx) do
+    import_entry =
+      {e.module, {:import, {ctx.target_module, [{ctx.helper_name, length(ctx.final_args)}]}}}
+
+    [rewrite_entry, import_entry]
   end
 
   defp drop_meta(ast) do
@@ -1221,34 +1149,34 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
             {[], state}
 
           {outer_holes, local_groups, all_bound} ->
-            emit_intra_plan_with_classification(
-              intra_entries,
-              target_module,
-              skeleton,
-              outer_holes,
-              local_groups,
-              all_bound,
-              first,
-              helper_name,
-              new_used,
-              state
-            )
+            emit_intra_plan_with_classification(intra_entries, %{
+              target_module: target_module,
+              skeleton: skeleton,
+              outer_holes: outer_holes,
+              local_groups: local_groups,
+              all_bound: all_bound,
+              first: first,
+              helper_name: helper_name,
+              new_used: new_used,
+              state: state
+            })
         end
     end
   end
 
-  defp emit_intra_plan_with_classification(
-         intra_entries,
-         target_module,
-         skeleton,
-         outer_holes,
-         local_groups,
-         all_bound,
-         first,
-         helper_name,
-         new_used,
-         state
-       ) do
+  defp emit_intra_plan_with_classification(intra_entries, ctx) do
+    %{
+      target_module: target_module,
+      skeleton: skeleton,
+      outer_holes: outer_holes,
+      local_groups: local_groups,
+      all_bound: all_bound,
+      first: first,
+      helper_name: helper_name,
+      new_used: new_used,
+      state: state
+    } = ctx
+
     # Dedup: holes whose per-clone value vector is identical
     # collapse into one helper param (the same value is used at
     # every path).
@@ -1325,27 +1253,31 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
     |> Macro.prewalker()
     |> Enum.flat_map(fn
       {:defmodule, _, [name_ast, [{_do, body}]]} ->
-        case alias_to_module(name_ast) do
-          {:ok, mod} ->
-            if shared_module?(mod) do
-              # `*.Shared` modules are this refactor's own output (and
-              # `ExtractSharedModule`'s). Re-scanning them would extract
-              # functions we already extracted and inject imports pointing
-              # at the same module being defined — a self-import that
-              # fails to compile.
-              []
-            else
-              body_exprs = body_to_exprs(body)
-              functions_in_module(mod, body_exprs, path, min_mass)
-            end
-
-          :error ->
-            []
-        end
+        functions_in_module_node(name_ast, body, path, min_mass)
 
       _ ->
         []
     end)
+  end
+
+  defp functions_in_module_node(name_ast, body, path, min_mass) do
+    case alias_to_module(name_ast) do
+      {:ok, mod} -> functions_in_resolved_module(mod, body, path, min_mass)
+      :error -> []
+    end
+  end
+
+  # `*.Shared` modules are this refactor's own output (and
+  # `ExtractSharedModule`'s). Re-scanning them would extract
+  # functions we already extracted and inject imports pointing
+  # at the same module being defined — a self-import that
+  # fails to compile.
+  defp functions_in_resolved_module(mod, body, path, min_mass) do
+    if shared_module?(mod) do
+      []
+    else
+      functions_in_module(mod, body_to_exprs(body), path, min_mass)
+    end
   end
 
   defp extract_from_parse_result_for_path({:ok, ast}, min_mass, path),
@@ -1619,14 +1551,6 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
   defp load_default_sources,
     do: File.read(".refactor.exs") |> parse_inputs_from_config()
 
-  defp local_call_candidate?(name),
-    do:
-      not Macro.special_form?(name, 0) and
-        not Macro.special_form?(name, 1) and
-        not Macro.special_form?(name, 2) and
-        not Macro.operator?(name, 1) and
-        not Macro.operator?(name, 2)
-
   defp longest_common_prefix([]), do: []
   defp longest_common_prefix([single]), do: single
 
@@ -1872,37 +1796,35 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
 
     %{holes: holes, skeleton: skeleton} = AstDiff.tree_diff(asts)
 
-    cond do
-      holes_land_on_map_keys?(skeleton, holes) ->
-        # Map keys (and keyword-list keys) are nearly always semantically
-        # load-bearing. Two helpers that only differ in their map keys
-        # are not really clones — they construct different things.
-        # Consolidating them produces a misleading helper name and
-        # actively misleading parameter names (`%{name => …, logo_asset_id => …}`
-        # called for a mass-asset).
-        {[], state}
+    if holes_land_on_map_keys?(skeleton, holes) do
+      # Map keys (and keyword-list keys) are nearly always semantically
+      # load-bearing. Two helpers that only differ in their map keys
+      # are not really clones — they construct different things.
+      # Consolidating them produces a misleading helper name and
+      # actively misleading parameter names (`%{name => …, logo_asset_id => …}`
+      # called for a mass-asset).
+      {[], state}
+    else
+      case pick_target(indexed_entries) do
+        :skip ->
+          {[], state}
 
-      true ->
-        case pick_target(indexed_entries) do
-          :skip ->
-            {[], state}
+        {:intra, target_module} ->
+          emit_intra_plan(indexed_entries, target_module, skeleton, holes, state)
 
-          {:intra, target_module} ->
-            emit_intra_plan(indexed_entries, target_module, skeleton, holes, state)
+        {:suffix, target_module} ->
+          emit_cross_file_plan(:suffix, indexed_entries, target_module, skeleton, holes, state)
 
-          {:suffix, target_module} ->
-            emit_cross_file_plan(:suffix, indexed_entries, target_module, skeleton, holes, state)
-
-          {:lcp_shared, target_module} ->
-            emit_cross_file_plan(
-              :lcp_shared,
-              indexed_entries,
-              target_module,
-              skeleton,
-              holes,
-              state
-            )
-        end
+        {:lcp_shared, target_module} ->
+          emit_cross_file_plan(
+            :lcp_shared,
+            indexed_entries,
+            target_module,
+            skeleton,
+            holes,
+            state
+          )
+      end
     end
   end
 
@@ -1936,31 +1858,31 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
     call_names = MapSet.new(body_calls, fn {name, _arity} -> name end)
 
     imports
-    |> Enum.flat_map(fn {key, ast} ->
-      case import_only_pairs(ast) do
-        :no_only ->
-          # Full `import Mod` — keep only when at least one
-          # unqualified call in the body could plausibly resolve
-          # through it. Without function-export metadata we can't
-          # know for sure, so we err on the conservative side: drop
-          # only when the body has no unqualified calls at all,
-          # otherwise keep.
-          if MapSet.size(call_names) == 0 do
-            []
-          else
-            [{key, ast}]
-          end
+    |> Enum.flat_map(fn {key, ast} -> prune_import(key, ast, call_names) end)
+  end
 
-        {:ok, pairs} ->
-          used_pairs = pairs |> Enum.filter(fn {n, _a} -> MapSet.member?(call_names, n) end)
+  # Full `import Mod` — keep only when at least one unqualified call in
+  # the body could plausibly resolve through it. Without function-export
+  # metadata we can't know for sure, so we err on the conservative side:
+  # drop only when the body has no unqualified calls at all, otherwise keep.
+  defp prune_import(key, ast, call_names) do
+    case import_only_pairs(ast) do
+      :no_only ->
+        if MapSet.size(call_names) == 0, do: [], else: [{key, ast}]
 
-          cond do
-            used_pairs == [] -> []
-            used_pairs == pairs -> [{key, ast}]
-            true -> [{key, rebuild_only_import(ast, used_pairs)}]
-          end
-      end
-    end)
+      {:ok, pairs} ->
+        prune_only_import(key, ast, pairs, call_names)
+    end
+  end
+
+  defp prune_only_import(key, ast, pairs, call_names) do
+    used_pairs = pairs |> Enum.filter(fn {n, _a} -> MapSet.member?(call_names, n) end)
+
+    cond do
+      used_pairs == [] -> []
+      used_pairs == pairs -> [{key, ast}]
+      true -> [{key, rebuild_only_import(ast, used_pairs)}]
+    end
   end
 
   defp qualify_aliases_skip_locals(ast, aliases, _local_call_set) do
@@ -1985,13 +1907,8 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
 
     target_calls =
       definitions
-      |> Enum.find(fn d ->
-        d.kind in [:def, :defp] and d.name == target_name and d.arity == target_arity
-      end)
-      |> case do
-        nil -> MapSet.new()
-        d -> d.calls
-      end
+      |> Enum.find(&target_def?(&1, target_name, target_arity))
+      |> target_calls_or_empty()
 
     call_graph =
       for d <- definitions do
@@ -2003,9 +1920,7 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
 
     other_def_roots =
       definitions
-      |> Enum.filter(fn d ->
-        d.kind == :def and not (d.name == target_name and d.arity == target_arity)
-      end)
+      |> Enum.filter(&other_def_root?(&1, target_name, target_arity))
       |> Enum.map(&{&1.name, &1.arity})
       |> MapSet.new()
 
@@ -2013,45 +1928,62 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
 
     migratable =
       definitions
-      |> Enum.filter(fn d ->
-        d.kind == :defp and
-          MapSet.member?(reachable_from_target, {d.name, d.arity}) and
-          not MapSet.member?(reachable_from_others, {d.name, d.arity})
-      end)
+      |> Enum.filter(&migratable_defp?(&1, reachable_from_target, reachable_from_others))
 
     conflicting? =
       definitions
-      |> Enum.any?(fn d ->
-        d.kind == :defp and
-          MapSet.member?(reachable_from_target, {d.name, d.arity}) and
-          MapSet.member?(reachable_from_others, {d.name, d.arity})
-      end)
+      |> Enum.any?(&conflicting_defp?(&1, reachable_from_target, reachable_from_others))
 
     migratable_clauses = migratable |> Enum.flat_map(& &1.clauses)
     {migratable_clauses, conflicting?}
   end
+
+  defp target_def?(d, target_name, target_arity),
+    do: d.kind in [:def, :defp] and d.name == target_name and d.arity == target_arity
+
+  defp target_calls_or_empty(nil), do: MapSet.new()
+  defp target_calls_or_empty(d), do: d.calls
+
+  defp other_def_root?(d, target_name, target_arity),
+    do: d.kind == :def and not (d.name == target_name and d.arity == target_arity)
+
+  defp migratable_defp?(d, reachable_from_target, reachable_from_others),
+    do:
+      d.kind == :defp and
+        MapSet.member?(reachable_from_target, {d.name, d.arity}) and
+        not MapSet.member?(reachable_from_others, {d.name, d.arity})
+
+  defp conflicting_defp?(d, reachable_from_target, reachable_from_others),
+    do:
+      d.kind == :defp and
+        MapSet.member?(reachable_from_target, {d.name, d.arity}) and
+        MapSet.member?(reachable_from_others, {d.name, d.arity})
 
   defp read_existing_function_keys(path, target_module) do
     with true <- File.exists?(path),
          {:ok, source} <- File.read(path),
          {:ok, ast} <- Sourceror.parse_string(source),
          {:ok, body_exprs} <- find_module_body(ast, target_module) do
-      body_exprs
-      |> Enum.flat_map(fn
-        {kind, _, [head | _]} when kind in [:def, :defp] ->
-          case extract_fn_signature(head) do
-            {name, args} when is_list(args) -> [{name, length(args)}]
-            _ -> []
-          end
-
-        _ ->
-          []
-      end)
-      |> MapSet.new()
+      function_keys_from_exprs(body_exprs)
     else
       _ -> MapSet.new()
     end
   end
+
+  defp function_keys_from_exprs(body_exprs) do
+    body_exprs
+    |> Enum.flat_map(&function_key_for_clause/1)
+    |> MapSet.new()
+  end
+
+  defp function_key_for_clause({kind, _, [head | _]}) when kind in [:def, :defp] do
+    case extract_fn_signature(head) do
+      {name, args} when is_list(args) -> [{name, length(args)}]
+      _ -> []
+    end
+  end
+
+  defp function_key_for_clause(_), do: []
 
   defp rebuild_only_import({:import, meta, [aliases, _opts]}, pairs) do
     only_kw =
@@ -2168,11 +2100,7 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
     body_string = body_ast |> strip_comments() |> Sourceror.to_string()
 
     if String.contains?(body_string, "\n") do
-      indented_body =
-        body_string
-        |> String.split("\n")
-        |> Enum.map_join("\n", fn line -> if line == "", do: "", else: "  " <> line end)
-
+      indented_body = indent_lines(body_string, "  ")
       "#{kind} #{name}(#{arg_list}) do\n#{indented_body}\nend"
     else
       "#{kind} #{name}(#{arg_list}), do: #{body_string}"
@@ -2331,15 +2259,21 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
 
   defp resolve_name_collision(name, taken, idx) do
     if MapSet.member?(taken, name) do
-      2
-      |> Stream.iterate(&(&1 + 1))
-      |> Enum.find_value(fn n ->
-        candidate = :"#{name}_#{n}"
-        if MapSet.member?(taken, candidate), do: nil, else: candidate
-      end) || :"param_#{idx}"
+      first_free_suffixed_name(name, taken) || :"param_#{idx}"
     else
       name
     end
+  end
+
+  defp first_free_suffixed_name(name, taken) do
+    2
+    |> Stream.iterate(&(&1 + 1))
+    |> Enum.find_value(&free_suffixed_candidate(name, &1, taken))
+  end
+
+  defp free_suffixed_candidate(name, n, taken) do
+    candidate = :"#{name}_#{n}"
+    if MapSet.member?(taken, candidate), do: nil, else: candidate
   end
 
   defp rewrite(source, plan),
@@ -2375,19 +2309,7 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
         _ -> []
       end
 
-    function_keys =
-      body_exprs
-      |> Enum.flat_map(fn
-        {kind, _, [head | _]} when kind in [:def, :defp] ->
-          case extract_fn_signature(head) do
-            {name, args} when is_list(args) -> [{name, length(args)}]
-            _ -> []
-          end
-
-        _ ->
-          []
-      end)
-      |> MapSet.new()
+    function_keys = function_keys_from_exprs(body_exprs)
 
     attribute_names =
       body_exprs
@@ -2514,7 +2436,6 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
   defp target_from_suffix_or_lcp(:none, entries),
     do: lcp_shared_module(entries) |> target_from_lcp_or_skip()
 
-  defp transitive_closure(roots, graph), do: roots |> do_closure(graph, MapSet.to_list(roots))
   defp unblock_atom_for_import({:__block__, _, [a]}) when is_atom(a), do: a
   defp unblock_atom_for_import(a) when is_atom(a), do: a
   defp unblock_atom_for_import(_), do: nil

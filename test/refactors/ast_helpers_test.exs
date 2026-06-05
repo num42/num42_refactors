@@ -1115,4 +1115,367 @@ defmodule Number42.Refactors.AstHelpersTest do
       assert AstHelpers.safe_append_suffix("emit", "_shared", :drop) == "emit_shared"
     end
   end
+
+  describe "collect_calls/1" do
+    defp calls(src),
+      do: src |> Sourceror.parse_string!() |> AstHelpers.collect_calls() |> Enum.sort()
+
+    test "records unqualified local calls with their arity" do
+      assert calls("foo(a, b) + bar(c)") == [bar: 1, foo: 2]
+    end
+
+    test "corrects pipe right-hand-side arity by one" do
+      assert calls("x |> foo(y) |> bar()") == [bar: 1, foo: 2]
+    end
+
+    test "ignores remote calls" do
+      assert calls("Enum.map(list, fun)") == []
+    end
+
+    test "records both &name/arity capture forms" do
+      assert calls("Enum.map(list, &helper/1)") == [helper: 1]
+    end
+
+    test "ignores special forms and operators" do
+      # `case` is a special form and `+` an operator — neither is a local
+      # call; only the genuine `a/1` and `b/1` calls are recorded.
+      assert calls("case x + 1 do\n  1 -> a(x)\n  _ -> b(x)\nend") == [a: 1, b: 1]
+    end
+
+    test "static apply on __MODULE__ with literal name resolves to a concrete call" do
+      assert calls("apply(__MODULE__, :foo, [a, b])") == [foo: 2]
+    end
+
+    test "apply with a non-literal function name yields the dynamic-dispatch sentinel" do
+      assert calls("apply(__MODULE__, name, args)") == [__dynamic_dispatch__: 0]
+    end
+
+    test "apply with literal name but non-literal args is dynamic (arity unknown)" do
+      assert calls("apply(__MODULE__, :foo, args)") == [__dynamic_dispatch__: 0]
+    end
+
+    test "apply to a non-__MODULE__ target with a literal name is treated as remote and ignored" do
+      assert calls("apply(other_mod, :bar, [])") == []
+    end
+
+    test "Kernel.apply with a non-literal name yields the sentinel" do
+      assert calls("Kernel.apply(__MODULE__, f, a)") == [__dynamic_dispatch__: 0]
+    end
+
+    test "apply is never recorded as a plain {:apply, 3} local call" do
+      refute Enum.any?(calls("apply(__MODULE__, :foo, [a])"), &match?({:apply, _}, &1))
+    end
+  end
+
+  describe "collect_calls_in_clauses/1" do
+    defp clause_calls(src) do
+      src
+      |> Sourceror.parse_string!()
+      |> AstHelpers.module_body_exprs()
+      |> Enum.filter(&match?({kind, _, _} when kind in [:def, :defp], &1))
+      |> AstHelpers.collect_calls_in_clauses()
+      |> MapSet.to_list()
+      |> Enum.sort()
+    end
+
+    test "unions calls across every clause of a function" do
+      src = """
+      defmodule M do
+        def f(0), do: a()
+        def f(n), do: b(n)
+      end
+      """
+
+      assert clause_calls(src) == [a: 0, b: 1]
+    end
+
+    test "bodyless default-argument stubs contribute nothing" do
+      src = """
+      defmodule M do
+        def f(x \\\\ [])
+        def f(x), do: g(x)
+      end
+      """
+
+      assert clause_calls(src) == [g: 1]
+    end
+  end
+
+  describe "collect_definitions/1" do
+    defp defs(src),
+      do:
+        src
+        |> Sourceror.parse_string!()
+        |> AstHelpers.module_body_exprs()
+        |> AstHelpers.collect_definitions()
+
+    test "groups clauses by kind/name/arity and records their calls" do
+      src = """
+      defmodule M do
+        def pub(x), do: helper(x)
+        defp helper(x), do: x
+      end
+      """
+
+      by_key = Map.new(defs(src), &{{&1.kind, &1.name, &1.arity}, &1})
+
+      assert MapSet.to_list(by_key[{:def, :pub, 1}].calls) == [helper: 1]
+      assert MapSet.to_list(by_key[{:defp, :helper, 1}].calls) == []
+    end
+
+    test "multiple clauses of the same function collapse into one definition" do
+      src = """
+      defmodule M do
+        def f(0), do: :zero
+        def f(_), do: :other
+      end
+      """
+
+      assert [%{name: :f, arity: 1, clauses: clauses}] = defs(src)
+      assert length(clauses) == 2
+    end
+  end
+
+  describe "transitive_closure/2" do
+    test "reaches every node transitively from the roots" do
+      graph = %{
+        {:a, 0} => MapSet.new([{:b, 0}]),
+        {:b, 0} => MapSet.new([{:c, 0}]),
+        {:c, 0} => MapSet.new(),
+        {:orphan, 0} => MapSet.new()
+      }
+
+      reached = AstHelpers.transitive_closure(MapSet.new([{:a, 0}]), graph)
+
+      assert MapSet.to_list(reached) |> Enum.sort() == [a: 0, b: 0, c: 0]
+    end
+
+    test "tolerates cycles" do
+      graph = %{
+        {:a, 0} => MapSet.new([{:b, 0}]),
+        {:b, 0} => MapSet.new([{:a, 0}])
+      }
+
+      reached = AstHelpers.transitive_closure(MapSet.new([{:a, 0}]), graph)
+
+      assert MapSet.to_list(reached) |> Enum.sort() == [a: 0, b: 0]
+    end
+  end
+
+  describe "reachable_defs/2 — conservative apply/3 dead-code analysis" do
+    defp reachable(src) do
+      defs =
+        src
+        |> Sourceror.parse_string!()
+        |> AstHelpers.module_body_exprs()
+        |> AstHelpers.collect_definitions()
+
+      roots =
+        defs |> Enum.filter(&(&1.kind == :def)) |> Enum.map(&{&1.name, &1.arity}) |> MapSet.new()
+
+      defs |> AstHelpers.reachable_defs(roots) |> MapSet.to_list() |> Enum.sort()
+    end
+
+    test "a private function reachable from a public root is live" do
+      src = """
+      defmodule M do
+        def pub(x), do: helper(x)
+        defp helper(x), do: x
+      end
+      """
+
+      assert reachable(src) == [helper: 1, pub: 1]
+    end
+
+    test "an unreachable private function is dead (absent)" do
+      src = """
+      defmodule M do
+        def pub(x), do: x
+        defp orphan(x), do: x
+      end
+      """
+
+      refute {:orphan, 1} in reachable(src)
+    end
+
+    test "a dynamic apply marks every local def as reachable" do
+      src = """
+      defmodule M do
+        def pub(x, name), do: apply(__MODULE__, name, [x])
+        defp only_via_apply(x), do: x
+      end
+      """
+
+      assert {:only_via_apply, 1} in reachable(src)
+    end
+  end
+
+  describe "dynamic_dispatch?/1" do
+    test "true when the sentinel is present" do
+      assert AstHelpers.dynamic_dispatch?([{:foo, 1}, {:__dynamic_dispatch__, 0}])
+    end
+
+    test "false for an ordinary call set" do
+      refute AstHelpers.dynamic_dispatch?([{:foo, 1}, {:bar, 2}])
+    end
+  end
+
+  describe "pure?/1 — total + exception-free + eager" do
+    defp pure?(src), do: src |> Sourceror.parse_string!() |> AstHelpers.pure?()
+
+    test "literals, variables and constructors are pure" do
+      assert pure?("42")
+      assert pure?(":atom")
+      assert pure?(~s|"hi"|)
+      assert pure?("x")
+      assert pure?("[1, 2, x]")
+      assert pure?("{:ok, x}")
+      assert pure?("%{a: 1, b: x}")
+    end
+
+    test "arithmetic, comparison and boolean operators over pure leaves are pure" do
+      assert pure?("a + b * 2")
+      assert pure?("a == b and c > d")
+      assert pure?("not flag || other")
+    end
+
+    test "eager Enum/Map/String over pure functions are pure" do
+      assert pure?("Enum.map(list, fn x -> x + 1 end)")
+      assert pure?("Map.get(m, :key)")
+      assert pure?("String.downcase(s)")
+      assert pure?("x |> Enum.map(fn y -> y * 2 end) |> Enum.sum()")
+    end
+
+    test "raising String conversions are impure" do
+      refute pure?("String.to_integer(s)")
+      refute pure?("String.to_atom(s)")
+    end
+
+    test "bang functions are impure" do
+      refute pure?("Map.fetch!(m, :k)")
+      refute pure?("File.read!(path)")
+    end
+
+    test "Stream sources are impure (lazy)" do
+      refute pure?("Stream.map(list, fn x -> x end)")
+    end
+
+    test "division and integer division/remainder are impure (zero divisor raises)" do
+      refute pure?("a / b")
+      refute pure?("div(a, b)")
+      refute pure?("rem(a, b)")
+    end
+
+    test "effects and dynamic dispatch are impure" do
+      refute pure?(~s|raise "boom"|)
+      refute pure?("send(pid, :msg)")
+      refute pure?("apply(mod, :f, [])")
+      refute pure?("IO.puts(x)")
+    end
+
+    test "partial Kernel functions are impure" do
+      refute pure?("hd(list)")
+      refute pure?("elem(tuple, 0)")
+      refute pure?("Enum.at(list, 3)")
+    end
+
+    test "unknown remote and local calls are conservatively impure" do
+      refute pure?("SomeMod.unknown_fn(x)")
+      refute pure?("unknown_local(x)")
+    end
+
+    test "calls through an anonymous function value are impure (opaque target)" do
+      refute pure?("fun.(x)")
+    end
+
+    test "map/struct dot-access is impure (KeyError on a missing key)" do
+      refute pure?("m.field")
+      refute pure?("Enum.filter(list, & &1.active)")
+    end
+  end
+
+  describe "read_after?/3 — ordered liveness over a statement list" do
+    defp stmts(src), do: src |> Sourceror.parse_string!() |> AstHelpers.body_to_exprs()
+
+    test "a value read by a later statement is live after its binding" do
+      e = stmts("(\n  x = compute()\n  y = 1\n  use(x)\n)")
+      assert AstHelpers.read_after?(:x, e, 0)
+    end
+
+    test "a value never read again is dead after its binding" do
+      e = stmts("(\n  x = compute()\n  y = 1\n  use(x)\n)")
+      refute AstHelpers.read_after?(:y, e, 1)
+    end
+
+    test "the statement at the index itself is not counted as a later read" do
+      e = stmts("(\n  x = compute()\n  y = 1\n  use(x)\n)")
+      refute AstHelpers.read_after?(:x, e, 2)
+    end
+
+    test "a later read counts even if the variable is rebound first" do
+      e = stmts("(\n  a = 1\n  a = 2\n  b = a\n)")
+      assert AstHelpers.read_after?(:a, e, 0)
+    end
+
+    test "an out-of-range index yields false" do
+      e = stmts("(\n  x = 1\n  use(x)\n)")
+      refute AstHelpers.read_after?(:x, e, 99)
+    end
+  end
+
+  describe "branches_reading/2 and live_in_single_branch?/2" do
+    defp branch_bodies(src) do
+      {:case, _, [_scrutinee, [{_do, clauses}]]} = Sourceror.parse_string!(src)
+      Enum.map(clauses, fn {:->, _, [_head, body]} -> body end)
+    end
+
+    test "reports the indices of branches that read the variable" do
+      branches =
+        branch_bodies("""
+        case val do
+          :a -> use(x)
+          :b -> other()
+          _ -> also(x)
+        end
+        """)
+
+      assert AstHelpers.branches_reading(:x, branches) == [0, 2]
+    end
+
+    test "a variable bound inside a branch is not read there" do
+      branches =
+        branch_bodies("""
+        case val do
+          :a -> (z = 1; use(z))
+          :b -> use(z)
+        end
+        """)
+
+      assert AstHelpers.branches_reading(:z, branches) == [1]
+    end
+
+    test "live_in_single_branch? is true for exactly one reading branch" do
+      branches =
+        branch_bodies("""
+        case val do
+          :a -> use(x)
+          :b -> other()
+        end
+        """)
+
+      assert AstHelpers.live_in_single_branch?(:x, branches)
+    end
+
+    test "live_in_single_branch? is false when two branches read the variable" do
+      branches =
+        branch_bodies("""
+        case val do
+          :a -> use(y)
+          :b -> also(y)
+        end
+        """)
+
+      refute AstHelpers.live_in_single_branch?(:y, branches)
+    end
+  end
 end

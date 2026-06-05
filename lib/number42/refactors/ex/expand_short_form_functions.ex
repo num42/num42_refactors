@@ -1,4 +1,5 @@
 defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
+  alias Number42.Refactors.IdentifierExpansion
   alias Sourceror.Patch
 
   @moduledoc """
@@ -203,15 +204,8 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
           |> Enum.reduce(MapSet.new(), &MapSet.union/2)
 
         case resolve_name(name, candidates, module_subtokens, ctx) do
-          {:ok, new_name_atom} ->
-            cond do
-              new_name_atom == name -> []
-              MapSet.member?(occupied_names, new_name_atom) -> []
-              true -> [{name, new_name_atom}]
-            end
-
-          :skip ->
-            []
+          {:ok, new_name_atom} -> rename_or_skip(name, new_name_atom, occupied_names)
+          :skip -> []
         end
       end)
       |> Map.new()
@@ -224,6 +218,16 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
   end
 
   defp patches_for_module(_, _), do: []
+
+  # A resolved rename is dropped if it's a no-op or would collide with
+  # an occupied name; otherwise it becomes a {old, new} pair.
+  defp rename_or_skip(name, new_name_atom, occupied_names) do
+    cond do
+      new_name_atom == name -> []
+      MapSet.member?(occupied_names, new_name_atom) -> []
+      true -> [{name, new_name_atom}]
+    end
+  end
 
   defp tagged_candidates(module_compounds, alias_compounds, import_compounds) do
     (Enum.map(module_compounds, &{&1, :module_name}) ++
@@ -269,20 +273,18 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
         [parts |> List.last() |> Atom.to_string() |> Macro.underscore()]
 
       {:alias, _, [{{:., _, [{:__aliases__, _, _}, :{}]}, _, multi}]} ->
-        multi
-        |> Enum.flat_map(fn
-          {:__aliases__, _, parts} when is_list(parts) ->
-            [parts |> List.last() |> Atom.to_string() |> Macro.underscore()]
-
-          _ ->
-            []
-        end)
+        Enum.flat_map(multi, &alias_compound/1)
 
       _ ->
         []
     end)
     |> Enum.uniq()
   end
+
+  defp alias_compound({:__aliases__, _, parts}) when is_list(parts),
+    do: [parts |> List.last() |> Atom.to_string() |> Macro.underscore()]
+
+  defp alias_compound(_), do: []
 
   defp collect_import_compounds(exprs) do
     exprs
@@ -324,19 +326,7 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
       |> Enum.reduce({[], MapSet.new()}, fn
         {kind, _, [head, _body_kw]} = node, {pairs, names}
         when kind in [:def, :defp, :defmacro, :defmacrop] ->
-          case extract_fn_signature(head) do
-            {name, params} ->
-              names = names |> MapSet.put(name)
-
-              if kind in [:defp, :defmacrop] do
-                {[{{name, length(params)}, node} | pairs], names}
-              else
-                {pairs, names}
-              end
-
-            :error ->
-              {pairs, names}
-          end
+          reduce_def_node(kind, node, head, pairs, names)
 
         _, acc ->
           acc
@@ -344,6 +334,22 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
 
     grouped = priv_pairs |> Enum.group_by(fn {key, _} -> key end, fn {_, node} -> node end)
     {grouped, all_names}
+  end
+
+  defp reduce_def_node(kind, node, head, pairs, names) do
+    case extract_fn_signature(head) do
+      {name, params} ->
+        names = names |> MapSet.put(name)
+
+        if kind in [:defp, :defmacrop] do
+          {[{{name, length(params)}, node} | pairs], names}
+        else
+          {pairs, names}
+        end
+
+      :error ->
+        {pairs, names}
+    end
   end
 
   # Try to expand each short non-whitelisted subtoken of the function
@@ -356,31 +362,31 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
 
     resolve_opts = build_resolve_opts(self, module_subtokens, ctx)
 
-    expanded =
-      parts
-      |> Enum.reduce_while([], fn part, acc ->
-        cond do
-          # Long enough: keep as-is.
-          String.length(part) > 3 ->
-            {:cont, [part | acc]}
+    parts
+    |> expand_parts(candidates, resolve_opts, other_parts)
+    |> finalize_name(self)
+  end
 
-          true ->
-            resolve_part(part, candidates, resolve_opts, other_parts, acc)
-        end
-      end)
+  defp expand_parts(parts, candidates, resolve_opts, other_parts) do
+    Enum.reduce_while(parts, [], fn part, acc ->
+      # Long enough: keep as-is.
+      if String.length(part) > 3 do
+        {:cont, [part | acc]}
+      else
+        resolve_part(part, candidates, resolve_opts, other_parts, acc)
+      end
+    end)
+  end
 
-    case expanded do
-      :skip ->
-        :skip
+  defp finalize_name(:skip, _self), do: :skip
 
-      reversed_parts ->
-        new_name_string = reversed_parts |> Enum.reverse() |> Enum.join("_")
+  defp finalize_name(reversed_parts, self) do
+    new_name_string = reversed_parts |> Enum.reverse() |> Enum.join("_")
 
-        if new_name_string == self do
-          :skip
-        else
-          {:ok, String.to_atom(new_name_string)}
-        end
+    if new_name_string == self do
+      :skip
+    else
+      {:ok, String.to_atom(new_name_string)}
     end
   end
 
@@ -396,7 +402,7 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
   end
 
   defp resolve_part(part, candidates, resolve_opts, other_parts, acc) do
-    case Number42.Refactors.IdentifierExpansion.resolve(part, candidates, resolve_opts) do
+    case IdentifierExpansion.resolve(part, candidates, resolve_opts) do
       {:ok, expansion} ->
         cond do
           # Weak singular/plural flip — the expansion is just
@@ -440,16 +446,20 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
         end
 
       :skip ->
-        # If the part itself is whitelisted or stop-word, IdentifierExpansion
-        # returns :skip — but for those we want to keep the part verbatim,
-        # not abandon the whole name. Disambiguate.
-        part_atom = String.to_atom(part)
+        resolve_skipped_part(part, resolve_opts, acc)
+    end
+  end
 
-        cond do
-          MapSet.member?(resolve_opts.whitelist, part_atom) -> {:cont, [part | acc]}
-          MapSet.member?(resolve_opts.stop_words, part_atom) -> {:cont, [part | acc]}
-          true -> {:halt, :skip}
-        end
+  # If the part itself is whitelisted or stop-word, IdentifierExpansion
+  # returns :skip — but for those we want to keep the part verbatim,
+  # not abandon the whole name. Disambiguate.
+  defp resolve_skipped_part(part, resolve_opts, acc) do
+    part_atom = String.to_atom(part)
+
+    cond do
+      MapSet.member?(resolve_opts.whitelist, part_atom) -> {:cont, [part | acc]}
+      MapSet.member?(resolve_opts.stop_words, part_atom) -> {:cont, [part | acc]}
+      true -> {:halt, :skip}
     end
   end
 
@@ -535,19 +545,21 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
     |> Enum.flat_map(fn
       {:sigil_H, meta, [{:<<>>, _, [content]}, _]} = node when is_binary(content) ->
         new_content = patch_heex_content(content, resolutions)
-
-        if new_content == content do
-          []
-        else
-          delim = Keyword.get(meta, :delimiter, "\"")
-          prefix = if delim in ["\"\"\"", "'''"], do: "\n", else: ""
-          new_text = "~H#{delim}#{prefix}#{new_content}#{delim}"
-          [Patch.new(Sourceror.get_range(node), new_text)]
-        end
+        heex_patch_for_sigil(node, meta, content, new_content)
 
       _ ->
         []
     end)
+  end
+
+  defp heex_patch_for_sigil(_node, _meta, content, new_content) when new_content == content,
+    do: []
+
+  defp heex_patch_for_sigil(node, meta, _content, new_content) do
+    delim = Keyword.get(meta, :delimiter, "\"")
+    prefix = if delim in ["\"\"\"", "'''"], do: "\n", else: ""
+    new_text = "~H#{delim}#{prefix}#{new_content}#{delim}"
+    [Patch.new(Sourceror.get_range(node), new_text)]
   end
 
   defp patch_heex_content(content, resolutions) do

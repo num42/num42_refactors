@@ -284,25 +284,33 @@ defmodule Number42.Refactors.Heex.Tree do
         cond do
           starts_with_at?(body, lt_pos, "</" <> tag) and
               tag_close_boundary?(body, lt_pos + byte_size("</" <> tag)) ->
-            close_end = skip_until_gt(body, lt_pos)
-
-            if depth == 1,
-              do: close_end,
-              else: find_matching_close(body, close_end, tag, depth - 1)
+            close_matching_tag(body, lt_pos, tag, depth)
 
           starts_with_at?(body, lt_pos, "<" <> tag) and
               tag_open_boundary?(body, lt_pos + byte_size("<" <> tag)) ->
-            case find_tag_end(body, lt_pos + 1) do
-              {:self, after_self} ->
-                find_matching_close(body, after_self, tag, depth)
-
-              {:open, after_open} ->
-                find_matching_close(body, after_open, tag, depth + 1)
-            end
+            descend_into_open_tag(body, lt_pos, tag, depth)
 
           true ->
             find_matching_close(body, lt_pos + 1, tag, depth)
         end
+    end
+  end
+
+  defp close_matching_tag(body, lt_pos, tag, depth) do
+    close_end = skip_until_gt(body, lt_pos)
+
+    if depth == 1,
+      do: close_end,
+      else: find_matching_close(body, close_end, tag, depth - 1)
+  end
+
+  defp descend_into_open_tag(body, lt_pos, tag, depth) do
+    case find_tag_end(body, lt_pos + 1) do
+      {:self, after_self} ->
+        find_matching_close(body, after_self, tag, depth)
+
+      {:open, after_open} ->
+        find_matching_close(body, after_open, tag, depth + 1)
     end
   end
 
@@ -372,11 +380,9 @@ defmodule Number42.Refactors.Heex.Tree do
   end
 
   defp parse_html_or_error(events) do
-    try do
-      {:ok, nest_elements(events)}
-    rescue
-      _ -> :error
-    end
+    {:ok, nest_elements(events)}
+  rescue
+    _ -> :error
   end
 
   defp parse_sigil_or_skip(%{body: body} = sigil),
@@ -427,19 +433,20 @@ defmodule Number42.Refactors.Heex.Tree do
       {acc |> Enum.reverse(), false, bin, line}
     else
       {after_name, line} = skip_ws_nl(after_name, line)
-
-      case after_name do
-        "=" <> rest ->
-          {rest, line} = skip_ws_nl(rest, line)
-          {value, after_value, line} = read_attr_value(rest, line)
-          {after_value, line} = skip_ws_nl(after_value, line)
-          read_attrs_loop(after_value, line, [{name, value} | acc])
-
-        _ ->
-          {after_name, line} = skip_ws_nl(after_name, line)
-          read_attrs_loop(after_name, line, [{name, {:string, ""}} | acc])
-      end
+      read_named_attr(after_name, line, name, acc)
     end
+  end
+
+  defp read_named_attr("=" <> rest, line, name, acc) do
+    {rest, line} = skip_ws_nl(rest, line)
+    {value, after_value, line} = read_attr_value(rest, line)
+    {after_value, line} = skip_ws_nl(after_value, line)
+    read_attrs_loop(after_value, line, [{name, value} | acc])
+  end
+
+  defp read_named_attr(after_name, line, name, acc) do
+    {after_name, line} = skip_ws_nl(after_name, line)
+    read_attrs_loop(after_name, line, [{name, {:string, ""}} | acc])
   end
 
   defp read_curly("", _depth, acc, line),

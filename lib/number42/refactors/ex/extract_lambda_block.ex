@@ -86,15 +86,7 @@ defmodule Number42.Refactors.Ex.ExtractLambdaBlock do
     plans =
       ast
       |> Macro.prewalker()
-      |> Enum.flat_map(fn
-        {:defmodule, _, [_name_ast, [{_do, body}]]} ->
-          body
-          |> body_to_exprs()
-          |> plans_for_module(min_mass)
-
-        _ ->
-          []
-      end)
+      |> Enum.flat_map(&plans_for_node(&1, min_mass))
 
     case plans do
       [] ->
@@ -109,6 +101,11 @@ defmodule Number42.Refactors.Ex.ExtractLambdaBlock do
         |> splice_helpers_before_module_end(helpers)
     end
   end
+
+  defp plans_for_node({:defmodule, _, [_name_ast, [{_do, body}]]}, min_mass),
+    do: body |> body_to_exprs() |> plans_for_module(min_mass)
+
+  defp plans_for_node(_node, _min_mass), do: []
 
   defp apply_to_parse_result({:ok, ast}, min_mass, source),
     do: ast |> apply_to_ast(source, min_mass)
@@ -136,17 +133,18 @@ defmodule Number42.Refactors.Ex.ExtractLambdaBlock do
 
     body
     |> Macro.prewalker()
-    |> Enum.any?(fn
-      {name, _, ctx} when is_atom(name) and is_atom(ctx) ->
-        not underscore?(name) and
-          name not in [:__MODULE__, :__CALLER__, :__ENV__] and
-          not MapSet.member?(bound, name) and
-          not MapSet.member?(lambda_args, name)
-
-      _ ->
-        false
-    end)
+    |> Enum.any?(&free_var_node?(&1, bound, lambda_args))
   end
+
+  defp free_var_node?({name, _, ctx}, bound, lambda_args)
+       when is_atom(name) and is_atom(ctx) do
+    not underscore?(name) and
+      name not in [:__MODULE__, :__CALLER__, :__ENV__] and
+      not MapSet.member?(bound, name) and
+      not MapSet.member?(lambda_args, name)
+  end
+
+  defp free_var_node?(_node, _bound, _lambda_args), do: false
 
   defp helper_name_taken?(body_exprs) do
     body_exprs
@@ -254,6 +252,9 @@ defmodule Number42.Refactors.Ex.ExtractLambdaBlock do
     [%{callsite_patches: callsite_patches, helper_text: helper_text}]
   end
 
+  defp plan_for_hash_group([_only]), do: []
+  defp plan_for_hash_group(group), do: plan_for_group(group)
+
   defp plans_for_module(body_exprs, min_mass) do
     helper_taken? = helper_name_taken?(body_exprs)
 
@@ -266,12 +267,7 @@ defmodule Number42.Refactors.Ex.ExtractLambdaBlock do
       |> Enum.filter(&(&1.mass >= min_mass))
       |> Enum.reject(& &1.has_closure?)
       |> Enum.group_by(& &1.hash)
-      |> Enum.flat_map(fn {_hash, group} ->
-        case group do
-          [_only] -> []
-          group -> plan_for_group(group)
-        end
-      end)
+      |> Enum.flat_map(fn {_hash, group} -> plan_for_hash_group(group) end)
     end
   end
 

@@ -130,23 +130,22 @@ defmodule Number42.Refactors.Ex.PipeReassign do
   end
 
   defp do_advance(lines, l, c, line) do
-    cond do
-      c - 1 >= String.length(line) ->
-        next_line = lines |> Enum.at(l)
+    if c - 1 >= String.length(line) do
+      next_line = lines |> Enum.at(l)
 
-        if next_line == nil do
-          nil
-        else
-          do_advance(lines, l + 1, 1, next_line)
-        end
+      if next_line == nil do
+        nil
+      else
+        do_advance(lines, l + 1, 1, next_line)
+      end
+    else
+      ch = String.at(line, c - 1)
 
-      true ->
-        ch = String.at(line, c - 1)
-
-        cond do
-          ch in [",", " ", "\t", "\n"] -> do_advance(lines, l, c + 1, line)
-          true -> [line: l, column: c]
-        end
+      if ch in [",", " ", "\t", "\n"] do
+        do_advance(lines, l, c + 1, line)
+      else
+        [line: l, column: c]
+      end
     end
   end
 

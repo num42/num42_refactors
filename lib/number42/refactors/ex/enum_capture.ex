@@ -106,20 +106,21 @@ defmodule Number42.Refactors.Ex.EnumCapture do
     |> Enum.with_index(1)
     |> Enum.reduce_while({:ok, %{}}, fn {arg, slot}, {:ok, acc} ->
       case extract_bindings(arg, slot) do
-        {:ok, bindings} ->
-          merged = Map.merge(acc, bindings)
-
-          if map_size(merged) == map_size(acc) + map_size(bindings) do
-            {:cont, {:ok, merged}}
-          else
-            # Two args bind the same name — bail out, can't disambiguate.
-            {:halt, :skip}
-          end
-
-        :skip ->
-          {:halt, :skip}
+        {:ok, bindings} -> merge_bindings(acc, bindings)
+        :skip -> {:halt, :skip}
       end
     end)
+  end
+
+  defp merge_bindings(acc, bindings) do
+    merged = Map.merge(acc, bindings)
+
+    if map_size(merged) == map_size(acc) + map_size(bindings) do
+      {:cont, {:ok, merged}}
+    else
+      # Two args bind the same name — bail out, can't disambiguate.
+      {:halt, :skip}
+    end
   end
 
   defp call_node?({:__block__, _, _}), do: false
@@ -247,11 +248,7 @@ defmodule Number42.Refactors.Ex.EnumCapture do
     |> Enum.reduce_while({:ok, %{}}, fn pair, {:ok, acc} ->
       with {:ok, key} <- pair_key(pair),
            {:ok, var_name} <- pair_var(pair) do
-        if String.starts_with?(Atom.to_string(var_name), "_") do
-          {:cont, {:ok, acc}}
-        else
-          {:cont, {:ok, Map.put(acc, var_name, projection_ast(slot, key))}}
-        end
+        put_pair_binding(acc, var_name, slot, key)
       else
         # Nested pattern (`%{key: %{...}}`, `%{key: [a, b]}`, etc.) or
         # non-atom key — too complex for stage 1.
@@ -261,35 +258,45 @@ defmodule Number42.Refactors.Ex.EnumCapture do
   end
 
   defp extract_bindings({:=, _, [left, right]}, slot) do
-    {map_part, var_part} =
-      case {left, right} do
-        {{:%{}, _, _} = m, {v, _, c} = w} when is_atom(v) and is_atom(c) -> {m, w}
-        {{v, _, c} = w, {:%{}, _, _} = m} when is_atom(v) and is_atom(c) -> {m, w}
-        _ -> {nil, nil}
-      end
-
-    case {map_part, var_part} do
-      {nil, _} ->
-        :skip
-
-      {map_ast, {whole_name, _, _}} ->
-        map_ast
-        |> extract_bindings(slot)
-        |> case do
-          {:ok, inner} ->
-            if String.starts_with?(Atom.to_string(whole_name), "_") do
-              {:ok, inner}
-            else
-              {:ok, Map.put(inner, whole_name, slot_ast(slot))}
-            end
-
-          other ->
-            other
-        end
+    case whole_binding_parts(left, right) do
+      {nil, _} -> :skip
+      {map_ast, {whole_name, _, _}} -> extract_whole_binding(map_ast, slot, whole_name)
     end
   end
 
   defp extract_bindings(_pattern, _slot), do: :skip
+
+  defp put_pair_binding(acc, var_name, slot, key) do
+    if String.starts_with?(Atom.to_string(var_name), "_") do
+      {:cont, {:ok, acc}}
+    else
+      {:cont, {:ok, Map.put(acc, var_name, projection_ast(slot, key))}}
+    end
+  end
+
+  defp whole_binding_parts(left, right) do
+    case {left, right} do
+      {{:%{}, _, _} = m, {v, _, c} = w} when is_atom(v) and is_atom(c) -> {m, w}
+      {{v, _, c} = w, {:%{}, _, _} = m} when is_atom(v) and is_atom(c) -> {m, w}
+      _ -> {nil, nil}
+    end
+  end
+
+  defp extract_whole_binding(map_ast, slot, whole_name) do
+    case extract_bindings(map_ast, slot) do
+      {:ok, inner} -> put_whole_binding(inner, slot, whole_name)
+      other -> other
+    end
+  end
+
+  defp put_whole_binding(inner, slot, whole_name) do
+    if String.starts_with?(Atom.to_string(whole_name), "_") do
+      {:ok, inner}
+    else
+      {:ok, Map.put(inner, whole_name, slot_ast(slot))}
+    end
+  end
+
   defp lambda_only(_node), do: :no_patch
   defp maybe_patch_for(node, in_capture?, _in_pipe?) when in_capture?, do: lambda_only(node)
 
@@ -303,17 +310,15 @@ defmodule Number42.Refactors.Ex.EnumCapture do
          {:fn, _, [{:->, _, [fn_args, body]}]} = fn_node <- List.last(args),
          true <- length(fn_args) == arity,
          {:ok, capture_text} <- try_capture(fn_args, body) do
-      cond do
-        not in_pipe? and length(args) == 2 ->
-          [coll, _lambda] = args
-          coll_text = Sourceror.to_string(coll)
-          mod_str = Atom.to_string(mod)
-          fun_str = Atom.to_string(fun)
-          replacement = "#{coll_text} |> #{mod_str}.#{fun_str}(#{capture_text})"
-          {:patch, Patch.replace(call_node, replacement)}
-
-        true ->
-          {:patch, Patch.replace(fn_node, capture_text)}
+      if not in_pipe? and length(args) == 2 do
+        [coll, _lambda] = args
+        coll_text = Sourceror.to_string(coll)
+        mod_str = Atom.to_string(mod)
+        fun_str = Atom.to_string(fun)
+        replacement = "#{coll_text} |> #{mod_str}.#{fun_str}(#{capture_text})"
+        {:patch, Patch.replace(call_node, replacement)}
+      else
+        {:patch, Patch.replace(fn_node, capture_text)}
       end
     else
       _ -> :no_patch

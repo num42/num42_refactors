@@ -237,13 +237,7 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelper do
             {MapSet.union(acc, rhs_uses), new_bound}
 
           kw when is_list(kw) ->
-            kw_uses =
-              kw
-              |> Enum.reduce(MapSet.new(), fn {_k, v}, kacc ->
-                MapSet.union(kacc, collect_outer_uses(v, sc))
-              end)
-
-            {MapSet.union(acc, kw_uses), sc}
+            {MapSet.union(acc, collect_keyword_uses(kw, sc)), sc}
 
           other ->
             {MapSet.union(acc, collect_outer_uses(other, sc)), sc}
@@ -251,6 +245,13 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelper do
       end)
 
     uses
+  end
+
+  defp collect_keyword_uses(kw, sc) do
+    kw
+    |> Enum.reduce(MapSet.new(), fn {_k, v}, kacc ->
+      MapSet.union(kacc, collect_outer_uses(v, sc))
+    end)
   end
 
   defp collect_defp_index(body_exprs) do
@@ -310,82 +311,78 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelper do
 
   defp collect_in_binding(other, bound), do: {collect_outer_uses(other, bound), bound}
 
-  defp collect_outer_uses(ast, bound) do
-    case ast do
-      {name, _, ctx} when is_atom(name) and is_atom(ctx) ->
-        string = Atom.to_string(name)
+  defp collect_outer_uses({name, _, ctx}, bound) when is_atom(name) and is_atom(ctx),
+    do: outer_var_use(name, bound)
 
-        cond do
-          String.starts_with?(string, "_") -> MapSet.new()
-          name in [:__MODULE__, :__CALLER__, :__ENV__] -> MapSet.new()
-          MapSet.member?(bound, name) -> MapSet.new()
-          true -> MapSet.new([name])
-        end
+  defp collect_outer_uses({:fn, _, clauses}, bound) when is_list(clauses) do
+    clauses
+    |> Enum.map(&collect_fn_clause_uses(&1, bound))
+    |> Enum.reduce(MapSet.new(), &MapSet.union/2)
+  end
 
-      {:fn, _, clauses} when is_list(clauses) ->
-        clauses
-        |> Enum.map(fn
-          {:->, _, [args, body]} ->
-            inner_bound =
-              args |> Enum.flat_map(&pattern_var_names/1) |> MapSet.new() |> MapSet.union(bound)
+  defp collect_outer_uses({:for, _, args}, bound) when is_list(args),
+    do: collect_comprehension_uses(args, bound)
 
-            collect_outer_uses(body, inner_bound)
+  defp collect_outer_uses({:with, _, args}, bound) when is_list(args),
+    do: collect_comprehension_uses(args, bound)
 
-          other ->
-            collect_outer_uses(other, bound)
-        end)
-        |> Enum.reduce(MapSet.new(), &MapSet.union/2)
+  defp collect_outer_uses({{:., _, [_, _]} = dotcall, _, args}, bound) when is_list(args) do
+    # Remote call: `Mod.fun(args)`. Don't descend into the dotcall
+    # head's atom — `Mod` is already an `__aliases__` and `fun` is
+    # an atom literal. Just walk args.
+    collect_child_uses(args, bound, collect_outer_uses(dotcall, bound))
+  end
 
-      {:for, _, args} when is_list(args) ->
-        collect_comprehension_uses(args, bound)
+  defp collect_outer_uses({:from, _, [src | rest]}, bound) do
+    # Ecto.Query.from/2: first arg is `binding in src` or just `src`,
+    # rest is a keyword list whose `:join` entries also bind via
+    # `… in …`. We sequentially collect uses; each `in` LHS adds
+    # to bound for the remainder of the call.
+    {first_uses, bound1} = collect_in_binding(src, bound)
+    {rest_uses, _} = collect_from_rest(rest, bound1)
+    MapSet.union(first_uses, rest_uses)
+  end
 
-      {:with, _, args} when is_list(args) ->
-        collect_comprehension_uses(args, bound)
+  defp collect_outer_uses({form, _, args}, bound) when is_list(args) do
+    # Generic call/special form: walk children with same scope.
+    collect_child_uses(args, bound, collect_form_head_uses(form, bound))
+  end
 
-      {{:., _, [_, _]} = dotcall, _, args} when is_list(args) ->
-        # Remote call: `Mod.fun(args)`. Don't descend into the dotcall
-        # head's atom — `Mod` is already an `__aliases__` and `fun` is
-        # an atom literal. Just walk args.
-        args
-        |> Enum.reduce(collect_outer_uses(dotcall, bound), fn a, acc ->
-          MapSet.union(acc, collect_outer_uses(a, bound))
-        end)
+  defp collect_outer_uses(list, bound) when is_list(list),
+    do: collect_child_uses(list, bound, MapSet.new())
 
-      {:from, _, [src | rest]} ->
-        # Ecto.Query.from/2: first arg is `binding in src` or just `src`,
-        # rest is a keyword list whose `:join` entries also bind via
-        # `… in …`. We sequentially collect uses; each `in` LHS adds
-        # to bound for the remainder of the call.
-        {first_uses, bound1} = collect_in_binding(src, bound)
-        {rest_uses, _} = collect_from_rest(rest, bound1)
-        MapSet.union(first_uses, rest_uses)
+  defp collect_outer_uses({l, r}, bound),
+    do: MapSet.union(collect_outer_uses(l, bound), collect_outer_uses(r, bound))
 
-      {form, _, args} when is_list(args) ->
-        # Generic call/special form: walk children with same scope.
-        head_uses =
-          case form do
-            atom when is_atom(atom) -> MapSet.new()
-            other -> collect_outer_uses(other, bound)
-          end
+  defp collect_outer_uses(_atom_or_literal, _bound), do: MapSet.new()
 
-        args
-        |> Enum.reduce(head_uses, fn a, acc ->
-          MapSet.union(acc, collect_outer_uses(a, bound))
-        end)
+  defp collect_child_uses(children, bound, acc) do
+    children
+    |> Enum.reduce(acc, fn child, acc -> MapSet.union(acc, collect_outer_uses(child, bound)) end)
+  end
 
-      list when is_list(list) ->
-        list
-        |> Enum.reduce(MapSet.new(), fn item, acc ->
-          MapSet.union(acc, collect_outer_uses(item, bound))
-        end)
+  defp outer_var_use(name, bound) do
+    string = Atom.to_string(name)
 
-      {l, r} ->
-        MapSet.union(collect_outer_uses(l, bound), collect_outer_uses(r, bound))
-
-      _atom_or_literal ->
-        MapSet.new()
+    cond do
+      String.starts_with?(string, "_") -> MapSet.new()
+      name in [:__MODULE__, :__CALLER__, :__ENV__] -> MapSet.new()
+      MapSet.member?(bound, name) -> MapSet.new()
+      true -> MapSet.new([name])
     end
   end
+
+  defp collect_form_head_uses(form, _bound) when is_atom(form), do: MapSet.new()
+  defp collect_form_head_uses(form, bound), do: collect_outer_uses(form, bound)
+
+  defp collect_fn_clause_uses({:->, _, [args, body]}, bound) do
+    inner_bound =
+      args |> Enum.flat_map(&pattern_var_names/1) |> MapSet.new() |> MapSet.union(bound)
+
+    collect_outer_uses(body, inner_bound)
+  end
+
+  defp collect_fn_clause_uses(other, bound), do: collect_outer_uses(other, bound)
 
   defp contains_pin?(ast) do
     ast
@@ -752,40 +749,46 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelper do
     # is `defp`. Callers stay through the public host.
     _ = def_kind
 
-    clause_texts =
-      branches
-      |> Enum.map(fn %{body: body, guard: guard, pattern: pattern, used_in_body: used} ->
-        pattern_text = render_pattern_text(pattern, source)
-        body_text = render_body_text(body, source)
+    branches
+    |> Enum.map_join("\n", &render_clause(&1, helper_name, free_vars, source))
+  end
 
-        # Per-clause: prefix `_` on extra params not referenced in this
-        # clause's body or guard. The pipe call site keeps the real
-        # names — this only affects the signature, mirroring the
-        # compiler's "variable X is unused" hint.
-        extra_params =
-          free_vars
-          |> Enum.map(fn var ->
-            name = Atom.to_string(var)
-            if MapSet.member?(used, var), do: name, else: "_" <> name
-          end)
+  defp render_clause(
+         %{body: body, guard: guard, pattern: pattern, used_in_body: used},
+         helper_name,
+         free_vars,
+         source
+       ) do
+    pattern_text = render_pattern_text(pattern, source)
+    body_text = render_body_text(body, source)
+    extra_params = render_extra_params(free_vars, used)
 
-        params = [pattern_text | extra_params]
-        params_str = params |> Enum.join(", ")
+    params = [pattern_text | extra_params]
+    params_str = params |> Enum.join(", ")
 
-        guard_clause =
-          case guard do
-            nil -> ""
-            node -> " when " <> render_guard_text(node, source)
-          end
+    guard_clause =
+      case guard do
+        nil -> ""
+        node -> " when " <> render_guard_text(node, source)
+      end
 
-        """
-          defp #{helper_name}(#{params_str})#{guard_clause} do
-        #{indent_body(body_text)}
-          end\
-        """
-      end)
+    """
+      defp #{helper_name}(#{params_str})#{guard_clause} do
+    #{indent_body(body_text)}
+      end\
+    """
+  end
 
-    clause_texts |> Enum.join("\n")
+  # Per-clause: prefix `_` on extra params not referenced in this
+  # clause's body or guard. The pipe call site keeps the real
+  # names — this only affects the signature, mirroring the
+  # compiler's "variable X is unused" hint.
+  defp render_extra_params(free_vars, used) do
+    free_vars
+    |> Enum.map(fn var ->
+      name = Atom.to_string(var)
+      if MapSet.member?(used, var), do: name, else: "_" <> name
+    end)
   end
 
   defp render_pattern_text(pattern, source),

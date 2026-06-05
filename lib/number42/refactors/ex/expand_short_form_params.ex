@@ -1,4 +1,5 @@
 defmodule Number42.Refactors.Ex.ExpandShortFormParams do
+  alias Number42.Refactors.IdentifierExpansion
   alias Sourceror.Patch
 
   @moduledoc """
@@ -319,20 +320,20 @@ defmodule Number42.Refactors.Ex.ExpandShortFormParams do
     |> Macro.prewalker()
     |> Enum.flat_map(fn
       {:sigil_H, meta, [{:<<>>, _, [content]}, _]} = node when is_binary(content) ->
-        new_content = patch_heex_var_content(content, resolutions)
-
-        if new_content == content do
-          []
-        else
-          delim = Keyword.get(meta, :delimiter, "\"")
-          prefix = if delim in ["\"\"\"", "'''"], do: "\n", else: ""
-          new_text = "~H#{delim}#{prefix}#{new_content}#{delim}"
-          [Patch.new(Sourceror.get_range(node), new_text)]
-        end
+        heex_patch(node, meta, content, patch_heex_var_content(content, resolutions))
 
       _ ->
         []
     end)
+  end
+
+  defp heex_patch(_node, _meta, content, content), do: []
+
+  defp heex_patch(node, meta, _content, new_content) do
+    delim = Keyword.get(meta, :delimiter, "\"")
+    prefix = if delim in ["\"\"\"", "'''"], do: "\n", else: ""
+    new_text = "~H#{delim}#{prefix}#{new_content}#{delim}"
+    [Patch.new(Sourceror.get_range(node), new_text)]
   end
 
   defp long?(name, ctx), do: not short?(name, ctx)
@@ -426,33 +427,7 @@ defmodule Number42.Refactors.Ex.ExpandShortFormParams do
       resolutions =
         param_infos
         |> Enum.filter(&short?(&1.name, env.ctx))
-        |> Enum.flat_map(fn info ->
-          case resolve_param(info, candidates, fn_compound, env.ctx) do
-            {:ok, long} ->
-              long_atom = String.to_atom(long)
-              short_string = Atom.to_string(info.name)
-
-              cond do
-                long_atom == info.name -> []
-                long == fn_compound -> []
-                MapSet.member?(occupied, long_atom) -> []
-                # Trivial pluralize/singularize is not a meaningful
-                # resolution: `kws -> kw`, `ops -> op` are just
-                # singularizing the param itself, not adding info.
-                singularize(short_string) == long -> []
-                # `var -> var_arg`, `vec -> vec_a`: long is just the
-                # short with extra subtokens glued on. The short was
-                # matched only as initials of the start of some
-                # compound; that's a weak signal — usually means we
-                # latched on the function name and walked rightward.
-                String.starts_with?(long, short_string <> "_") -> []
-                true -> [{info.name, long_atom}]
-              end
-
-            :skip ->
-              []
-          end
-        end)
+        |> Enum.flat_map(&resolution_for_info(&1, candidates, fn_compound, env.ctx, occupied))
         |> Map.new()
 
       if map_size(resolutions) == 0 do
@@ -467,28 +442,57 @@ defmodule Number42.Refactors.Ex.ExpandShortFormParams do
         ast_patches =
           scope_nodes
           |> Enum.flat_map(&Macro.prewalker/1)
-          |> Enum.flat_map(fn
-            {name, _meta, atom_ctx} = node when is_atom(name) and is_atom(atom_ctx) ->
-              case Map.fetch(resolutions, name) do
-                {:ok, long_atom} ->
-                  replacement = Atom.to_string(long_atom)
-
-                  case build_patch(node, replacement) do
-                    nil -> []
-                    patch -> [patch]
-                  end
-
-                :error ->
-                  []
-              end
-
-            _ ->
-              []
-          end)
+          |> Enum.flat_map(&node_patches(&1, resolutions))
           |> Enum.reject(&is_nil/1)
 
         ast_patches ++ heex_patches(body, resolutions)
       end
+    end
+  end
+
+  defp resolution_for_info(info, candidates, fn_compound, ctx, occupied) do
+    case resolve_param(info, candidates, fn_compound, ctx) do
+      {:ok, long} -> resolution_entry(info, long, fn_compound, occupied)
+      :skip -> []
+    end
+  end
+
+  defp resolution_entry(info, long, fn_compound, occupied) do
+    long_atom = String.to_atom(long)
+    short_string = Atom.to_string(info.name)
+
+    cond do
+      long_atom == info.name -> []
+      long == fn_compound -> []
+      MapSet.member?(occupied, long_atom) -> []
+      # Trivial pluralize/singularize is not a meaningful
+      # resolution: `kws -> kw`, `ops -> op` are just
+      # singularizing the param itself, not adding info.
+      singularize(short_string) == long -> []
+      # `var -> var_arg`, `vec -> vec_a`: long is just the
+      # short with extra subtokens glued on. The short was
+      # matched only as initials of the start of some
+      # compound; that's a weak signal — usually means we
+      # latched on the function name and walked rightward.
+      String.starts_with?(long, short_string <> "_") -> []
+      true -> [{info.name, long_atom}]
+    end
+  end
+
+  defp node_patches({name, _meta, atom_ctx} = node, resolutions)
+       when is_atom(name) and is_atom(atom_ctx) do
+    case Map.fetch(resolutions, name) do
+      {:ok, long_atom} -> build_patch_list(node, Atom.to_string(long_atom))
+      :error -> []
+    end
+  end
+
+  defp node_patches(_node, _resolutions), do: []
+
+  defp build_patch_list(node, replacement) do
+    case build_patch(node, replacement) do
+      nil -> []
+      patch -> [patch]
     end
   end
 
@@ -559,7 +563,7 @@ defmodule Number42.Refactors.Ex.ExpandShortFormParams do
       min_score: 80
     }
 
-    case Number42.Refactors.IdentifierExpansion.resolve(short, candidates, opts) do
+    case IdentifierExpansion.resolve(short, candidates, opts) do
       {:ok, long} -> {:ok, long}
       :skip -> :skip
     end

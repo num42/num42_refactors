@@ -116,28 +116,32 @@ defmodule Number42.Refactors.Ex.ExtractHeexExactClone do
     if paths == [] do
       :no_cache
     else
-      min_mass = Keyword.get(opts, :min_mass, @default_min_mass)
-
-      sources =
-        paths
-        |> Enum.flat_map(fn p ->
-          case File.read(p) do
-            {:ok, src} -> [{p, src}]
-            _ -> []
-          end
-        end)
-        |> Map.new()
-
-      plans = build_plan(sources, min_mass: min_mass)
-
-      source_to_file =
-        for {path, src} <- sources do
-          {src, path}
-        end
-        |> Map.new()
-
-      {:ok, %{plans: plans, source_to_file: source_to_file}}
+      prepare_from_paths(paths, opts)
     end
+  end
+
+  defp prepare_from_paths(paths, opts) do
+    min_mass = Keyword.get(opts, :min_mass, @default_min_mass)
+
+    sources =
+      paths
+      |> Enum.flat_map(fn p ->
+        case File.read(p) do
+          {:ok, src} -> [{p, src}]
+          _ -> []
+        end
+      end)
+      |> Map.new()
+
+    plans = build_plan(sources, min_mass: min_mass)
+
+    source_to_file =
+      for {path, src} <- sources do
+        {src, path}
+      end
+      |> Map.new()
+
+    {:ok, %{plans: plans, source_to_file: source_to_file}}
   end
 
   @impl Number42.Refactors.Refactor
@@ -339,17 +343,21 @@ defmodule Number42.Refactors.Ex.ExtractHeexExactClone do
 
     case trimmed do
       "for " <> rest ->
-        case Code.string_to_quoted("for " <> rest <> " do :ok end") do
-          {:ok, {:for, _, args}} ->
-            generators = args |> Enum.filter(&match?({:<-, _, _}, &1))
+        parse_for_comprehension(rest)
 
-            case generators do
-              [{:<-, _, [pattern, coll]}] ->
-                {:ok, pattern_var_names(pattern), assign_names(coll)}
+      _ ->
+        :error
+    end
+  end
 
-              _ ->
-                :error
-            end
+  defp parse_for_comprehension(rest) do
+    case Code.string_to_quoted("for " <> rest <> " do :ok end") do
+      {:ok, {:for, _, args}} ->
+        generators = args |> Enum.filter(&match?({:<-, _, _}, &1))
+
+        case generators do
+          [{:<-, _, [pattern, coll]}] ->
+            {:ok, pattern_var_names(pattern), assign_names(coll)}
 
           _ ->
             :error
@@ -495,27 +503,35 @@ defmodule Number42.Refactors.Ex.ExtractHeexExactClone do
     {_, {a, l}} =
       Macro.prewalk(ast, {a, l}, fn
         {:@, _, [{name, _, ctx}]} = node, {a, l} when is_atom(name) and is_atom(ctx) ->
-          if MapSet.member?(b, name) do
-            {node, {a, MapSet.put(l, name)}}
-          else
-            {node, {MapSet.put(a, name), l}}
-          end
+          classify_assign(node, name, a, l, b)
 
         {name, _, ctx} = node, {a, l} when is_atom(name) and is_atom(ctx) ->
-          string = Atom.to_string(name)
-
-          cond do
-            String.starts_with?(string, "_") -> {node, {a, l}}
-            name in [:when, :=, :|, :"::"] -> {node, {a, l}}
-            MapSet.member?(b, name) -> {node, {a, MapSet.put(l, name)}}
-            true -> {node, {a, l}}
-          end
+          classify_var(node, name, a, l, b)
 
         node, acc ->
           {node, acc}
       end)
 
     {a, l}
+  end
+
+  defp classify_assign(node, name, a, l, b) do
+    if MapSet.member?(b, name) do
+      {node, {a, MapSet.put(l, name)}}
+    else
+      {node, {MapSet.put(a, name), l}}
+    end
+  end
+
+  defp classify_var(node, name, a, l, b) do
+    string = Atom.to_string(name)
+
+    cond do
+      String.starts_with?(string, "_") -> {node, {a, l}}
+      name in [:when, :=, :|, :"::"] -> {node, {a, l}}
+      MapSet.member?(b, name) -> {node, {a, MapSet.put(l, name)}}
+      true -> {node, {a, l}}
+    end
   end
 
   defp walk_eex_ast_branch({:ok, ast}, a, b, l), do: ast |> walk_ast(a, l, b)

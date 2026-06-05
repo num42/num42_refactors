@@ -96,23 +96,24 @@ defmodule Number42.Refactors.Ex.ResolveImplTrue do
         |> List.flatten()
 
       case behaviours do
-        [] ->
-          :skip
-
-        [_ | _] = list ->
-          list
-          |> Enum.flat_map(&callbacks_for/1)
-          |> Enum.group_by(fn {key, _beh} -> key end, fn {_key, beh} -> beh end)
-          |> Enum.reduce(%{}, fn
-            {key, [beh]}, acc -> Map.put(acc, key, beh)
-            # ≥2 behaviours claim this callback — leave the entry out
-            # of the table; sites resolving to it will skip.
-            {_key, [_, _ | _]}, acc -> acc
-          end)
+        [] -> :skip
+        [_ | _] = list -> build_callback_map(list)
       end
     else
       :skip
     end
+  end
+
+  defp build_callback_map(behaviours) do
+    behaviours
+    |> Enum.flat_map(&callbacks_for/1)
+    |> Enum.group_by(fn {key, _beh} -> key end, fn {_key, beh} -> beh end)
+    |> Enum.reduce(%{}, fn
+      {key, [beh]}, acc -> Map.put(acc, key, beh)
+      # ≥2 behaviours claim this callback — leave the entry out
+      # of the table; sites resolving to it will skip.
+      {_key, [_, _ | _]}, acc -> acc
+    end)
   end
 
   defp callbacks_for(behaviour) do
