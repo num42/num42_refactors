@@ -1115,4 +1115,208 @@ defmodule Number42.Refactors.AstHelpersTest do
       assert AstHelpers.safe_append_suffix("emit", "_shared", :drop) == "emit_shared"
     end
   end
+
+  describe "collect_calls/1" do
+    defp calls(src),
+      do: src |> Sourceror.parse_string!() |> AstHelpers.collect_calls() |> Enum.sort()
+
+    test "records unqualified local calls with their arity" do
+      assert calls("foo(a, b) + bar(c)") == [bar: 1, foo: 2]
+    end
+
+    test "corrects pipe right-hand-side arity by one" do
+      assert calls("x |> foo(y) |> bar()") == [bar: 1, foo: 2]
+    end
+
+    test "ignores remote calls" do
+      assert calls("Enum.map(list, fun)") == []
+    end
+
+    test "records both &name/arity capture forms" do
+      assert calls("Enum.map(list, &helper/1)") == [helper: 1]
+    end
+
+    test "ignores special forms and operators" do
+      # `case` is a special form and `+` an operator — neither is a local
+      # call; only the genuine `a/1` and `b/1` calls are recorded.
+      assert calls("case x + 1 do\n  1 -> a(x)\n  _ -> b(x)\nend") == [a: 1, b: 1]
+    end
+
+    test "static apply on __MODULE__ with literal name resolves to a concrete call" do
+      assert calls("apply(__MODULE__, :foo, [a, b])") == [foo: 2]
+    end
+
+    test "apply with a non-literal function name yields the dynamic-dispatch sentinel" do
+      assert calls("apply(__MODULE__, name, args)") == [__dynamic_dispatch__: 0]
+    end
+
+    test "apply with literal name but non-literal args is dynamic (arity unknown)" do
+      assert calls("apply(__MODULE__, :foo, args)") == [__dynamic_dispatch__: 0]
+    end
+
+    test "apply to a non-__MODULE__ target with a literal name is treated as remote and ignored" do
+      assert calls("apply(other_mod, :bar, [])") == []
+    end
+
+    test "Kernel.apply with a non-literal name yields the sentinel" do
+      assert calls("Kernel.apply(__MODULE__, f, a)") == [__dynamic_dispatch__: 0]
+    end
+
+    test "apply is never recorded as a plain {:apply, 3} local call" do
+      refute Enum.any?(calls("apply(__MODULE__, :foo, [a])"), &match?({:apply, _}, &1))
+    end
+  end
+
+  describe "collect_calls_in_clauses/1" do
+    defp clause_calls(src) do
+      src
+      |> Sourceror.parse_string!()
+      |> AstHelpers.module_body_exprs()
+      |> Enum.filter(&match?({kind, _, _} when kind in [:def, :defp], &1))
+      |> AstHelpers.collect_calls_in_clauses()
+      |> MapSet.to_list()
+      |> Enum.sort()
+    end
+
+    test "unions calls across every clause of a function" do
+      src = """
+      defmodule M do
+        def f(0), do: a()
+        def f(n), do: b(n)
+      end
+      """
+
+      assert clause_calls(src) == [a: 0, b: 1]
+    end
+
+    test "bodyless default-argument stubs contribute nothing" do
+      src = """
+      defmodule M do
+        def f(x \\\\ [])
+        def f(x), do: g(x)
+      end
+      """
+
+      assert clause_calls(src) == [g: 1]
+    end
+  end
+
+  describe "collect_definitions/1" do
+    defp defs(src),
+      do:
+        src
+        |> Sourceror.parse_string!()
+        |> AstHelpers.module_body_exprs()
+        |> AstHelpers.collect_definitions()
+
+    test "groups clauses by kind/name/arity and records their calls" do
+      src = """
+      defmodule M do
+        def pub(x), do: helper(x)
+        defp helper(x), do: x
+      end
+      """
+
+      by_key = Map.new(defs(src), &{{&1.kind, &1.name, &1.arity}, &1})
+
+      assert MapSet.to_list(by_key[{:def, :pub, 1}].calls) == [helper: 1]
+      assert MapSet.to_list(by_key[{:defp, :helper, 1}].calls) == []
+    end
+
+    test "multiple clauses of the same function collapse into one definition" do
+      src = """
+      defmodule M do
+        def f(0), do: :zero
+        def f(_), do: :other
+      end
+      """
+
+      assert [%{name: :f, arity: 1, clauses: clauses}] = defs(src)
+      assert length(clauses) == 2
+    end
+  end
+
+  describe "transitive_closure/2" do
+    test "reaches every node transitively from the roots" do
+      graph = %{
+        {:a, 0} => MapSet.new([{:b, 0}]),
+        {:b, 0} => MapSet.new([{:c, 0}]),
+        {:c, 0} => MapSet.new(),
+        {:orphan, 0} => MapSet.new()
+      }
+
+      reached = AstHelpers.transitive_closure(MapSet.new([{:a, 0}]), graph)
+
+      assert MapSet.to_list(reached) |> Enum.sort() == [a: 0, b: 0, c: 0]
+    end
+
+    test "tolerates cycles" do
+      graph = %{
+        {:a, 0} => MapSet.new([{:b, 0}]),
+        {:b, 0} => MapSet.new([{:a, 0}])
+      }
+
+      reached = AstHelpers.transitive_closure(MapSet.new([{:a, 0}]), graph)
+
+      assert MapSet.to_list(reached) |> Enum.sort() == [a: 0, b: 0]
+    end
+  end
+
+  describe "reachable_defs/2 — conservative apply/3 dead-code analysis" do
+    defp reachable(src) do
+      defs =
+        src
+        |> Sourceror.parse_string!()
+        |> AstHelpers.module_body_exprs()
+        |> AstHelpers.collect_definitions()
+
+      roots =
+        defs |> Enum.filter(&(&1.kind == :def)) |> Enum.map(&{&1.name, &1.arity}) |> MapSet.new()
+
+      defs |> AstHelpers.reachable_defs(roots) |> MapSet.to_list() |> Enum.sort()
+    end
+
+    test "a private function reachable from a public root is live" do
+      src = """
+      defmodule M do
+        def pub(x), do: helper(x)
+        defp helper(x), do: x
+      end
+      """
+
+      assert reachable(src) == [helper: 1, pub: 1]
+    end
+
+    test "an unreachable private function is dead (absent)" do
+      src = """
+      defmodule M do
+        def pub(x), do: x
+        defp orphan(x), do: x
+      end
+      """
+
+      refute {:orphan, 1} in reachable(src)
+    end
+
+    test "a dynamic apply marks every local def as reachable" do
+      src = """
+      defmodule M do
+        def pub(x, name), do: apply(__MODULE__, name, [x])
+        defp only_via_apply(x), do: x
+      end
+      """
+
+      assert {:only_via_apply, 1} in reachable(src)
+    end
+  end
+
+  describe "dynamic_dispatch?/1" do
+    test "true when the sentinel is present" do
+      assert AstHelpers.dynamic_dispatch?([{:foo, 1}, {:__dynamic_dispatch__, 0}])
+    end
+
+    test "false for an ordinary call set" do
+      refute AstHelpers.dynamic_dispatch?([{:foo, 1}, {:bar, 2}])
+    end
+  end
 end

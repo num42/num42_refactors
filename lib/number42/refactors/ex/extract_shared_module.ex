@@ -554,100 +554,6 @@ defmodule Number42.Refactors.Ex.ExtractSharedModule do
     |> MapSet.new()
   end
 
-  defp collect_calls(ast) do
-    {_, pipe_rhs_set} =
-      Macro.prewalk(ast, MapSet.new(), fn
-        {:|>, _, [_lhs, rhs]} = node, acc -> {node, MapSet.put(acc, rhs)}
-        node, acc -> {node, acc}
-      end)
-
-    {_, calls} =
-      Macro.prewalk(ast, [], fn
-        {:|>, _, [_lhs, rhs]} = node, acc ->
-          case rhs do
-            {{:., _, [_, _]}, _, _} ->
-              {node, acc}
-
-            {name, _, args} when is_atom(name) and is_list(args) ->
-              if local_call_candidate?(name) do
-                {node, [{name, length(args) + 1} | acc]}
-              else
-                {node, acc}
-              end
-
-            {name, _, nil} when is_atom(name) ->
-              if local_call_candidate?(name), do: {node, [{name, 1} | acc]}, else: {node, acc}
-
-            _ ->
-              {node, acc}
-          end
-
-        {:&, _, [{:/, _, [{name, _, ctx}, arity]}]} = node, acc
-        when is_atom(name) and is_atom(ctx) and is_integer(arity) ->
-          {node, [{name, arity} | acc]}
-
-        {:&, _, [{:/, _, [{name, _, ctx}, {:__block__, _, [arity]}]}]} = node, acc
-        when is_atom(name) and is_atom(ctx) and is_integer(arity) ->
-          {node, [{name, arity} | acc]}
-
-        {name, _, args} = node, acc when is_atom(name) and is_list(args) ->
-          cond do
-            MapSet.member?(pipe_rhs_set, node) ->
-              {node, acc}
-
-            local_call_candidate?(name) ->
-              {node, [{name, length(args)} | acc]}
-
-            true ->
-              {node, acc}
-          end
-
-        node, acc ->
-          {node, acc}
-      end)
-
-    calls
-  end
-
-  defp collect_calls_in_clauses(clauses) do
-    clauses
-    |> Enum.flat_map(fn
-      {_, _, [_h, body_kw]} when is_list(body_kw) ->
-        body_kw |> Keyword.values() |> Enum.flat_map(&collect_calls/1)
-
-      _ ->
-        # Bodyless def (e.g. default-argument stub `def foo(x \\ [])`).
-        # No body to walk.
-        []
-    end)
-    |> MapSet.new()
-  end
-
-  defp collect_definitions(body_exprs) do
-    body_exprs
-    |> Enum.filter(fn
-      {kind, _, [_h, body_kw]} when kind in [:def, :defp] and is_list(body_kw) -> true
-      _ -> false
-    end)
-    |> Enum.group_by(fn {kind, _, [head | _]} ->
-      case strip_when(head) do
-        {name, _, args} when is_atom(name) and is_list(args) -> {kind, name, length(args)}
-        {name, _, nil} when is_atom(name) -> {kind, name, 0}
-        _ -> :skip
-      end
-    end)
-    |> Enum.reject(fn {key, _} -> key == :skip end)
-    |> Enum.map(fn {{kind, name, arity}, clauses} ->
-      %{
-        arity: arity,
-        calls: collect_calls_in_clauses(clauses),
-        clauses: clauses,
-        kind: kind,
-        name: name
-      }
-    end)
-  end
-
   defp collect_imports(body_exprs) do
     body_exprs
     |> Enum.flat_map(fn
@@ -880,15 +786,6 @@ defmodule Number42.Refactors.Ex.ExtractSharedModule do
     shared_module_path(target, write_root, source_paths)
     |> read_existing_shared(target)
     |> is_map()
-  end
-
-  defp do_closure(reached, _graph, []), do: reached
-
-  defp do_closure(reached, graph, [current | rest]) do
-    callees = Map.get(graph, current, MapSet.new())
-    new = callees |> Enum.reject(&MapSet.member?(reached, &1))
-    next = new |> Enum.reduce(reached, &MapSet.put(&2, &1))
-    do_closure(next, graph, rest ++ new)
   end
 
   defp drop_entries_blocked_by_existing_privates(loser_entries, write_root, source_paths) do
@@ -1180,14 +1077,6 @@ defmodule Number42.Refactors.Ex.ExtractSharedModule do
 
   defp load_default_sources,
     do: File.read(".refactor.exs") |> parse_inputs_from_config()
-
-  defp local_call_candidate?(name),
-    do:
-      not Macro.special_form?(name, 0) and
-        not Macro.special_form?(name, 1) and
-        not Macro.special_form?(name, 2) and
-        not Macro.operator?(name, 1) and
-        not Macro.operator?(name, 2)
 
   defp local_call_in_value?(name),
     do:
@@ -1744,7 +1633,6 @@ defmodule Number42.Refactors.Ex.ExtractSharedModule do
   defp strip_when({:when, _, [inner | _]}), do: inner
   defp strip_when(other), do: other
   defp total_mass(clauses), do: clauses |> Enum.map(&clause_mass/1) |> Enum.sum()
-  defp transitive_closure(roots, graph), do: roots |> do_closure(graph, MapSet.to_list(roots))
   defp unblock_atom({:__block__, _, [a]}) when is_atom(a), do: a
   defp unblock_atom(a) when is_atom(a), do: a
   defp unblock_atom(_), do: nil

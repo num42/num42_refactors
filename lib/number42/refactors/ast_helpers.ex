@@ -1596,6 +1596,278 @@ defmodule Number42.Refactors.AstHelpers do
     end)
   end
 
+  # ── Call-graph (Layer 1, issue #34) ──────────────────────────────
+  #
+  # Local call-graph analysis shared by the cross-file refactor family
+  # (DelegateExactDuplicates, ExtractSharedModule, ExtractParametricClone).
+  # Three modules carried byte-identical private copies before this; the
+  # canonical implementation lives here and adds conservative `apply/3`
+  # handling.
+
+  @dynamic_dispatch {:__dynamic_dispatch__, 0}
+
+  @doc """
+  Collect the local function calls inside `ast` as `{name, arity}`
+  pairs.
+
+  "Local" means an unqualified call to a name that is not a special
+  form or operator — i.e. a candidate for a sibling `def`/`defp` in the
+  same module. Remote calls (`Foo.bar(...)`) are ignored. Both
+  `&name/arity` capture forms are recognised, and pipe right-hand sides
+  get their arity corrected (`x |> f(y)` records `{:f, 2}`).
+
+  ## `apply/3` handling (conservative)
+
+  A dynamic dispatch — `apply(__MODULE__, name, args)` or
+  `Kernel.apply(...)` where the function name is **not** a literal atom
+  — cannot be resolved to a single `{name, arity}`, so it could reach
+  *any* local function. Such a call contributes the sentinel
+  `#{inspect(@dynamic_dispatch)}` to the result. `reachable_defs/2`
+  treats that sentinel as "every local def is reachable"; callers doing
+  dead-code elimination must not delete a private function when the
+  sentinel is present in a reachable body.
+
+  An `apply/3` whose function name *is* a literal atom and whose module
+  is `__MODULE__` resolves statically to a concrete `{name, arity}`
+  (arity from a literal argument list, otherwise the sentinel).
+  """
+  @spec collect_calls(term()) :: [{atom(), non_neg_integer()}]
+  def collect_calls(ast) do
+    {_, pipe_rhs_set} =
+      Macro.prewalk(ast, MapSet.new(), fn
+        {:|>, _, [_lhs, rhs]} = node, acc -> {node, MapSet.put(acc, rhs)}
+        node, acc -> {node, acc}
+      end)
+
+    {_, calls} =
+      Macro.prewalk(ast, [], fn
+        # Dynamic / static `apply/3` dispatch — handled before the
+        # generic local-call clause so `apply` is never recorded as a
+        # plain `{:apply, 3}` local call.
+        {:apply, _, [mod, fn_name, args]} = node, acc ->
+          {node, prepend_apply_calls(mod, fn_name, args, acc)}
+
+        {{:., _, [{:__aliases__, _, [:Kernel]}, :apply]}, _, [mod, fn_name, args]} = node, acc ->
+          {node, prepend_apply_calls(mod, fn_name, args, acc)}
+
+        {:|>, _, [_lhs, rhs]} = node, acc ->
+          {node, prepend_pipe_call(rhs, acc)}
+
+        {:&, _, [{:/, _, [{name, _, ctx}, arity]}]} = node, acc
+        when is_atom(name) and is_atom(ctx) and is_integer(arity) ->
+          {node, [{name, arity} | acc]}
+
+        {:&, _, [{:/, _, [{name, _, ctx}, {:__block__, _, [arity]}]}]} = node, acc
+        when is_atom(name) and is_atom(ctx) and is_integer(arity) ->
+          {node, [{name, arity} | acc]}
+
+        {name, _, args} = node, acc when is_atom(name) and is_list(args) ->
+          cond do
+            MapSet.member?(pipe_rhs_set, node) -> {node, acc}
+            local_call_candidate?(name) -> {node, [{name, length(args)} | acc]}
+            true -> {node, acc}
+          end
+
+        node, acc ->
+          {node, acc}
+      end)
+
+    calls
+  end
+
+  @doc """
+  Collect every local call made across a list of `def`/`defp` clause
+  nodes, as a `MapSet` of `{name, arity}` pairs.
+
+  Bodyless clauses (default-argument stubs like `def foo(x \\\\ [])`)
+  have no body to walk and contribute nothing.
+  """
+  @spec collect_calls_in_clauses([term()]) :: MapSet.t({atom(), non_neg_integer()})
+  def collect_calls_in_clauses(clauses) do
+    clauses
+    |> Enum.flat_map(fn
+      {_kind, _, [_head, body_kw]} when is_list(body_kw) ->
+        body_kw |> Keyword.values() |> Enum.flat_map(&collect_calls/1)
+
+      _ ->
+        []
+    end)
+    |> MapSet.new()
+  end
+
+  @doc """
+  Group the `def`/`defp` nodes in `body_exprs` into per-function
+  definition maps.
+
+  Each map carries `:kind` (`:def`/`:defp`), `:name`, `:arity`, the
+  list of `:clauses` for that name/arity, and `:calls` — the set of
+  local calls those clauses make (via `collect_calls_in_clauses/1`).
+  Suitable as the node set for a call-graph: build the graph as
+  `{{name, arity} => calls}` and feed it to `transitive_closure/2`.
+  """
+  @spec collect_definitions([term()]) :: [
+          %{
+            kind: :def | :defp,
+            name: atom(),
+            arity: non_neg_integer(),
+            clauses: [term()],
+            calls: MapSet.t({atom(), non_neg_integer()})
+          }
+        ]
+  def collect_definitions(body_exprs) do
+    body_exprs
+    |> Enum.filter(fn
+      {kind, _, [_head | _]} when kind in [:def, :defp] -> true
+      _ -> false
+    end)
+    |> Enum.group_by(fn {kind, _, [head | _]} ->
+      case strip_when_head(head) do
+        {name, _, args} when is_atom(name) and is_list(args) -> {kind, name, length(args)}
+        {name, _, nil} when is_atom(name) -> {kind, name, 0}
+        _ -> :skip
+      end
+    end)
+    |> Enum.reject(fn {key, _} -> key == :skip end)
+    |> Enum.map(fn {{kind, name, arity}, clauses} ->
+      %{
+        arity: arity,
+        calls: collect_calls_in_clauses(clauses),
+        clauses: clauses,
+        kind: kind,
+        name: name
+      }
+    end)
+  end
+
+  @doc """
+  Compute the transitive closure of `roots` over a call-`graph`.
+
+  `graph` maps each `{name, arity}` to the `MapSet` of `{name, arity}`
+  it calls. Returns the `MapSet` of every node reachable from `roots`
+  (roots included). Pure set reachability — `apply/3` conservatism is
+  applied by `reachable_defs/2`, not here.
+  """
+  @spec transitive_closure(MapSet.t(), %{optional(term()) => MapSet.t()}) :: MapSet.t()
+  def transitive_closure(roots, graph),
+    do: do_closure(roots, graph, MapSet.to_list(roots))
+
+  @doc """
+  Return the set of definitions reachable from `roots`, applying
+  conservative `apply/3` handling.
+
+  `definitions` is a list of maps as produced by `collect_definitions/1`
+  (each must carry `:name`, `:arity`, `:calls`). `roots` is the set of
+  `{name, arity}` entry points known to be live (typically the public
+  `def`s). The result is the `MapSet` of `{name, arity}` reachable from
+  those roots.
+
+  If any reachable body performs a dynamic dispatch (the
+  `#{inspect(@dynamic_dispatch)}` sentinel appears in its calls), every
+  defined `{name, arity}` is considered reachable — a dynamic
+  `apply/3` could target any of them, so none may be treated as dead.
+  """
+  @spec reachable_defs([map()], MapSet.t()) :: MapSet.t()
+  def reachable_defs(definitions, roots) do
+    graph =
+      Map.new(definitions, fn %{name: name, arity: arity, calls: calls} ->
+        {{name, arity}, calls}
+      end)
+
+    reachable = transitive_closure(roots, graph)
+
+    if dynamic_dispatch_reachable?(definitions, reachable) do
+      definitions |> Enum.map(&{&1.name, &1.arity}) |> MapSet.new()
+    else
+      reachable
+    end
+  end
+
+  @doc """
+  Whether a set of collected calls contains a dynamic-dispatch sentinel
+  — i.e. an `apply/3` whose function name could not be resolved
+  statically. See `collect_calls/1`.
+  """
+  @spec dynamic_dispatch?(Enumerable.t()) :: boolean()
+  def dynamic_dispatch?(calls), do: Enum.member?(calls, @dynamic_dispatch)
+
+  defp dynamic_dispatch_reachable?(definitions, reachable) do
+    definitions
+    |> Enum.filter(&MapSet.member?(reachable, {&1.name, &1.arity}))
+    |> Enum.any?(&dynamic_dispatch?(&1.calls))
+  end
+
+  defp prepend_apply_calls(mod, fn_name, args, acc) do
+    case static_apply_target(mod, fn_name, args) do
+      {:ok, name, arity} -> [{name, arity} | acc]
+      :dynamic -> [@dynamic_dispatch | acc]
+      :remote -> acc
+    end
+  end
+
+  # `apply(__MODULE__, :literal, [a, b])` → a concrete local call.
+  defp static_apply_target({:__MODULE__, _, ctx}, fn_name, args) when is_atom(ctx) do
+    case {literal_atom(fn_name), literal_arity(args)} do
+      {{:ok, name}, {:ok, arity}} -> {:ok, name, arity}
+      {{:ok, _name}, :error} -> :dynamic
+      {:error, _} -> :dynamic
+    end
+  end
+
+  # Any other target with a non-literal function name is a conservative
+  # dynamic dispatch; with a literal name it is a remote call we ignore.
+  defp static_apply_target(_mod, fn_name, _args) do
+    case literal_atom(fn_name) do
+      {:ok, _name} -> :remote
+      :error -> :dynamic
+    end
+  end
+
+  defp literal_atom({:__block__, _, [atom]}) when is_atom(atom) and not is_nil(atom),
+    do: {:ok, atom}
+
+  defp literal_atom(atom) when is_atom(atom) and not is_nil(atom), do: {:ok, atom}
+  defp literal_atom(_), do: :error
+
+  defp literal_arity({:__block__, _, [list]}) when is_list(list), do: {:ok, length(list)}
+  defp literal_arity(list) when is_list(list), do: {:ok, length(list)}
+  defp literal_arity(_), do: :error
+
+  defp prepend_pipe_call(rhs, acc) do
+    case rhs do
+      {{:., _, [_remote, _name]}, _, _} ->
+        acc
+
+      {name, _, args} when is_atom(name) and is_list(args) ->
+        if local_call_candidate?(name), do: [{name, length(args) + 1} | acc], else: acc
+
+      {name, _, nil} when is_atom(name) ->
+        if local_call_candidate?(name), do: [{name, 1} | acc], else: acc
+
+      _ ->
+        acc
+    end
+  end
+
+  defp local_call_candidate?(name),
+    do:
+      not Macro.special_form?(name, 0) and
+        not Macro.special_form?(name, 1) and
+        not Macro.special_form?(name, 2) and
+        not Macro.operator?(name, 1) and
+        not Macro.operator?(name, 2)
+
+  defp do_closure(reached, _graph, []), do: reached
+
+  defp do_closure(reached, graph, [current | rest]) do
+    callees = Map.get(graph, current, MapSet.new())
+    new = Enum.reject(callees, &MapSet.member?(reached, &1))
+    next = Enum.reduce(new, reached, &MapSet.put(&2, &1))
+    do_closure(next, graph, rest ++ new)
+  end
+
+  defp strip_when_head({:when, _, [inner | _]}), do: inner
+  defp strip_when_head(other), do: other
+
   defp subsequence?([], _haystack), do: true
   defp subsequence?(_chars, ""), do: false
 
