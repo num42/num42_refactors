@@ -1248,62 +1248,6 @@ defmodule Number42.Refactors.AstHelpers do
     resolve_collision(base_name, flat_index, same?: same?)
   end
 
-  @doc """
-  Build a synthesised helper name from up to four snake_case fragments.
-
-  Fragments in order: `prefix`, `host`, `scrutinee`, `suffix`. Each is
-  split on `_`, empty strings filtered out, then folded into a single
-  list with **overlap-merge** at every seam — if the tail of the
-  accumulator equals the head of the next fragment, the overlap is
-  taken only once. Overlap is checked longest-first.
-
-      [a, b, c] ⊕ [b, c, d]  →  [a, b, c, d]
-      [a]       ⊕ [a]        →  [a]
-      [a, b]    ⊕ [c, d]     →  [a, b, c, d]
-
-  ## Host-drop heuristic
-
-  If `scrutinee` splits into **2 or more subtokens**, `host` is treated
-  as redundant and dropped — the scrutinee already encodes the dispatch
-  identity. `prefix` and `suffix` still merge with the scrutinee.
-
-      synth_compound_name("handle", "host", "fetch_user_by_id", "")
-      → "handle_fetch_user_by_id"
-
-  Single-token scrutinees keep `host`:
-
-      synth_compound_name("handle", "host", "fetch", "")
-      → "handle_host_fetch"
-
-  Inputs may be strings, atoms, or `nil`/`""` (treated as empty).
-  Caller is responsible for stripping `?`/`!` suffixes that would
-  otherwise terminate identifiers mid-name.
-  """
-  @spec synth_compound_name(
-          String.t() | atom() | nil,
-          String.t() | atom() | nil,
-          String.t() | atom() | nil,
-          String.t() | atom() | nil
-        ) :: String.t()
-  def synth_compound_name(prefix, host, scrutinee, suffix) do
-    prefix_parts = to_subtokens(prefix)
-    host_parts = to_subtokens(host)
-    scrutinee_parts = to_subtokens(scrutinee)
-    suffix_parts = to_subtokens(suffix)
-
-    fragments =
-      if length(scrutinee_parts) >= 2 do
-        [prefix_parts, scrutinee_parts, suffix_parts]
-      else
-        [prefix_parts, host_parts, scrutinee_parts, suffix_parts]
-      end
-
-    fragments
-    |> Enum.reject(&(&1 == []))
-    |> Enum.reduce([], &overlap_merge(&2, &1))
-    |> Enum.join("_")
-  end
-
   defp args_or_empty({_name, args}), do: {args, nil}
   defp args_or_empty(:error), do: {[], nil}
   defp args_or_empty_with_guard({_name, args}, guard), do: {args, guard}
@@ -1496,20 +1440,6 @@ defmodule Number42.Refactors.AstHelpers do
   defp module_name_underscored(_), do: nil
   defp name_from_atom_string("Elixir." <> _, v), do: v |> humanize_module()
   defp name_from_atom_string(str, _v), do: str |> sanitize_identifier()
-  defp overlap_merge([], next), do: next
-  defp overlap_merge(acc, []), do: acc
-
-  defp overlap_merge(acc, next) do
-    max_overlap = min(length(acc), length(next))
-
-    overlap =
-      max_overlap..1//-1
-      |> Enum.find(0, fn n ->
-        Enum.take(acc, -n) == Enum.take(next, n)
-      end)
-
-    acc ++ Enum.drop(next, overlap)
-  end
 
   defp patch_for_range_or_nil(%{end: end_pos, start: start_pos}, node, opts, replacement) do
     end_pos =
@@ -2154,13 +2084,6 @@ defmodule Number42.Refactors.AstHelpers do
       :nomatch -> false
       {pos, _} -> subsequence?(rest, String.slice(haystack, (pos + 1)..-1//1))
     end
-  end
-
-  defp to_subtokens(nil), do: []
-  defp to_subtokens(atom) when is_atom(atom), do: to_subtokens(Atom.to_string(atom))
-
-  defp to_subtokens(str) when is_binary(str) do
-    String.split(str, "_", trim: true)
   end
 
   defp verb_shaped?(word), do: @verb_suffixes |> Enum.any?(&String.ends_with?(word, &1))

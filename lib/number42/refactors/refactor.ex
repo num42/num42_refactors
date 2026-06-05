@@ -118,6 +118,7 @@ defmodule Number42.Refactors.Refactor do
       @behaviour Number42.Refactors.Refactor
 
       import Number42.Refactors.AstHelpers
+      import Number42.Refactors.IdentifierExpansion
 
       Module.register_attribute(__MODULE__, :is_refactor, persist: true)
       @is_refactor true

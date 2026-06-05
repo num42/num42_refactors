@@ -89,6 +89,54 @@ defmodule Number42.Refactors.IdentifierExpansion do
     "params" => "param"
   }
 
+  # Antonym pairs for `negate/2`. Declared one-directional; the lookup
+  # map is built bidirectionally so `valid↔invalid` round-trips. Each
+  # word maps to exactly one antonym — no word may appear on both sides
+  # of different pairs, or the bidirectional fold would collide.
+  @antonym_pairs [
+    {"valid", "invalid"},
+    {"authorized", "unauthorized"},
+    {"enabled", "disabled"},
+    {"present", "absent"},
+    {"allowed", "forbidden"},
+    {"active", "inactive"},
+    {"visible", "hidden"},
+    {"empty", "full"}
+  ]
+
+  @antonyms @antonym_pairs
+            |> Enum.flat_map(fn {a, b} -> [{a, b}, {b, a}] end)
+            |> Map.new()
+
+  # Prefix-strip rules for morphological negation. Each prefix, when
+  # present, is removed to recover the positive form (`unlocked →
+  # locked`). The same prefixes are candidates for *adding* on the
+  # fallback path, but `un_` is the canonical one we attach.
+  @negation_prefixes ~w(un in dis)
+
+  # Irregular past participles that carry no `-ed`/`-en` tell so the
+  # ending heuristic can't class them as booleans. Boolean-shaped in
+  # code (`found?`, `built?`, `sent?`) → fall back to `not_`. Open set
+  # in principle; projects extend the effective behavior via
+  # `opts[:known]`.
+  @irregular_participles MapSet.new(~w(found built sent held kept met read run done))
+
+  # Family registry for `pattern_family_suffix/1` — one
+  # `{predicate, suffix}` per recognized clause shape. The predicate
+  # receives the list of leading tags. Add a family by appending here;
+  # call sites stay untouched.
+  @name_families [{&__MODULE__.result_family?/1, "result"}]
+
+  # Well-known mathematical constants for `derive_constant_name/2`,
+  # matched within a float tolerance. Names are snake_case attribute
+  # stems (no leading `@`).
+  @well_known_floats [
+    {"pi", :math.pi()},
+    {"e", :math.exp(1)},
+    {"sqrt2", :math.sqrt(2)},
+    {"golden_ratio", (1 + :math.sqrt(5)) / 2}
+  ]
+
   @doc """
   Try to expand `short` against the given `candidates`.
 
@@ -151,6 +199,91 @@ defmodule Number42.Refactors.IdentifierExpansion do
       :cont -> ranked_candidates(short, candidates, opts)
     end
   end
+
+  @doc """
+  Derive the antonym of a snake_case identifier.
+
+  Resolution order (first hit wins):
+
+  1. `opts[:known]` override — a project-supplied `.refactor.exs`
+     mapping, same mechanism as `resolve/3`'s `known`.
+  2. Built-in bidirectional antonym map (`valid↔invalid`, …).
+  3. `is_<stem>` / `has_<stem>` predicate shapes — `is_` negates the
+     stem recursively (`is_valid → is_invalid`), `has_` inserts `no_`
+     (`has_value → has_no_value`).
+  4. `not_<x>` strips to `<x>` (round-trip partner of the fallback).
+  5. A leading `un`/`in`/`dis` prefix strips to the positive form.
+  6. Fallback: prepend `not_`/`un_`. `<stem>` with no other rule gets
+     `not_<stem>` so it round-trips with rule 4; everything else gets
+     `un_<word>`.
+
+  Always returns a string — never `:skip`. The fallback may produce a
+  cosmetically odd name (`un_frobnicate`); callers that need a cleaner
+  result should supply an `opts[:known]` override.
+
+  ## Examples
+
+      iex> alias Number42.Refactors.IdentifierExpansion
+      iex> IdentifierExpansion.negate("valid")
+      "invalid"
+
+      iex> alias Number42.Refactors.IdentifierExpansion
+      iex> IdentifierExpansion.negate("not_found")
+      "found"
+  """
+  @spec negate(String.t(), %{optional(:known) => %{String.t() => String.t()}}) :: String.t()
+  def negate(word, opts \\ %{}) when is_binary(word) do
+    known = Map.get(opts, :known, %{})
+
+    cond do
+      Map.has_key?(known, word) -> Map.fetch!(known, word)
+      Map.has_key?(@antonyms, word) -> Map.fetch!(@antonyms, word)
+      true -> negate_morphological(word)
+    end
+  end
+
+  defp negate_morphological(word) do
+    cond do
+      match?("is_" <> _, word) -> negate_predicate(word, "is_")
+      match?("has_" <> _, word) -> "has_no_" <> trim_prefix(word, "has_")
+      match?("not_" <> _, word) -> trim_prefix(word, "not_")
+      stripped = strippable_prefix(word) -> stripped
+      true -> fallback_negation(word)
+    end
+  end
+
+  # No rule fired — guess the word class from its ending to pick a
+  # prefix that reads naturally. Participle/adjective endings
+  # (`-ed`/`-able`/`-ible`/`-en`) read as booleans → `not_`
+  # (`not_found`, `not_editable`), the round-trip partner of the
+  # `not_`-strip rule. Everything else → `un_` (`un_frobnicate`).
+  defp fallback_negation(word) do
+    if boolean_shaped?(word),
+      do: "not_" <> word,
+      else: "un_" <> word
+  end
+
+  defp boolean_shaped?(word) do
+    String.ends_with?(word, ~w(ed able ible en)) or
+      MapSet.member?(@irregular_participles, word)
+  end
+
+  defp negate_predicate("is_" <> stem, "is_"), do: "is_" <> negate(stem)
+
+  # Strip the first matching `un`/`in`/`dis` prefix that leaves a
+  # non-empty remainder. Returns the positive form, or nil when no
+  # prefix applies (so the `cond` falls through to the `not_` fallback).
+  defp strippable_prefix(word) do
+    Enum.find_value(@negation_prefixes, fn prefix ->
+      case word do
+        <<^prefix::binary, rest::binary>> when rest != "" -> rest
+        _ -> nil
+      end
+    end)
+  end
+
+  defp trim_prefix(word, prefix),
+    do: binary_part(word, byte_size(prefix), byte_size(word) - byte_size(prefix))
 
   # Pre-heuristic shortcuts shared by `resolve/3` and
   # `resolve_ranked/3` — they must agree on whitelist/stop/known/
@@ -593,4 +726,273 @@ defmodule Number42.Refactors.IdentifierExpansion do
       min_score: Map.get(opts, :min_score, 80)
     }
   end
+
+  # -----------------------------------------------------------------
+  # Function-name synthesis — the naming root for every refactor that
+  # invents a helper name. Consolidated here from the per-refactor
+  # `synth_*`/`pattern_family_*` logic that used to live in
+  # `extract_case_to_helper` and `AstHelpers`.
+  # -----------------------------------------------------------------
+
+  @doc """
+  Derive a name for a hoisted constant (a magic number or config
+  string lifted into a `@module_attribute`).
+
+  Resolution (first hit wins):
+
+  1. `opts[:key]` — when the literal sat at `key: value` (a config
+     keyword or a map entry), the key *is* the name (`base_url`,
+     `timeout`). `?`/`!` markers are stripped.
+  2. Well-known numeric values — `pi`, `e`, … matched within a small
+     float tolerance.
+  3. Type-based fallback — never fails: url-shaped string →
+     `default_url`, other string → `default_string`, integer →
+     `magic_number`, float → `default_float`, anything else →
+     `constant`.
+
+  Always returns a snake_case string (no leading `@`); the caller
+  renders the attribute. Pass `opts[:key]` for a meaningful name —
+  the fallback is deliberately generic.
+
+  ## Examples
+
+      iex> alias Number42.Refactors.IdentifierExpansion
+      iex> IdentifierExpansion.derive_constant_name("https://api.example.com", %{key: "base_url"})
+      "base_url"
+
+      iex> alias Number42.Refactors.IdentifierExpansion
+      iex> IdentifierExpansion.derive_constant_name(42, %{})
+      "magic_number"
+  """
+  @spec derive_constant_name(term(), %{optional(:key) => String.t() | atom() | nil}) ::
+          String.t()
+  def derive_constant_name(value, opts \\ %{}) do
+    case Map.get(opts, :key) do
+      nil -> derive_constant_name_from_value(value)
+      key -> strip_marker(key)
+    end
+  end
+
+  defp derive_constant_name_from_value(value) when is_float(value) do
+    case well_known_float(value) do
+      nil -> "default_float"
+      name -> name
+    end
+  end
+
+  defp derive_constant_name_from_value(value) when is_integer(value), do: "magic_number"
+
+  defp derive_constant_name_from_value(value) when is_binary(value) do
+    if url_shaped?(value), do: "default_url", else: "default_string"
+  end
+
+  defp derive_constant_name_from_value(_value), do: "constant"
+
+  # Match a float against well-known mathematical constants within a
+  # tolerance — literal `3.14159…` rarely equals the BEAM's full-
+  # precision constant bit-for-bit.
+  defp well_known_float(value) do
+    Enum.find_value(@well_known_floats, fn {name, constant} ->
+      if abs(value - constant) < 1.0e-9, do: name
+    end)
+  end
+
+  defp url_shaped?(str), do: String.starts_with?(str, ["http://", "https://", "ftp://", "ws://"])
+
+  @doc """
+  Synthesize a helper-function name from an operation and its
+  carrier/output noun.
+
+  This is the semantic entry point: callers say *what the helper does*
+  (`operation`) and *what it works on* (`noun`), optionally tagging a
+  recognized clause-pattern family via `opts[:clauses]` so result-style
+  dispatch helpers get an `on_<noun>_result` shape.
+
+  Resolution:
+
+  - With `opts[:clauses]` that form a recognized pattern family →
+    `on_<noun>_<family_suffix>` (the family encodes the dispatch
+    identity, so `operation` is dropped as redundant).
+  - Otherwise → `<operation>_<host>_<noun>` via `synth_compound_name/4`,
+    where `host` (from `opts[:host]`) is dropped when `noun` already
+    splits into 2+ subtokens.
+
+  `?`/`!` markers on `operation`/`noun`/`host` are stripped — they'd
+  terminate the identifier mid-name.
+
+  ## Examples
+
+      iex> alias Number42.Refactors.IdentifierExpansion
+      iex> IdentifierExpansion.generate_function_name("handle", "fetch_user_by_id")
+      "handle_fetch_user_by_id"
+
+      iex> alias Number42.Refactors.IdentifierExpansion
+      iex> IdentifierExpansion.generate_function_name("extracted", "", %{host: "render_row"})
+      "extracted_render_row"
+  """
+  @spec generate_function_name(
+          String.t() | atom() | nil,
+          String.t() | atom() | nil,
+          %{optional(:host) => String.t() | atom() | nil, optional(:clauses) => list()}
+        ) :: String.t()
+  def generate_function_name(operation, noun, opts \\ %{}) do
+    op = strip_marker(operation)
+    noun = strip_marker(noun)
+    host = opts |> Map.get(:host) |> strip_marker()
+    clauses = Map.get(opts, :clauses, [])
+
+    case pattern_family_suffix(clauses) do
+      nil -> synth_compound_name(op, host, noun, "")
+      suffix -> synth_compound_name("on", "", noun, suffix)
+    end
+  end
+
+  @doc """
+  Build a synthesised helper name from up to four snake_case fragments.
+
+  Fragments in order: `prefix`, `host`, `scrutinee`, `suffix`. Each is
+  split on `_`, empty strings filtered out, then folded into a single
+  list with **overlap-merge** at every seam — if the tail of the
+  accumulator equals the head of the next fragment, the overlap is
+  taken only once. Overlap is checked longest-first.
+
+      [a, b, c] ⊕ [b, c, d]  →  [a, b, c, d]
+      [a]       ⊕ [a]        →  [a]
+      [a, b]    ⊕ [c, d]     →  [a, b, c, d]
+
+  ## Host-drop heuristic
+
+  If `scrutinee` splits into **2 or more subtokens**, `host` is treated
+  as redundant and dropped — the scrutinee already encodes the dispatch
+  identity. `prefix` and `suffix` still merge with the scrutinee.
+
+      synth_compound_name("handle", "host", "fetch_user_by_id", "")
+      → "handle_fetch_user_by_id"
+
+  Single-token scrutinees keep `host`:
+
+      synth_compound_name("handle", "host", "fetch", "")
+      → "handle_host_fetch"
+
+  Inputs may be strings, atoms, or `nil`/`""` (treated as empty).
+  Caller is responsible for stripping `?`/`!` suffixes that would
+  otherwise terminate identifiers mid-name.
+  """
+  @spec synth_compound_name(
+          String.t() | atom() | nil,
+          String.t() | atom() | nil,
+          String.t() | atom() | nil,
+          String.t() | atom() | nil
+        ) :: String.t()
+  def synth_compound_name(prefix, host, scrutinee, suffix) do
+    prefix_parts = to_subtokens(prefix)
+    host_parts = to_subtokens(host)
+    scrutinee_parts = to_subtokens(scrutinee)
+    suffix_parts = to_subtokens(suffix)
+
+    fragments =
+      if length(scrutinee_parts) >= 2 do
+        [prefix_parts, scrutinee_parts, suffix_parts]
+      else
+        [prefix_parts, host_parts, scrutinee_parts, suffix_parts]
+      end
+
+    fragments
+    |> Enum.reject(&(&1 == []))
+    |> Enum.reduce([], &overlap_merge(&2, &1))
+    |> Enum.join("_")
+  end
+
+  @doc """
+  Recognize a pattern *family* across a list of `case`/`fn` clauses and
+  return its semantic name suffix, or `nil` when no family matches.
+
+  Generic by design — a family is "all clauses share a recognizable
+  leading-tag shape". Each family is one `{predicate_on_leading_tags,
+  suffix}` entry; add a family by appending a tuple to `@name_families`,
+  call sites stay untouched. The canonical one is the `:ok`/`:error`
+  result family → `"result"`.
+
+  ## Examples
+
+      iex> alias Number42.Refactors.IdentifierExpansion
+      iex> IdentifierExpansion.pattern_family_suffix([])
+      nil
+  """
+  @spec pattern_family_suffix(list()) :: String.t() | nil
+  def pattern_family_suffix(clauses) do
+    tags = Enum.map(clauses, &leading_tag/1)
+
+    Enum.find_value(@name_families, fn {matches?, suffix} ->
+      if matches?.(tags), do: suffix
+    end)
+  end
+
+  @doc false
+  # The result family: every clause leads with `:ok` or `:error` (bare
+  # atom `:ok`/`:error` or a tagged tuple `{:ok, …}`/`{:error, …}`), with
+  # at least one clause actually tagged so we don't fire on a plain
+  # `:ok | :other` enum.
+  def result_family?(tags) do
+    Enum.all?(tags, &(&1 in [:ok, :error])) and :ok in tags
+  end
+
+  # The "leading tag" of a clause: the first element's atom when the
+  # pattern is a tuple, or the atom itself for a bare-atom pattern. Any
+  # other shape (bound var, `nil`, map, list, pin, …) has no leading tag.
+  # Sourceror wraps atoms/literals in `:__block__`, hence the unwrapping.
+  defp leading_tag({:->, _meta, [[pattern_node], _body]}) do
+    {pattern, _guard} = unwrap_when(pattern_node)
+    pattern_leading_tag(pattern)
+  end
+
+  defp leading_tag(_), do: nil
+
+  # 2-element tuple: Sourceror represents `{a, b}` as a `:__block__`
+  # wrapping a raw 2-tuple. The first element is the tag.
+  defp pattern_leading_tag({:__block__, _, [{tag_node, _second}]}),
+    do: atom_literal(tag_node)
+
+  # 3+-element tuple: `{:{}, _, [first | _]}`.
+  defp pattern_leading_tag({:{}, _, [first | _]}), do: atom_literal(first)
+
+  # Bare atom pattern (`:ok`, `:error`, `nil`, …), possibly wrapped.
+  defp pattern_leading_tag({:__block__, _, [atom]}) when is_atom(atom), do: atom
+  defp pattern_leading_tag(atom) when is_atom(atom), do: atom
+  defp pattern_leading_tag(_), do: nil
+
+  defp atom_literal({:__block__, _, [atom]}) when is_atom(atom), do: atom
+  defp atom_literal(atom) when is_atom(atom), do: atom
+  defp atom_literal(_), do: nil
+
+  defp unwrap_when({:when, _meta, [pat, guard]}), do: {pat, guard}
+  defp unwrap_when(pat), do: {pat, nil}
+
+  defp strip_marker(nil), do: nil
+
+  defp strip_marker(name) do
+    name
+    |> to_string()
+    |> String.replace_suffix("?", "")
+    |> String.replace_suffix("!", "")
+  end
+
+  defp overlap_merge([], next), do: next
+  defp overlap_merge(acc, []), do: acc
+
+  defp overlap_merge(acc, next) do
+    max_overlap = min(length(acc), length(next))
+
+    overlap =
+      max_overlap..1//-1
+      |> Enum.find(0, fn n ->
+        Enum.take(acc, -n) == Enum.take(next, n)
+      end)
+
+    acc ++ Enum.drop(next, overlap)
+  end
+
+  defp to_subtokens(nil), do: []
+  defp to_subtokens(atom) when is_atom(atom), do: to_subtokens(Atom.to_string(atom))
+  defp to_subtokens(str) when is_binary(str), do: String.split(str, "_", trim: true)
 end

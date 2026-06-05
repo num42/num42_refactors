@@ -248,8 +248,11 @@ defmodule Number42.Refactors.Ex.IfLiftToClauses do
   end
 
   defp maybe_patch(_, _), do: []
-  defp negate(:error), do: :error
-  defp negate(list) when is_list(list), do: list |> Enum.map(fn {n, leaf} -> {not n, leaf} end)
+  defp negate_leaves(:error), do: :error
+
+  defp negate_leaves(list) when is_list(list),
+    do: list |> Enum.map(fn {n, leaf} -> {not n, leaf} end)
+
   defp nil_literal, do: {:__block__, [], [nil]}
   defp patch_or_passthrough([], source), do: source
   defp patch_or_passthrough(patches, source), do: Sourceror.patch_string(source, patches)
@@ -282,8 +285,8 @@ defmodule Number42.Refactors.Ex.IfLiftToClauses do
 
   defp split_conjunction({:or, _, _}), do: :error
   defp split_conjunction({:||, _, _}), do: :error
-  defp split_conjunction({:not, _, [inner]}), do: negate(split_conjunction(inner))
-  defp split_conjunction({:!, _, [inner]}), do: negate(split_conjunction(inner))
+  defp split_conjunction({:not, _, [inner]}), do: negate_leaves(split_conjunction(inner))
+  defp split_conjunction({:!, _, [inner]}), do: negate_leaves(split_conjunction(inner))
   defp split_conjunction(leaf), do: [{false, leaf}]
 
   # length(xs) > 0, map_size(m) == 0, byte_size(b) >= 4, etc.
