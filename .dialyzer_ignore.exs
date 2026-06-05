@@ -100,5 +100,6 @@
   {"lib/number42/refactors/ex/expand_short_form_functions.ex", :call_without_opaque},
   {"lib/number42/refactors/ex/extract_parametric_clone.ex", :call_without_opaque},
   {"lib/number42/refactors/ex/extract_renamed_clone.ex", :call_without_opaque},
+  {"lib/number42/refactors/ex/extract_shared_module.ex", :call_without_opaque},
   {"lib/number42/refactors/ex/unused_variable.ex", :call_without_opaque}
 ]
