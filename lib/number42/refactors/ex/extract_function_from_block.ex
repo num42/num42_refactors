@@ -1,0 +1,337 @@
+defmodule Number42.Refactors.Ex.ExtractFunctionFromBlock do
+  @moduledoc """
+  Extracts a coherent leading block of bindings out of a function body
+  into a private helper. Free variables become parameters; bindings the
+  rest of the body still reads become the helper's return value.
+
+      # before
+      def report(order) do
+        subtotal = sum_lines(order)
+        tax = subtotal * region_rate(order)
+        total = subtotal + tax
+        format(total, tax)
+      end
+
+      # after
+      def report(order) do
+        {total, tax} = report_block(order)
+        format(total, tax)
+      end
+
+      defp report_block(order) do
+        subtotal = sum_lines(order)
+        tax = subtotal * region_rate(order)
+        total = subtotal + tax
+        {total, tax}
+      end
+
+  ## Which block is extracted
+
+  The **maximal leading run of bare-variable bindings** — the
+  contiguous prefix `var = expr; …` before the first non-binding (tail)
+  statement. This is the safest slice: a run of `=`-bindings has no
+  hidden control flow, and everything live after it is recoverable from
+  the bound names.
+
+  Requirements (otherwise skip):
+
+  - The prefix is **at least two** bindings, and there is **at least
+    one** tail statement after it (extracting the whole body, or a
+    single binding, is pointless / a different refactor's job).
+  - Every prefix statement is `bare_var = rhs` — no pattern-match LHS,
+    no non-binding statement mixed in.
+  - The prefix performs **no non-local control flow** — no `raise`,
+    `throw`, `exit`, `with`, `case`/`cond`/`if`/`try`, `for`, `fn`, or
+    early-return shape that would determine the function's tail. Such a
+    construct can't be moved behind a value-returning call.
+  - The prefix references **no module attribute** (`@rate`) — the
+    helper is a sibling `defp` and attributes are in scope, but an
+    attribute-parameterised block is subtle; conservative skip for v1.
+
+  ## Parameters and return
+
+  - **Parameters** = the prefix's free variables, which (because the
+    prefix leads the body) can only be the function's own arguments.
+  - **Return** = the prefix-bound names that are still read in the tail
+    (`AstHelpers.read_after?/3`). One live-out binding returns the bare
+    value (`total = report_block(order)`); two or more return a tuple
+    (`{total, tax} = report_block(order)`). At least one is required.
+
+  ## Idempotence & determinism
+
+  At most **one** function is extracted per pass — the first eligible
+  in source order. After extraction the host body's prefix is a single
+  `… = helper(…)` call, so the maximal-binding-prefix scan no longer
+  finds an extractable run there; the engine's fixpoint loop handles
+  other functions on later passes.
+  """
+
+  use Number42.Refactors.Refactor
+
+  @control_flow_forms ~w(raise throw exit with case cond if unless try for fn receive)a
+
+  @impl Number42.Refactors.Refactor
+  def description,
+    do:
+      "Extract a leading binding block into a private function (free vars → params, live → return)"
+
+  @impl Number42.Refactors.Refactor
+  def explanation do
+    """
+    A function that opens with a run of bindings computing intermediate
+    values, then does its real work, hides a cohesive sub-computation
+    inside its prologue. Lifting that prologue into a named `defp` —
+    free variables as parameters, the values the rest of the body still
+    needs as a (possibly tuple) return — gives the sub-computation a
+    name and shrinks the host to its essential shape. Conservative:
+    only a clean leading run of bare-variable bindings with no control
+    flow and no module-attribute dependency is moved.
+    """
+  end
+
+  @impl Number42.Refactors.Refactor
+  def reformat_after?, do: true
+
+  @impl Number42.Refactors.Refactor
+  def transform(source, _opts),
+    do: Sourceror.parse_string(source) |> apply_to_parse_result(source)
+
+  defp apply_to_parse_result({:ok, ast}, source), do: apply_to_ast(ast, source)
+  defp apply_to_parse_result({:error, _}, source), do: source
+
+  defp apply_to_ast(ast, source) do
+    ast
+    |> Macro.prewalker()
+    |> Enum.find_value(source, fn
+      {:defmodule, _, [_name, [{_do, _body}]]} = mod_ast ->
+        mod_ast
+        |> module_body_exprs()
+        |> first_extraction(mod_ast, source)
+
+      _ ->
+        nil
+    end)
+  end
+
+  defp first_extraction(nil, _mod_ast, _source), do: nil
+
+  defp first_extraction(body_exprs, mod_ast, source) do
+    existing_names = def_names(body_exprs)
+
+    body_exprs
+    |> Enum.find_value(fn expr -> extraction_for_def(expr, existing_names, mod_ast, source) end)
+  end
+
+  defp extraction_for_def({kind, _, [head, body_kw]} = def_node, existing_names, _mod_ast, source)
+       when kind in [:def, :defp] and is_list(body_kw) do
+    with {fn_name, params} <- extract_fn_signature(strip_when(head)),
+         {:ok, param_names} <- bare_param_names(params),
+         {:ok, body} <- do_body(body_kw),
+         exprs = body_to_exprs(body),
+         {:ok, prefix, tail} <- maximal_binding_prefix(exprs),
+         :ok <- ensure_extractable(prefix),
+         true <- meaningful_tail?(tail),
+         live_out = live_out_bindings(prefix, tail),
+         {:ok, helper_name} <- helper_name(fn_name, existing_names) do
+      build_extraction(prefix, live_out, param_names, helper_name, def_node, source)
+    else
+      _ -> nil
+    end
+  end
+
+  defp extraction_for_def(_, _existing_names, _mod_ast, _source), do: nil
+
+  # --- block selection ---
+
+  # The maximal leading run of `var = rhs` bindings, returned with the
+  # remaining tail. Requires >= 2 bindings and >= 1 tail statement.
+  defp maximal_binding_prefix(exprs) do
+    prefix = Enum.take_while(exprs, &simple_binding?/1)
+    k = length(prefix)
+    tail = Enum.drop(exprs, k)
+
+    if k >= 2 and tail != [], do: {:ok, prefix, tail}, else: :skip
+  end
+
+  defp simple_binding?({:=, _, [lhs, _rhs]}),
+    do: match?({name, _, ctx} when is_atom(name) and is_atom(ctx), lhs)
+
+  defp simple_binding?(_), do: false
+
+  # The tail must do real work — at least one statement that is not a
+  # bare variable / tuple / literal. A tail that is only a value-return
+  # (`{tax, total}` / `total`) makes extraction circular: the
+  # synthesised helper's own body would be `prefix; {…}`, which the next
+  # pass would extract again (`report_block` → `report_block_block`).
+  # Requiring a meaningful tail keeps the rewrite idempotent.
+  defp meaningful_tail?(tail), do: Enum.any?(tail, &does_work?/1)
+
+  # Sourceror wraps a single bare expression in `{:__block__, _, [inner]}`
+  # — unwrap before deciding, so a `{tax, total}` value-return reads as
+  # the tuple it is, not as an opaque block.
+  defp does_work?({:__block__, _, [inner]}), do: does_work?(inner)
+  defp does_work?({name, _, ctx}) when is_atom(name) and is_atom(ctx), do: false
+  defp does_work?({:{}, _, elems}), do: Enum.any?(elems, &does_work?/1)
+  defp does_work?(lit) when is_atom(lit) or is_number(lit) or is_binary(lit), do: false
+  defp does_work?({a, b}), do: does_work?(a) or does_work?(b)
+  defp does_work?(_), do: true
+
+  # --- eligibility ---
+
+  defp ensure_extractable(prefix) do
+    cond do
+      Enum.any?(prefix, &references_attribute?/1) -> :skip
+      Enum.any?(prefix, &has_control_flow?/1) -> :skip
+      true -> :ok
+    end
+  end
+
+  defp references_attribute?(ast) do
+    ast
+    |> Macro.prewalker()
+    |> Enum.any?(fn
+      {:@, _, [{name, _, ctx}]} when is_atom(name) and is_atom(ctx) -> true
+      _ -> false
+    end)
+  end
+
+  defp has_control_flow?(ast) do
+    ast
+    |> Macro.prewalker()
+    |> Enum.any?(fn
+      {form, _, _} when form in @control_flow_forms -> true
+      _ -> false
+    end)
+  end
+
+  # --- data-flow ---
+
+  defp live_out_bindings(prefix, tail) do
+    bound = prefix |> Enum.map(&binding_name/1)
+
+    # A bound name is live-out if any tail statement reads it free.
+    bound
+    |> Enum.filter(fn name ->
+      Enum.any?(tail, &MapSet.member?(free_in_expr(&1), name))
+    end)
+    |> Enum.uniq()
+  end
+
+  defp binding_name({:=, _, [{name, _, ctx}, _]}) when is_atom(name) and is_atom(ctx), do: name
+
+  defp free_in_expr(expr),
+    do: MapSet.difference(used_var_names(expr), collect_bound_vars(expr))
+
+  # --- helper naming ---
+
+  defp helper_name(fn_name, existing_names) do
+    candidate = :"#{fn_name}_block"
+    if MapSet.member?(existing_names, candidate), do: :skip, else: {:ok, candidate}
+  end
+
+  defp def_names(body_exprs) do
+    body_exprs
+    |> Enum.flat_map(fn
+      {kind, _, [head | _]} when kind in [:def, :defp] ->
+        case extract_fn_signature(strip_when(head)) do
+          {name, _args} -> [name]
+          _ -> []
+        end
+
+      _ ->
+        []
+    end)
+    |> MapSet.new()
+  end
+
+  # --- patch construction ---
+
+  defp build_extraction([], _live_out, _params, _helper, _def_node, _source), do: nil
+  defp build_extraction(_prefix, [], _params, _helper, _def_node, _source), do: nil
+
+  defp build_extraction(prefix, live_out, param_names, helper_name, def_node, source) do
+    call_args = Enum.map_join(param_names, ", ", &Atom.to_string/1)
+    call_text = "#{helper_name}(#{call_args})"
+    lhs_text = return_lhs(live_out)
+
+    [first | rest] = prefix
+    replace_patch = patch_for(Sourceror.get_range(first), "#{lhs_text} = #{call_text}")
+    delete_patches = Enum.map(rest, &patch_for(Sourceror.get_range(&1), ""))
+
+    helper_text = render_helper(helper_name, param_names, prefix, live_out)
+    insert_patch = helper_insert_patch(def_node, helper_text)
+
+    patches = [replace_patch, insert_patch | delete_patches] |> Enum.reject(&is_nil/1)
+    patch_or_passthrough(source, patches)
+  end
+
+  # Insert the helper as a sibling `defp` immediately after the host
+  # function — a zero-width patch at the end of the host def's range.
+  # Sibling placement keeps it in the same module and needs no
+  # module-end search (multi-module safe).
+  defp helper_insert_patch(def_node, helper_text) do
+    case Sourceror.get_range(def_node) do
+      %{end: end_pos} -> %{change: "\n\n" <> helper_text, range: %{start: end_pos, end: end_pos}}
+      _ -> nil
+    end
+  end
+
+  defp return_lhs([single]), do: Atom.to_string(single)
+  defp return_lhs(live_out), do: "{" <> Enum.map_join(live_out, ", ", &Atom.to_string/1) <> "}"
+
+  defp render_helper(helper_name, param_names, prefix, live_out) do
+    args = Enum.map_join(param_names, ", ", &Atom.to_string/1)
+    prefix_text = prefix |> Enum.map_join("\n", &Sourceror.to_string/1)
+    return_text = return_value(live_out)
+
+    "  defp #{helper_name}(#{args}) do\n" <>
+      indent(prefix_text <> "\n" <> return_text) <>
+      "\n  end"
+  end
+
+  defp return_value([single]), do: Atom.to_string(single)
+  defp return_value(live_out), do: "{" <> Enum.map_join(live_out, ", ", &Atom.to_string/1) <> "}"
+
+  defp indent(text) do
+    text
+    |> String.split("\n")
+    |> Enum.map_join("\n", fn
+      "" -> ""
+      line -> "    " <> line
+    end)
+  end
+
+  defp patch_for(%{} = range, change), do: %{change: change, range: range}
+  defp patch_for(_, _), do: nil
+
+  defp do_body(body_kw) when is_list(body_kw) do
+    body_kw
+    |> Enum.find_value(:skip, fn
+      {{:__block__, _, [:do]}, value} -> {:ok, value}
+      {:do, value} -> {:ok, value}
+      _ -> nil
+    end)
+  end
+
+  defp do_body(_), do: :skip
+
+  defp bare_param_names(params) do
+    params
+    |> Enum.reduce_while([], fn param, acc ->
+      case bare_var(param) do
+        {:ok, name} -> {:cont, [name | acc]}
+        :skip -> {:halt, :skip}
+      end
+    end)
+    |> case do
+      :skip -> :skip
+      names -> {:ok, Enum.reverse(names)}
+    end
+  end
+
+  defp strip_when({:when, _, [inner | _]}), do: inner
+  defp strip_when(other), do: other
+
+  defp patch_or_passthrough(source, []), do: source
+  defp patch_or_passthrough(source, patches), do: Sourceror.patch_string(source, patches)
+end
