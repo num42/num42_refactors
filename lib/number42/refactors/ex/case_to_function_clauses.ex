@@ -242,9 +242,11 @@ defmodule Number42.Refactors.Ex.CaseToFunctionClauses do
   defp unwrap_when(pat), do: {pat, nil}
 
   defp render_clauses(kind, fn_name, params, scrutinee_name, clauses, source) do
-    clauses
-    |> Enum.map(&render_clause(kind, fn_name, params, scrutinee_name, &1, source))
-    |> Enum.join("\n")
+    Enum.map_join(
+      clauses,
+      "\n",
+      &render_clause(kind, fn_name, params, scrutinee_name, &1, source)
+    )
   end
 
   defp render_clause(kind, fn_name, params, scrutinee_name, clause, source) do
