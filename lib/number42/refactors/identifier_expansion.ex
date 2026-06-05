@@ -127,6 +127,16 @@ defmodule Number42.Refactors.IdentifierExpansion do
   # call sites stay untouched.
   @name_families [{&__MODULE__.result_family?/1, "result"}]
 
+  # Well-known mathematical constants for `derive_constant_name/2`,
+  # matched within a float tolerance. Names are snake_case attribute
+  # stems (no leading `@`).
+  @well_known_floats [
+    {"pi", :math.pi()},
+    {"e", :math.exp(1)},
+    {"sqrt2", :math.sqrt(2)},
+    {"golden_ratio", (1 + :math.sqrt(5)) / 2}
+  ]
+
   @doc """
   Try to expand `short` against the given `candidates`.
 
@@ -723,6 +733,71 @@ defmodule Number42.Refactors.IdentifierExpansion do
   # `synth_*`/`pattern_family_*` logic that used to live in
   # `extract_case_to_helper` and `AstHelpers`.
   # -----------------------------------------------------------------
+
+  @doc """
+  Derive a name for a hoisted constant (a magic number or config
+  string lifted into a `@module_attribute`).
+
+  Resolution (first hit wins):
+
+  1. `opts[:key]` — when the literal sat at `key: value` (a config
+     keyword or a map entry), the key *is* the name (`base_url`,
+     `timeout`). `?`/`!` markers are stripped.
+  2. Well-known numeric values — `pi`, `e`, … matched within a small
+     float tolerance.
+  3. Type-based fallback — never fails: url-shaped string →
+     `default_url`, other string → `default_string`, integer →
+     `magic_number`, float → `default_float`, anything else →
+     `constant`.
+
+  Always returns a snake_case string (no leading `@`); the caller
+  renders the attribute. Pass `opts[:key]` for a meaningful name —
+  the fallback is deliberately generic.
+
+  ## Examples
+
+      iex> alias Number42.Refactors.IdentifierExpansion
+      iex> IdentifierExpansion.derive_constant_name("https://api.example.com", %{key: "base_url"})
+      "base_url"
+
+      iex> alias Number42.Refactors.IdentifierExpansion
+      iex> IdentifierExpansion.derive_constant_name(42, %{})
+      "magic_number"
+  """
+  @spec derive_constant_name(term(), %{optional(:key) => String.t() | atom() | nil}) ::
+          String.t()
+  def derive_constant_name(value, opts \\ %{}) do
+    case Map.get(opts, :key) do
+      nil -> derive_constant_name_from_value(value)
+      key -> strip_marker(key)
+    end
+  end
+
+  defp derive_constant_name_from_value(value) when is_float(value) do
+    case well_known_float(value) do
+      nil -> "default_float"
+      name -> name
+    end
+  end
+
+  defp derive_constant_name_from_value(value) when is_integer(value), do: "magic_number"
+
+  defp derive_constant_name_from_value(value) when is_binary(value) do
+    if url_shaped?(value), do: "default_url", else: "default_string"
+  end
+
+  defp derive_constant_name_from_value(_value), do: "constant"
+
+  # Match a float against well-known mathematical constants within a
+  # tolerance — literal `3.14159…` rarely equals the BEAM's full-
+  # precision constant bit-for-bit.
+  defp well_known_float(value) do
+    Enum.find_value(@well_known_floats, fn {name, constant} ->
+      if abs(value - constant) < 1.0e-9, do: name
+    end)
+  end
+
+  defp url_shaped?(str), do: String.starts_with?(str, ["http://", "https://", "ftp://", "ws://"])
 
   @doc """
   Synthesize a helper-function name from an operation and its

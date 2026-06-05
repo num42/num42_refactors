@@ -634,6 +634,66 @@ defmodule Number42.Refactors.IdentifierExpansionTest do
   end
 
   # -------------------------------------------------------------------
+  # derive_constant_name/2 — names for hoisted constants
+  # -------------------------------------------------------------------
+
+  describe "derive_constant_name/2 — key-derived (config strings)" do
+    test "uses opts[:key] as the constant name" do
+      assert "base_url" =
+               IdentifierExpansion.derive_constant_name("https://api.example.com", %{
+                 key: "base_url"
+               })
+    end
+
+    test "key as atom is accepted" do
+      assert "timeout" =
+               IdentifierExpansion.derive_constant_name(5000, %{key: :timeout})
+    end
+
+    test "strips ?/! marker off the key" do
+      assert "enabled" =
+               IdentifierExpansion.derive_constant_name(true, %{key: "enabled?"})
+    end
+  end
+
+  describe "derive_constant_name/2 — well-known math values" do
+    test "pi" do
+      assert "pi" = IdentifierExpansion.derive_constant_name(3.141592653589793, %{})
+    end
+
+    test "e (Euler)" do
+      assert "e" = IdentifierExpansion.derive_constant_name(2.718281828459045, %{})
+    end
+  end
+
+  describe "derive_constant_name/2 — type-based fallback" do
+    test "url-shaped string → default_url" do
+      assert "default_url" =
+               IdentifierExpansion.derive_constant_name("https://example.com", %{})
+    end
+
+    test "plain string → default_string" do
+      assert "default_string" =
+               IdentifierExpansion.derive_constant_name("hello", %{})
+    end
+
+    test "integer → magic_number" do
+      assert "magic_number" = IdentifierExpansion.derive_constant_name(42, %{})
+    end
+
+    test "float → default_float" do
+      assert "default_float" = IdentifierExpansion.derive_constant_name(0.5, %{})
+    end
+  end
+
+  describe "derive_constant_name/2 — key beats well-known value" do
+    test "explicit key wins over pi-recognition" do
+      assert "ratio" =
+               IdentifierExpansion.derive_constant_name(3.141592653589793, %{key: "ratio"})
+    end
+  end
+
+  # -------------------------------------------------------------------
   # Helpers
   # -------------------------------------------------------------------
 
