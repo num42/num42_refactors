@@ -252,8 +252,7 @@ defmodule Number42.Refactors.Ex.InlineSingleCallerPrivate do
   defp uses(body_exprs, name, arity) do
     {direct_calls, capture?, apply?} =
       body_exprs
-      |> Enum.reject(&own_definition?(&1, name, arity))
-      |> Enum.reject(&module_attribute?/1)
+      |> Enum.reject(&(own_definition?(&1, name, arity) or module_attribute?(&1)))
       |> Enum.reduce({[], false, false}, fn expr, acc -> scan_uses(expr, name, arity, acc) end)
 
     cond do
