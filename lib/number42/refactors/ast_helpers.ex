@@ -1868,6 +1868,224 @@ defmodule Number42.Refactors.AstHelpers do
   defp strip_when_head({:when, _, [inner | _]}), do: inner
   defp strip_when_head(other), do: other
 
+  # ── Purity / totality (Layer 2, issue #34) ───────────────────────
+  #
+  # "Pure" here is the strong form the refactor family needs before it
+  # may move, duplicate, or drop an expression: **total**
+  # (always returns), **exception-free** (never raises), and **eager**
+  # (no lazy source whose traversal is deferred). It is NOT merely
+  # "no visible side effects".
+  #
+  # The predicate is conservative: anything not provably pure is
+  # reported impure. A false "impure" only costs a missed optimisation;
+  # a false "pure" would let a refactor hoist code that raises, or fuse
+  # a lazy traversal, changing observable behaviour.
+
+  # Binary/unary operators that are total and exception-free for all
+  # terms. Division (`/`) and integer-division/remainder (`div`/`rem`)
+  # are deliberately absent — they raise on a zero divisor.
+  @pure_operators MapSet.new([
+                    :+,
+                    :-,
+                    :*,
+                    :==,
+                    :!=,
+                    :===,
+                    :!==,
+                    :<,
+                    :>,
+                    :<=,
+                    :>=,
+                    :and,
+                    :or,
+                    :not,
+                    :&&,
+                    :||,
+                    :!,
+                    :++,
+                    :--,
+                    :<>,
+                    :in,
+                    :|>,
+                    :=,
+                    :|
+                  ])
+
+  # Special forms / constructs that are themselves pure containers —
+  # purity then depends on their children (checked by the walk).
+  @pure_constructs MapSet.new([
+                     :{},
+                     :%{},
+                     :%,
+                     :__block__,
+                     :__aliases__,
+                     :->,
+                     :fn,
+                     :case,
+                     :cond,
+                     :if,
+                     :unless,
+                     :with,
+                     :for,
+                     :when,
+                     :<-,
+                     :&,
+                     :"::",
+                     :.
+                   ])
+
+  # Remote modules whose every public function we treat as pure for
+  # this analysis — total, exception-free, eager. `Stream` is pointedly
+  # excluded (lazy); `Map`/`List`/`Keyword`/`String`/`Integer` have
+  # raising members and are gated per-function via `@impure_remote`.
+  @pure_modules MapSet.new([Kernel, Enum, Tuple, Function, Access])
+
+  # Functions that raise, defer, or otherwise break totality/eagerness
+  # even though their module is otherwise pure-ish. `{Module, name}`.
+  @impure_remote MapSet.new([
+                   {Kernel, :raise},
+                   {Kernel, :throw},
+                   {Kernel, :exit},
+                   {Kernel, :send},
+                   {Kernel, :spawn},
+                   {Kernel, :apply},
+                   {Kernel, :hd},
+                   {Kernel, :tl},
+                   {Kernel, :elem},
+                   {Enum, :fetch!},
+                   {Enum, :at},
+                   {Enum, :random},
+                   {Enum, :shuffle}
+                 ])
+
+  # Local special forms / macros that introduce laziness or effects and
+  # cannot be treated as pure containers.
+  @impure_locals MapSet.new([:raise, :throw, :exit, :send, :spawn, :receive, :apply])
+
+  @doc """
+  Whether `ast` is **pure** in the strong sense the move/inline/drop
+  refactors require: total, exception-free, and eager (no lazy source).
+
+  This is intentionally stricter than "no visible side effects":
+
+    * `String.to_integer("x")` raises → impure.
+    * any `Stream.*` source is traversed lazily → impure.
+    * any bang function (`Map.fetch!/2`, `File.read!/1`) can raise → impure.
+    * division (`a / b`, `div`, `rem`) raises on a zero divisor → impure.
+
+  The check is **conservative**: an expression is pure only if every
+  node is provably pure. Unknown remote calls, captures of unknown
+  functions, and anything not on the pure allow-list are reported
+  impure. A literal, variable, or pure-operator tree over pure leaves
+  is pure.
+
+      iex> #{__MODULE__}.pure?(Sourceror.parse_string!("a + b * 2"))
+      true
+
+      iex> #{__MODULE__}.pure?(Sourceror.parse_string!("String.to_integer(s)"))
+      false
+  """
+  @spec pure?(term()) :: boolean()
+  def pure?(ast), do: pure_node?(ast)
+
+  # Literals and bare leaves.
+  defp pure_node?(lit) when is_atom(lit) or is_integer(lit) or is_float(lit) or is_binary(lit),
+    do: true
+
+  defp pure_node?(list) when is_list(list), do: Enum.all?(list, &pure_node?/1)
+
+  defp pure_node?({a, b}), do: pure_node?(a) and pure_node?(b)
+
+  # Sourceror-wrapped literal leaf.
+  defp pure_node?({:__block__, _, args}) when is_list(args), do: Enum.all?(args, &pure_node?/1)
+
+  # Bare variable: `{name, meta, ctx}` with atom context.
+  defp pure_node?({name, _, ctx}) when is_atom(name) and is_atom(ctx), do: true
+
+  # Remote call `Mod.fun(args)`.
+  defp pure_node?({{:., _, [mod_ast, fun]}, _, args}) when is_atom(fun) and is_list(args) do
+    case alias_to_module(mod_ast) do
+      {:ok, module} -> pure_remote_call?(module, fun, args)
+      :error -> false
+    end
+  end
+
+  # Anonymous-function / capture dot-call `f.(args)` — target is opaque.
+  defp pure_node?({{:., _, [_callee]}, _, _args}), do: false
+
+  # Operators and pure special-form constructs: pure iff every child is.
+  defp pure_node?({form, _, args}) when is_atom(form) and is_list(args) do
+    cond do
+      MapSet.member?(@impure_locals, form) -> false
+      MapSet.member?(@pure_operators, form) -> Enum.all?(args, &pure_node?/1)
+      MapSet.member?(@pure_constructs, form) -> Enum.all?(args, &pure_node?/1)
+      # Any other operator (e.g. `/`, `div` as `:div` op shape) may raise.
+      Macro.operator?(form, length(args)) -> false
+      # A local call to a non-special-form name: opaque body, treat as impure.
+      local_call_candidate?(form) -> false
+      # Remaining special-form shells (`:do`/`:else` keywords, etc.) —
+      # purity is decided by their children.
+      true -> Enum.all?(args, &pure_node?/1)
+    end
+  end
+
+  # Two-tuple / three-tuple structural nodes not matched above.
+  defp pure_node?({form, _, ctx}) when is_atom(form) and is_atom(ctx), do: true
+  defp pure_node?(_), do: false
+
+  defp pure_remote_call?(module, fun, args) do
+    cond do
+      MapSet.member?(@impure_remote, {module, fun}) -> false
+      bang_function?(fun) -> false
+      module == Stream -> false
+      lazy_or_raising_arith?(module, fun) -> false
+      MapSet.member?(@pure_modules, module) -> Enum.all?(args, &pure_node?/1)
+      pure_safe_subset?(module, fun) -> Enum.all?(args, &pure_node?/1)
+      true -> false
+    end
+  end
+
+  # `div`/`rem` (and `Integer.mod`/`floor_div`) raise on a zero divisor.
+  defp lazy_or_raising_arith?(Kernel, fun) when fun in [:div, :rem], do: true
+  defp lazy_or_raising_arith?(Integer, fun) when fun in [:mod, :floor_div], do: true
+  defp lazy_or_raising_arith?(_, _), do: false
+
+  # Per-function allow-list for modules with mixed purity. Only the
+  # total, exception-free, eager members are listed.
+  @pure_safe MapSet.new([
+               {Map, :get},
+               {Map, :put},
+               {Map, :merge},
+               {Map, :keys},
+               {Map, :values},
+               {Map, :delete},
+               {Map, :has_key?},
+               {List, :first},
+               {List, :last},
+               {List, :flatten},
+               {List, :wrap},
+               {Keyword, :get},
+               {Keyword, :put},
+               {Keyword, :keys},
+               {Keyword, :values},
+               {Keyword, :has_key?},
+               {String, :length},
+               {String, :downcase},
+               {String, :upcase},
+               {String, :trim},
+               {String, :split},
+               {String, :replace},
+               {String, :contains?},
+               {String, :starts_with?},
+               {String, :ends_with?},
+               {Integer, :to_string},
+               {Atom, :to_string}
+             ])
+
+  defp pure_safe_subset?(module, fun), do: MapSet.member?(@pure_safe, {module, fun})
+
+  defp bang_function?(fun) when is_atom(fun), do: String.ends_with?(Atom.to_string(fun), "!")
+
   defp subsequence?([], _haystack), do: true
   defp subsequence?(_chars, ""), do: false
 

@@ -1319,4 +1319,78 @@ defmodule Number42.Refactors.AstHelpersTest do
       refute AstHelpers.dynamic_dispatch?([{:foo, 1}, {:bar, 2}])
     end
   end
+
+  describe "pure?/1 — total + exception-free + eager" do
+    defp pure?(src), do: src |> Sourceror.parse_string!() |> AstHelpers.pure?()
+
+    test "literals, variables and constructors are pure" do
+      assert pure?("42")
+      assert pure?(":atom")
+      assert pure?(~s|"hi"|)
+      assert pure?("x")
+      assert pure?("[1, 2, x]")
+      assert pure?("{:ok, x}")
+      assert pure?("%{a: 1, b: x}")
+    end
+
+    test "arithmetic, comparison and boolean operators over pure leaves are pure" do
+      assert pure?("a + b * 2")
+      assert pure?("a == b and c > d")
+      assert pure?("not flag || other")
+    end
+
+    test "eager Enum/Map/String over pure functions are pure" do
+      assert pure?("Enum.map(list, fn x -> x + 1 end)")
+      assert pure?("Map.get(m, :key)")
+      assert pure?("String.downcase(s)")
+      assert pure?("x |> Enum.map(fn y -> y * 2 end) |> Enum.sum()")
+    end
+
+    test "raising String conversions are impure" do
+      refute pure?("String.to_integer(s)")
+      refute pure?("String.to_atom(s)")
+    end
+
+    test "bang functions are impure" do
+      refute pure?("Map.fetch!(m, :k)")
+      refute pure?("File.read!(path)")
+    end
+
+    test "Stream sources are impure (lazy)" do
+      refute pure?("Stream.map(list, fn x -> x end)")
+    end
+
+    test "division and integer division/remainder are impure (zero divisor raises)" do
+      refute pure?("a / b")
+      refute pure?("div(a, b)")
+      refute pure?("rem(a, b)")
+    end
+
+    test "effects and dynamic dispatch are impure" do
+      refute pure?(~s|raise "boom"|)
+      refute pure?("send(pid, :msg)")
+      refute pure?("apply(mod, :f, [])")
+      refute pure?("IO.puts(x)")
+    end
+
+    test "partial Kernel functions are impure" do
+      refute pure?("hd(list)")
+      refute pure?("elem(tuple, 0)")
+      refute pure?("Enum.at(list, 3)")
+    end
+
+    test "unknown remote and local calls are conservatively impure" do
+      refute pure?("SomeMod.unknown_fn(x)")
+      refute pure?("unknown_local(x)")
+    end
+
+    test "calls through an anonymous function value are impure (opaque target)" do
+      refute pure?("fun.(x)")
+    end
+
+    test "map/struct dot-access is impure (KeyError on a missing key)" do
+      refute pure?("m.field")
+      refute pure?("Enum.filter(list, & &1.active)")
+    end
+  end
 end
