@@ -2086,6 +2086,79 @@ defmodule Number42.Refactors.AstHelpers do
 
   defp bang_function?(fun) when is_atom(fun), do: String.ends_with?(Atom.to_string(fun), "!")
 
+  # ── Position-sensitive liveness (Layer 3, issue #34) ─────────────
+  #
+  # `free_vars/2` and `collect_bound_vars/1` are set-based and
+  # position-less: they answer "which outer names does this block
+  # reference", not "is `x` still read *after* point P". The refactor
+  # family's move/extract/branch-narrowing passes need ordered-sequence
+  # liveness over `body_to_exprs/1`:
+  #
+  #   * is the value bound at statement P read by any *later* statement?
+  #   * which branches of a `case`/`cond` actually read `x`?
+  #
+  # A variable is "read" at an expression when it appears free there —
+  # used but not bound within that same expression (so a shadowing
+  # re-bind inside the expression doesn't count as a read of the outer
+  # value).
+
+  @doc """
+  Whether `var` is read by any expression located *after* `index` in
+  the ordered statement list `exprs` (as produced by `body_to_exprs/1`).
+
+  "Read" means `var` appears **free** in a later statement — used but
+  not bound within that statement. The statement at `index` itself is
+  not considered (the question is whether its result is still needed
+  downstream). Indices out of range simply yield `false`.
+
+  Use this to decide whether the value produced at a statement is live:
+  a `false` result means the binding is dead from `index` onward and
+  may be dropped or moved.
+  """
+  @spec read_after?(atom(), [term()], integer()) :: boolean()
+  def read_after?(var, exprs, index) when is_atom(var) and is_list(exprs) do
+    exprs
+    |> Enum.drop(index + 1)
+    |> Enum.any?(&MapSet.member?(free_in_expr(&1), var))
+  end
+
+  @doc """
+  Return the zero-based indices of the `branches` in which `var` is
+  read (appears free).
+
+  `branches` is a list of branch bodies — e.g. the right-hand sides of
+  `case`/`cond` clauses, or the `do`/`else` arms of an `if`. The result
+  is the sorted list of branch indices that read `var`; its length is
+  how many branches depend on `var`.
+
+  A caller wanting "live in exactly one branch" checks
+  `match?([_single], branches_reading(var, branches))`.
+  """
+  @spec branches_reading(atom(), [term()]) :: [non_neg_integer()]
+  def branches_reading(var, branches) when is_atom(var) and is_list(branches) do
+    branches
+    |> Enum.with_index()
+    |> Enum.filter(fn {branch, _i} -> MapSet.member?(free_in_expr(branch), var) end)
+    |> Enum.map(fn {_branch, i} -> i end)
+  end
+
+  @doc """
+  Whether `var` is read in **exactly one** of `branches`.
+
+  Convenience over `branches_reading/2` for the common
+  branch-narrowing predicate: a value used in a single arm can be sunk
+  into that arm.
+  """
+  @spec live_in_single_branch?(atom(), [term()]) :: boolean()
+  def live_in_single_branch?(var, branches),
+    do: match?([_one], branches_reading(var, branches))
+
+  # Free variables of a single expression: used minus bound-within.
+  # Reuses the existing set-based primitives; the ordering lives in the
+  # callers above, not here.
+  defp free_in_expr(expr),
+    do: MapSet.difference(used_var_names(expr), collect_bound_vars(expr))
+
   defp subsequence?([], _haystack), do: true
   defp subsequence?(_chars, ""), do: false
 

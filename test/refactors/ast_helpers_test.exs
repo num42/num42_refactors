@@ -1393,4 +1393,89 @@ defmodule Number42.Refactors.AstHelpersTest do
       refute pure?("Enum.filter(list, & &1.active)")
     end
   end
+
+  describe "read_after?/3 — ordered liveness over a statement list" do
+    defp stmts(src), do: src |> Sourceror.parse_string!() |> AstHelpers.body_to_exprs()
+
+    test "a value read by a later statement is live after its binding" do
+      e = stmts("(\n  x = compute()\n  y = 1\n  use(x)\n)")
+      assert AstHelpers.read_after?(:x, e, 0)
+    end
+
+    test "a value never read again is dead after its binding" do
+      e = stmts("(\n  x = compute()\n  y = 1\n  use(x)\n)")
+      refute AstHelpers.read_after?(:y, e, 1)
+    end
+
+    test "the statement at the index itself is not counted as a later read" do
+      e = stmts("(\n  x = compute()\n  y = 1\n  use(x)\n)")
+      refute AstHelpers.read_after?(:x, e, 2)
+    end
+
+    test "a later read counts even if the variable is rebound first" do
+      e = stmts("(\n  a = 1\n  a = 2\n  b = a\n)")
+      assert AstHelpers.read_after?(:a, e, 0)
+    end
+
+    test "an out-of-range index yields false" do
+      e = stmts("(\n  x = 1\n  use(x)\n)")
+      refute AstHelpers.read_after?(:x, e, 99)
+    end
+  end
+
+  describe "branches_reading/2 and live_in_single_branch?/2" do
+    defp branch_bodies(src) do
+      {:case, _, [_scrutinee, [{_do, clauses}]]} = Sourceror.parse_string!(src)
+      Enum.map(clauses, fn {:->, _, [_head, body]} -> body end)
+    end
+
+    test "reports the indices of branches that read the variable" do
+      branches =
+        branch_bodies("""
+        case val do
+          :a -> use(x)
+          :b -> other()
+          _ -> also(x)
+        end
+        """)
+
+      assert AstHelpers.branches_reading(:x, branches) == [0, 2]
+    end
+
+    test "a variable bound inside a branch is not read there" do
+      branches =
+        branch_bodies("""
+        case val do
+          :a -> (z = 1; use(z))
+          :b -> use(z)
+        end
+        """)
+
+      assert AstHelpers.branches_reading(:z, branches) == [1]
+    end
+
+    test "live_in_single_branch? is true for exactly one reading branch" do
+      branches =
+        branch_bodies("""
+        case val do
+          :a -> use(x)
+          :b -> other()
+        end
+        """)
+
+      assert AstHelpers.live_in_single_branch?(:x, branches)
+    end
+
+    test "live_in_single_branch? is false when two branches read the variable" do
+      branches =
+        branch_bodies("""
+        case val do
+          :a -> use(y)
+          :b -> also(y)
+        end
+        """)
+
+      refute AstHelpers.live_in_single_branch?(:y, branches)
+    end
+  end
 end
