@@ -143,24 +143,21 @@ defmodule Number42.Refactors.Ex.ConsolidateParallelClauseFunctions do
          {:ok, helper_name} <- synth_helper_name(name_a, name_b, existing_names),
          param_names = bare_arg_names(args_a),
          {:ok, pred_name} <- fresh_pred_name(param_names, body_a) do
-      emit(a, b, body_a, body_b, path, args_a, helper_name, pred_name, mod_node)
+      emit({a, b}, {body_a, body_b}, path, args_a, {helper_name, pred_name}, mod_node)
     else
       _ -> nil
     end
   end
 
-  defp emit(a, b, body_a, body_b, path, args_a, helper_name, pred_name, mod_node) do
+  defp emit({a, b}, {body_a, body_b}, path, args_a, {helper_name, pred_name}, mod_node) do
     helper_body = replace_at_path(body_a, path, {pred_name, [], nil})
     helper_args = args_a ++ [{pred_name, [], nil}]
-
     arg_refs = bare_arg_names(args_a) |> Enum.map(&{&1, [], nil})
-    cap_a = at_path(body_a, path)
-    cap_b = at_path(body_b, path)
 
     [
       helper_insert_patch(mod_node, helper_name, helper_args, helper_body),
-      wrapper_patch(a, helper_name, arg_refs, cap_a),
-      wrapper_patch(b, helper_name, arg_refs, cap_b)
+      wrapper_patch(a, helper_name, arg_refs, at_path(body_a, path)),
+      wrapper_patch(b, helper_name, arg_refs, at_path(body_b, path))
     ]
   end
 
