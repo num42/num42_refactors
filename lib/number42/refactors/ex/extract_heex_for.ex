@@ -225,26 +225,28 @@ defmodule Number42.Refactors.Ex.ExtractHeexFor do
   end
 
   defp assign_local_scan_or_keep({:ok, ast}, assigns, locals, pattern_vars) do
-    Macro.prewalk(ast, {assigns, locals}, fn node, {a, l} ->
-      case node do
-        {:@, _, [{name, _, ctx}]} when is_atom(name) and is_atom(ctx) ->
-          {node, {MapSet.put(a, name), l}}
-
-        {name, _, ctx} when is_atom(name) and is_atom(ctx) ->
-          cond do
-            String.starts_with?(Atom.to_string(name), "_") -> {node, {a, l}}
-            MapSet.member?(pattern_vars, name) -> {node, {a, MapSet.put(l, name)}}
-            true -> {node, {a, l}}
-          end
-
-        _ ->
-          {node, {a, l}}
-      end
+    Macro.prewalk(ast, {assigns, locals}, fn node, acc ->
+      {node, classify_scan_node(node, acc, pattern_vars)}
     end)
     |> elem(1)
   end
 
   defp assign_local_scan_or_keep(_, assigns, locals, _pattern_vars), do: {assigns, locals}
+
+  defp classify_scan_node({:@, _, [{name, _, ctx}]}, {a, l}, _pattern_vars)
+       when is_atom(name) and is_atom(ctx),
+       do: {MapSet.put(a, name), l}
+
+  defp classify_scan_node({name, _, ctx}, {a, l}, pattern_vars)
+       when is_atom(name) and is_atom(ctx) do
+    cond do
+      String.starts_with?(Atom.to_string(name), "_") -> {a, l}
+      MapSet.member?(pattern_vars, name) -> {a, MapSet.put(l, name)}
+      true -> {a, l}
+    end
+  end
+
+  defp classify_scan_node(_node, acc, _pattern_vars), do: acc
 
   defp assign_unique_names(blocks, existing_names) do
     # Two ways the synthesized component name can collide:
@@ -283,16 +285,23 @@ defmodule Number42.Refactors.Ex.ExtractHeexFor do
       |> MapSet.new()
 
     named
-    |> Enum.flat_map(fn block ->
-      if MapSet.member?(intra_pass_dupes, block.name) do
+    |> Enum.flat_map(&keep_unless_colliding(&1, intra_pass_dupes, existing_index))
+  end
+
+  defp keep_unless_colliding(block, intra_pass_dupes, existing_index) do
+    cond do
+      MapSet.member?(intra_pass_dupes, block.name) ->
         []
-      else
-        case resolve_collision(Atom.to_string(block.name), existing_index, on_collision: :skip) do
-          :skip -> []
-          {:ok, _name} -> [block]
-        end
-      end
-    end)
+
+      match?(
+        :skip,
+        resolve_collision(Atom.to_string(block.name), existing_index, on_collision: :skip)
+      ) ->
+        []
+
+      true ->
+        [block]
+    end
   end
 
   defp base_name(block) do
@@ -474,53 +483,64 @@ defmodule Number42.Refactors.Ex.ExtractHeexFor do
     indexed
     |> Enum.flat_map(fn
       {{:start_expr, ~c"=", code, meta}, idx} ->
-        case parse_for_header(to_string(code)) do
-          {:ok, pattern_ast, coll_ast} ->
-            case find_matching_end(tokens, idx) do
-              {:ok, end_idx} ->
-                inner = tokens |> Enum.slice((idx + 1)..(end_idx - 1)//1)
-
-                start_meta = meta
-                {:end_expr, _, end_code, end_meta} = tokens |> Enum.at(end_idx)
-
-                with true <- simple_body?(inner),
-                     true <- body_long_enough?(start_meta, end_meta),
-                     {locals, assigns} <- analyze_free_vars(inner, pattern_ast),
-                     :ok <- check_collisions(locals, assigns) do
-                  [
-                    %{
-                      assigns: assigns,
-                      body: body,
-                      body_preview: preview(body, idx, end_idx, tokens),
-                      coll: coll_ast,
-                      enclosing_fn: enclosing_fn,
-                      end_code_len: length(end_code),
-                      end_column: end_meta.column,
-                      end_line: end_meta.line,
-                      inner_tokens: inner,
-                      locals: locals,
-                      pattern: pattern_ast,
-                      sigil_node: sigil_node,
-                      source_line: file_line_offset + start_meta.line - 1,
-                      start_column: start_meta.column,
-                      start_line: start_meta.line
-                    }
-                  ]
-                else
-                  _ -> []
-                end
-
-              :error ->
-                []
-            end
-
-          :error ->
-            []
-        end
+        block_for_header(
+          parse_for_header(to_string(code)),
+          tokens,
+          idx,
+          meta,
+          body,
+          sigil_node,
+          file_line_offset,
+          enclosing_fn
+        )
 
       _ ->
         []
     end)
+  end
+
+  defp block_for_header(:error, _tokens, _idx, _meta, _body, _sigil_node, _offset, _enclosing_fn),
+    do: []
+
+  defp block_for_header(
+         {:ok, pattern_ast, coll_ast},
+         tokens,
+         idx,
+         meta,
+         body,
+         sigil_node,
+         file_line_offset,
+         enclosing_fn
+       ) do
+    with {:ok, end_idx} <- find_matching_end(tokens, idx),
+         inner = tokens |> Enum.slice((idx + 1)..(end_idx - 1)//1),
+         {:end_expr, _, end_code, end_meta} = tokens |> Enum.at(end_idx),
+         true <- simple_body?(inner),
+         true <- body_long_enough?(meta, end_meta),
+         {locals, assigns} <- analyze_free_vars(inner, pattern_ast),
+         :ok <- check_collisions(locals, assigns) do
+      [
+        %{
+          assigns: assigns,
+          body: body,
+          body_preview: preview(body, idx, end_idx, tokens),
+          coll: coll_ast,
+          enclosing_fn: enclosing_fn,
+          end_code_len: length(end_code),
+          end_column: end_meta.column,
+          end_line: end_meta.line,
+          inner_tokens: inner,
+          locals: locals,
+          pattern: pattern_ast,
+          sigil_node: sigil_node,
+          source_line: file_line_offset + meta.line - 1,
+          start_column: meta.column,
+          start_line: meta.line
+        }
+      ]
+    else
+      _ -> []
+    end
   end
 
   defp find_matching_end(tokens, start_idx) do
@@ -550,16 +570,7 @@ defmodule Number42.Refactors.Ex.ExtractHeexFor do
 
         names =
           exprs
-          |> Enum.flat_map(fn
-            {def_kind, _, [head | _]} when def_kind?(def_kind) ->
-              case extract_def_name(head) do
-                nil -> []
-                name -> [name]
-              end
-
-            _ ->
-              []
-          end)
+          |> Enum.flat_map(&def_name_or_empty/1)
           |> MapSet.new()
 
         {node, names}
@@ -568,6 +579,15 @@ defmodule Number42.Refactors.Ex.ExtractHeexFor do
         nil
     end
   end
+
+  defp def_name_or_empty({def_kind, _, [head | _]}) when def_kind?(def_kind) do
+    case extract_def_name(head) do
+      nil -> []
+      name -> [name]
+    end
+  end
+
+  defp def_name_or_empty(_), do: []
 
   defp find_module_end_line(source) do
     source
@@ -655,30 +675,30 @@ defmodule Number42.Refactors.Ex.ExtractHeexFor do
 
     case code do
       "for " <> rest ->
-        wrapped = "for " <> rest <> " do :ok end"
-
-        case Code.string_to_quoted(wrapped) do
-          {:ok, {:for, _, args}} ->
-            generators =
-              args
-              |> Enum.filter(fn
-                {:<-, _, _} -> true
-                _ -> false
-              end)
-
-            case generators do
-              [{:<-, _, [pattern, coll]}] -> {:ok, pattern, coll}
-              _ -> :error
-            end
-
-          _ ->
-            :error
-        end
+        ("for " <> rest <> " do :ok end")
+        |> Code.string_to_quoted()
+        |> single_generator()
 
       _ ->
         :error
     end
   end
+
+  defp single_generator({:ok, {:for, _, args}}) do
+    generators =
+      args
+      |> Enum.filter(fn
+        {:<-, _, _} -> true
+        _ -> false
+      end)
+
+    case generators do
+      [{:<-, _, [pattern, coll]}] -> {:ok, pattern, coll}
+      _ -> :error
+    end
+  end
+
+  defp single_generator(_), do: :error
 
   defp preview(_body, start_idx, end_idx, tokens) do
     tokens

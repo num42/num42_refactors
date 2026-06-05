@@ -199,24 +199,25 @@ defmodule Number42.Refactors.AstDiff do
 
   defp same_outer_shape?([first | rest]) do
     cond do
-      is_tuple(first) and tuple_size(first) == 3 ->
-        rest |> Enum.all?(fn n -> tuple3?(n) and same_3tuple_shape?(first, n) end)
-
-      is_tuple(first) and tuple_size(first) == 2 ->
-        rest |> Enum.all?(fn n -> is_tuple(n) and tuple_size(n) == 2 end)
-
-      is_tuple(first) ->
-        size = tuple_size(first)
-        rest |> Enum.all?(fn n -> is_tuple(n) and tuple_size(n) == size end)
-
-      is_list(first) ->
-        len = length(first)
-        rest |> Enum.all?(fn n -> is_list(n) and length(n) == len end)
-
-      true ->
-        false
+      is_tuple(first) and tuple_size(first) == 3 -> same_3tuple_shape_all?(first, rest)
+      is_tuple(first) and tuple_size(first) == 2 -> all_2tuples?(rest)
+      is_tuple(first) -> all_tuples_of_size?(rest, tuple_size(first))
+      is_list(first) -> all_lists_of_length?(rest, length(first))
+      true -> false
     end
   end
+
+  defp same_3tuple_shape_all?(first, rest),
+    do: rest |> Enum.all?(fn n -> tuple3?(n) and same_3tuple_shape?(first, n) end)
+
+  defp all_2tuples?(rest),
+    do: rest |> Enum.all?(fn n -> is_tuple(n) and tuple_size(n) == 2 end)
+
+  defp all_tuples_of_size?(rest, size),
+    do: rest |> Enum.all?(fn n -> is_tuple(n) and tuple_size(n) == size end)
+
+  defp all_lists_of_length?(rest, len),
+    do: rest |> Enum.all?(fn n -> is_list(n) and length(n) == len end)
 
   defp strip(ast) do
     Macro.prewalk(ast, fn

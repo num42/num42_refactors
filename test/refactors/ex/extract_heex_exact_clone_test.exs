@@ -8,6 +8,7 @@ defmodule Number42.Refactors.Ex.ExtractHeexExactCloneTest do
 
   describe "metadata" do
     test "implements Refactor behaviour" do
+      Code.ensure_loaded!(@subject)
       assert function_exported?(@subject, :description, 0)
       assert function_exported?(@subject, :transform, 2)
       assert is_binary(@subject.description())

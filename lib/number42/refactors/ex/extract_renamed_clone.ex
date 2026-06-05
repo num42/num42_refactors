@@ -258,20 +258,23 @@ defmodule Number42.Refactors.Ex.ExtractRenamedClone do
         nil
     end)
     |> case do
-      {:ok, body_exprs} ->
-        body_exprs
-        |> Enum.filter(&def_clause?/1)
-        |> Enum.map(fn c ->
-          case def_name_arity_or_skip(c) do
-            {_kind, name, arity} -> {name, arity}
-            :skip -> nil
-          end
-        end)
-        |> Enum.reject(&is_nil/1)
-        |> MapSet.new()
+      {:ok, body_exprs} -> function_keys_from_exprs(body_exprs)
+      _ -> MapSet.new()
+    end
+  end
 
-      _ ->
-        MapSet.new()
+  defp function_keys_from_exprs(body_exprs) do
+    body_exprs
+    |> Enum.filter(&def_clause?/1)
+    |> Enum.map(&function_key_or_nil/1)
+    |> Enum.reject(&is_nil/1)
+    |> MapSet.new()
+  end
+
+  defp function_key_or_nil(clause) do
+    case def_name_arity_or_skip(clause) do
+      {_kind, name, arity} -> {name, arity}
+      :skip -> nil
     end
   end
 
@@ -441,37 +444,45 @@ defmodule Number42.Refactors.Ex.ExtractRenamedClone do
     if length(names) == 1 do
       []
     else
-      sorted = entries |> Enum.sort_by(&Module.split(&1.module))
-
-      case decide_target(sorted) do
-        :skip ->
-          []
-
-        {:ok, target_module} ->
-          # Skip if the target module is one of the input modules —
-          # that would mean we already extracted earlier.
-          if sorted |> Enum.any?(&(&1.module == target_module)) do
-            []
-          else
-            winner = hd(sorted)
-            shared_name = winner.name
-
-            sorted
-            |> Enum.map(fn entry ->
-              {entry.module,
-               %{
-                 args: entry.args,
-                 arity: entry.arity,
-                 kind: entry.kind,
-                 name: entry.name,
-                 shared_name: shared_name,
-                 target: target_module,
-                 winner_clauses: winner.clauses
-               }}
-            end)
-          end
-      end
+      plan_for_renamed_group(entries)
     end
+  end
+
+  defp plan_for_renamed_group(entries) do
+    sorted = entries |> Enum.sort_by(&Module.split(&1.module))
+
+    case decide_target(sorted) do
+      :skip ->
+        []
+
+      {:ok, target_module} ->
+        # Skip if the target module is one of the input modules —
+        # that would mean we already extracted earlier.
+        if sorted |> Enum.any?(&(&1.module == target_module)) do
+          []
+        else
+          entries_for_target(sorted, target_module)
+        end
+    end
+  end
+
+  defp entries_for_target(sorted, target_module) do
+    winner = hd(sorted)
+    shared_name = winner.name
+
+    sorted
+    |> Enum.map(fn entry ->
+      {entry.module,
+       %{
+         args: entry.args,
+         arity: entry.arity,
+         kind: entry.kind,
+         name: entry.name,
+         shared_name: shared_name,
+         target: target_module,
+         winner_clauses: winner.clauses
+       }}
+    end)
   end
 
   defp prepared_for_paths(nil, _opts), do: {:ok, %{}}

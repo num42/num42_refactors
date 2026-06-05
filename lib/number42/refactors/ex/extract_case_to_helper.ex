@@ -237,13 +237,7 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelper do
             {MapSet.union(acc, rhs_uses), new_bound}
 
           kw when is_list(kw) ->
-            kw_uses =
-              kw
-              |> Enum.reduce(MapSet.new(), fn {_k, v}, kacc ->
-                MapSet.union(kacc, collect_outer_uses(v, sc))
-              end)
-
-            {MapSet.union(acc, kw_uses), sc}
+            {MapSet.union(acc, collect_keyword_uses(kw, sc)), sc}
 
           other ->
             {MapSet.union(acc, collect_outer_uses(other, sc)), sc}
@@ -251,6 +245,13 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelper do
       end)
 
     uses
+  end
+
+  defp collect_keyword_uses(kw, sc) do
+    kw
+    |> Enum.reduce(MapSet.new(), fn {_k, v}, kacc ->
+      MapSet.union(kacc, collect_outer_uses(v, sc))
+    end)
   end
 
   defp collect_defp_index(body_exprs) do
@@ -324,16 +325,7 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelper do
 
       {:fn, _, clauses} when is_list(clauses) ->
         clauses
-        |> Enum.map(fn
-          {:->, _, [args, body]} ->
-            inner_bound =
-              args |> Enum.flat_map(&pattern_var_names/1) |> MapSet.new() |> MapSet.union(bound)
-
-            collect_outer_uses(body, inner_bound)
-
-          other ->
-            collect_outer_uses(other, bound)
-        end)
+        |> Enum.map(&collect_fn_clause_uses(&1, bound))
         |> Enum.reduce(MapSet.new(), &MapSet.union/2)
 
       {:for, _, args} when is_list(args) ->
@@ -386,6 +378,15 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelper do
         MapSet.new()
     end
   end
+
+  defp collect_fn_clause_uses({:->, _, [args, body]}, bound) do
+    inner_bound =
+      args |> Enum.flat_map(&pattern_var_names/1) |> MapSet.new() |> MapSet.union(bound)
+
+    collect_outer_uses(body, inner_bound)
+  end
+
+  defp collect_fn_clause_uses(other, bound), do: collect_outer_uses(other, bound)
 
   defp contains_pin?(ast) do
     ast

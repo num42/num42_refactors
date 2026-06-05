@@ -297,16 +297,20 @@ defmodule Number42.Refactors.IdentifierExpansion do
     if start_idx == 0 and starts_hit < 2 do
       :skip
     else
-      last_idx = start_idx + starts_hit - 1
-      last = Enum.at(subtokens, last_idx)
-      head = Enum.take(subtokens, last_idx)
+      pp_transform_from(start_idx, starts_hit, subtokens, opts)
+    end
+  end
 
-      singular_last = AstHelpers.singularize(last)
+  defp pp_transform_from(start_idx, starts_hit, subtokens, opts) do
+    last_idx = start_idx + starts_hit - 1
+    last = Enum.at(subtokens, last_idx)
+    head = Enum.take(subtokens, last_idx)
 
-      case AstHelpers.maybe_past_participle(head, [last], singular_last, opts.pp_verbs) do
-        {:ok, pp} -> {:ok, "#{pp}_#{singular_last}"}
-        :skip -> :skip
-      end
+    singular_last = AstHelpers.singularize(last)
+
+    case AstHelpers.maybe_past_participle(head, [last], singular_last, opts.pp_verbs) do
+      {:ok, pp} -> {:ok, "#{pp}_#{singular_last}"}
+      :skip -> :skip
     end
   end
 

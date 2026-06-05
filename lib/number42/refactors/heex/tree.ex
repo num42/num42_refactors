@@ -284,25 +284,33 @@ defmodule Number42.Refactors.Heex.Tree do
         cond do
           starts_with_at?(body, lt_pos, "</" <> tag) and
               tag_close_boundary?(body, lt_pos + byte_size("</" <> tag)) ->
-            close_end = skip_until_gt(body, lt_pos)
-
-            if depth == 1,
-              do: close_end,
-              else: find_matching_close(body, close_end, tag, depth - 1)
+            close_matching_tag(body, lt_pos, tag, depth)
 
           starts_with_at?(body, lt_pos, "<" <> tag) and
               tag_open_boundary?(body, lt_pos + byte_size("<" <> tag)) ->
-            case find_tag_end(body, lt_pos + 1) do
-              {:self, after_self} ->
-                find_matching_close(body, after_self, tag, depth)
-
-              {:open, after_open} ->
-                find_matching_close(body, after_open, tag, depth + 1)
-            end
+            descend_into_open_tag(body, lt_pos, tag, depth)
 
           true ->
             find_matching_close(body, lt_pos + 1, tag, depth)
         end
+    end
+  end
+
+  defp close_matching_tag(body, lt_pos, tag, depth) do
+    close_end = skip_until_gt(body, lt_pos)
+
+    if depth == 1,
+      do: close_end,
+      else: find_matching_close(body, close_end, tag, depth - 1)
+  end
+
+  defp descend_into_open_tag(body, lt_pos, tag, depth) do
+    case find_tag_end(body, lt_pos + 1) do
+      {:self, after_self} ->
+        find_matching_close(body, after_self, tag, depth)
+
+      {:open, after_open} ->
+        find_matching_close(body, after_open, tag, depth + 1)
     end
   end
 

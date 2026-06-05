@@ -216,15 +216,16 @@ defmodule Number42.Refactors.Ex.LengthInGuard do
     catch_all = find_clause_list_catch_all(clauses)
 
     if catch_all do
-      clauses
-      |> Enum.flat_map(
-        &case maybe_arm_patch(&1, catch_all, source) do
-          nil -> []
-          patch -> [patch]
-        end
-      )
+      clauses |> Enum.flat_map(&arm_patch_list(&1, catch_all, source))
     else
       []
+    end
+  end
+
+  defp arm_patch_list(clause, catch_all, source) do
+    case maybe_arm_patch(clause, catch_all, source) do
+      nil -> []
+      patch -> [patch]
     end
   end
 
@@ -551,14 +552,16 @@ defmodule Number42.Refactors.Ex.LengthInGuard do
 
     if catch_all do
       clauses
-      |> Enum.flat_map(
-        &case maybe_def_clause_patch(&1, def_kind, name, arity, catch_all, source) do
-          nil -> []
-          patch -> [patch]
-        end
-      )
+      |> Enum.flat_map(&def_clause_patch_list(&1, def_kind, name, arity, catch_all, source))
     else
       []
+    end
+  end
+
+  defp def_clause_patch_list(clause, def_kind, name, arity, catch_all, source) do
+    case maybe_def_clause_patch(clause, def_kind, name, arity, catch_all, source) do
+      nil -> []
+      patch -> [patch]
     end
   end
 

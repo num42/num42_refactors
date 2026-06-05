@@ -499,27 +499,35 @@ defmodule Number42.Refactors.Ex.ExtractHeexExactClone do
     {_, {a, l}} =
       Macro.prewalk(ast, {a, l}, fn
         {:@, _, [{name, _, ctx}]} = node, {a, l} when is_atom(name) and is_atom(ctx) ->
-          if MapSet.member?(b, name) do
-            {node, {a, MapSet.put(l, name)}}
-          else
-            {node, {MapSet.put(a, name), l}}
-          end
+          classify_assign(node, name, a, l, b)
 
         {name, _, ctx} = node, {a, l} when is_atom(name) and is_atom(ctx) ->
-          string = Atom.to_string(name)
-
-          cond do
-            String.starts_with?(string, "_") -> {node, {a, l}}
-            name in [:when, :=, :|, :"::"] -> {node, {a, l}}
-            MapSet.member?(b, name) -> {node, {a, MapSet.put(l, name)}}
-            true -> {node, {a, l}}
-          end
+          classify_var(node, name, a, l, b)
 
         node, acc ->
           {node, acc}
       end)
 
     {a, l}
+  end
+
+  defp classify_assign(node, name, a, l, b) do
+    if MapSet.member?(b, name) do
+      {node, {a, MapSet.put(l, name)}}
+    else
+      {node, {MapSet.put(a, name), l}}
+    end
+  end
+
+  defp classify_var(node, name, a, l, b) do
+    string = Atom.to_string(name)
+
+    cond do
+      String.starts_with?(string, "_") -> {node, {a, l}}
+      name in [:when, :=, :|, :"::"] -> {node, {a, l}}
+      MapSet.member?(b, name) -> {node, {a, MapSet.put(l, name)}}
+      true -> {node, {a, l}}
+    end
   end
 
   defp walk_eex_ast_branch({:ok, ast}, a, b, l), do: ast |> walk_ast(a, l, b)

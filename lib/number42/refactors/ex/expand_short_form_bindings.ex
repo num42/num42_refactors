@@ -178,42 +178,55 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
     |> Macro.prewalker()
     |> Enum.flat_map(fn
       {kind, _, [head, _body]} when def_or_macro_kind?(kind) ->
-        case extract_fn_signature(head) do
-          {name, params} ->
-            params
-            |> Enum.with_index()
-            |> Enum.map(fn {param, idx} ->
-              {{name, length(params), idx}, param_simple_name(param)}
-            end)
-
-          :error ->
-            []
-        end
+        param_index_entries(head)
 
       _ ->
         []
     end)
     |> Enum.group_by(fn {key, _} -> key end, fn {_, result} -> result end)
-    |> Enum.flat_map(fn {{name, arity, idx}, results} ->
-      atoms =
-        results
-        |> Enum.flat_map(fn
-          {:ok, atom} -> [atom]
-          :error -> [:__non_simple__]
-        end)
-        |> Enum.uniq()
-
-      case atoms do
-        [single] when single != :__non_simple__ ->
-          if long?(single, ctx),
-            do: [{{name, arity, idx}, Atom.to_string(single)}],
-            else: []
-
-        _ ->
-          []
-      end
-    end)
+    |> Enum.flat_map(fn {key, results} -> agreed_long_param(key, results, ctx) end)
     |> Map.new()
+  end
+
+  # Per-clause parameter observations: one `{{name, arity, idx}, result}`
+  # entry per parameter position, where `result` is `param_simple_name/1`
+  # (`{:ok, atom}` for bare-var params, `:error` otherwise).
+  defp param_index_entries(head) do
+    case extract_fn_signature(head) do
+      {name, params} ->
+        params
+        |> Enum.with_index()
+        |> Enum.map(fn {param, idx} ->
+          {{name, length(params), idx}, param_simple_name(param)}
+        end)
+
+      :error ->
+        []
+    end
+  end
+
+  # One grouped `{name, arity, idx}` position: emit a single index entry
+  # only when every clause agrees on one bare-var param name AND that
+  # name is "long". `:__non_simple__` marks a destructuring/literal
+  # clause at this position, which makes the group heterogeneous.
+  defp agreed_long_param({name, arity, idx}, results, ctx) do
+    atoms =
+      results
+      |> Enum.flat_map(fn
+        {:ok, atom} -> [atom]
+        :error -> [:__non_simple__]
+      end)
+      |> Enum.uniq()
+
+    case atoms do
+      [single] when single != :__non_simple__ ->
+        if long?(single, ctx),
+          do: [{{name, arity, idx}, Atom.to_string(single)}],
+          else: []
+
+      _ ->
+        []
+    end
   end
 
   # A param is "simple" when it's a bare variable (possibly with
@@ -464,28 +477,37 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
     |> Macro.prewalker()
     |> Enum.flat_map(fn
       {name, _meta, context_compound} = node when is_atom(name) and is_atom(context_compound) ->
-        if MapSet.member?(pre_shadow_refs, node) do
-          []
-        else
-          case Map.fetch(resolutions, name) do
-            {:ok, long_atom} ->
-              replacement = Atom.to_string(long_atom)
-
-              case build_patch(node, replacement) do
-                nil -> []
-                patch -> [patch]
-              end
-
-            :error ->
-              []
-          end
-        end
+        patch_for_ref(node, name, pre_shadow_refs, resolutions)
 
       _ ->
         []
     end)
     |> Enum.reject(&is_nil/1)
   end
+
+  # One var-reference node: skip pre-shadow refs (the RHS reference to
+  # an outer binding the assignment is about to shadow), otherwise build
+  # a rename patch when the name resolved to a long form.
+  defp patch_for_ref(node, name, pre_shadow_refs, resolutions) do
+    if MapSet.member?(pre_shadow_refs, node) do
+      []
+    else
+      rename_patch(node, name, resolutions)
+    end
+  end
+
+  defp rename_patch(node, name, resolutions) do
+    case Map.fetch(resolutions, name) do
+      {:ok, long_atom} ->
+        node |> build_patch(Atom.to_string(long_atom)) |> patch_or_empty()
+
+      :error ->
+        []
+    end
+  end
+
+  defp patch_or_empty(nil), do: []
+  defp patch_or_empty(patch), do: [patch]
 
   # Ranked long-form candidates for one short binding, best-first, as
   # strings. Tier priority is unchanged (from-schema > call-site >
@@ -542,20 +564,27 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
   # `value_2`). Returns `%{short_atom => long_atom}`.
   defp assign_long_forms(ranked, gate, context_compound) do
     {assignments, _taken} =
-      Enum.reduce(ranked, {[], MapSet.new()}, fn {name, longs}, {acc, taken} ->
-        case pick_free_long(longs, gate, taken) do
-          {:ok, long_atom} ->
-            {[{name, long_atom} | acc], MapSet.put(taken, long_atom)}
-
-          :exhausted ->
-            case suffix_fallback(longs, gate, taken, name, context_compound) do
-              {:ok, long_atom} -> {[{name, long_atom} | acc], MapSet.put(taken, long_atom)}
-              :skip -> {acc, taken}
-            end
-        end
+      Enum.reduce(ranked, {[], MapSet.new()}, fn binding, acc ->
+        assign_one_long_form(binding, acc, gate, context_compound)
       end)
 
     Map.new(assignments)
+  end
+
+  # One reduce step: pick the first free long form for this binding, or
+  # fall back to a suffix. `acc` is `{assignments, taken}`. Returns the
+  # next `{assignments, taken}`.
+  defp assign_one_long_form({name, longs}, {acc, taken}, gate, context_compound) do
+    case pick_free_long(longs, gate, taken) do
+      {:ok, long_atom} ->
+        {[{name, long_atom} | acc], MapSet.put(taken, long_atom)}
+
+      :exhausted ->
+        case suffix_fallback(longs, gate, taken, name, context_compound) do
+          {:ok, long_atom} -> {[{name, long_atom} | acc], MapSet.put(taken, long_atom)}
+          :skip -> {acc, taken}
+        end
+    end
   end
 
   # First long form in the ranking that passes the gate and is not yet

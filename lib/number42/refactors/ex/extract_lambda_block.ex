@@ -133,17 +133,18 @@ defmodule Number42.Refactors.Ex.ExtractLambdaBlock do
 
     body
     |> Macro.prewalker()
-    |> Enum.any?(fn
-      {name, _, ctx} when is_atom(name) and is_atom(ctx) ->
-        not underscore?(name) and
-          name not in [:__MODULE__, :__CALLER__, :__ENV__] and
-          not MapSet.member?(bound, name) and
-          not MapSet.member?(lambda_args, name)
-
-      _ ->
-        false
-    end)
+    |> Enum.any?(&free_var_node?(&1, bound, lambda_args))
   end
+
+  defp free_var_node?({name, _, ctx}, bound, lambda_args)
+       when is_atom(name) and is_atom(ctx) do
+    not underscore?(name) and
+      name not in [:__MODULE__, :__CALLER__, :__ENV__] and
+      not MapSet.member?(bound, name) and
+      not MapSet.member?(lambda_args, name)
+  end
+
+  defp free_var_node?(_node, _bound, _lambda_args), do: false
 
   defp helper_name_taken?(body_exprs) do
     body_exprs

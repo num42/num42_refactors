@@ -94,31 +94,27 @@ defmodule Number42.Refactors.Ex.LiftPinnedEctoExpr do
   @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
 
-  def synth_binding_name(expr) do
-    case expr do
-      {{:., _, [{:__aliases__, _, _}, fname]}, _, args} when is_atom(fname) ->
-        compose(Atom.to_string(fname), first_var_arg(args))
+  def synth_binding_name(expr), do: name_from_expr(expr)
 
-      # Defensive: only really a call if `liftable_call?` passed.
-      # `:__block__` is a Sourceror wrapper, not a name; we shouldn't
-      # see it here given the lift gate, but fall through cleanly.
-      {:__block__, _, _} ->
-        "pinned_binding"
+  defp name_from_expr({{:., _, [{:__aliases__, _, _}, fname]}, _, args}) when is_atom(fname),
+    do: compose(Atom.to_string(fname), first_var_arg(args))
 
-      {fname, _, args} when is_atom(fname) and is_list(args) ->
-        compose(Atom.to_string(fname), first_var_arg(args))
+  # Defensive: only really a call if `liftable_call?` passed.
+  # `:__block__` is a Sourceror wrapper, not a name; we shouldn't
+  # see it here given the lift gate, but fall through cleanly.
+  defp name_from_expr({:__block__, _, _}), do: "pinned_binding"
 
-      {{:., _, [{base_name, _, base_ctx}, field]}, _, []}
-      when is_atom(base_name) and is_atom(base_ctx) and is_atom(field) ->
-        "#{base_name}_#{field}_binding"
+  defp name_from_expr({fname, _, args}) when is_atom(fname) and is_list(args),
+    do: compose(Atom.to_string(fname), first_var_arg(args))
 
-      {:@, _, [{attr_name, _, _}]} when is_atom(attr_name) ->
-        "#{attr_name}_binding"
+  defp name_from_expr({{:., _, [{base_name, _, base_ctx}, field]}, _, []})
+       when is_atom(base_name) and is_atom(base_ctx) and is_atom(field),
+       do: "#{base_name}_#{field}_binding"
 
-      _ ->
-        "pinned_binding"
-    end
-  end
+  defp name_from_expr({:@, _, [{attr_name, _, _}]}) when is_atom(attr_name),
+    do: "#{attr_name}_binding"
+
+  defp name_from_expr(_), do: "pinned_binding"
 
   @impl Number42.Refactors.Refactor
   def transform(source, _opts), do: Sourceror.parse_string(source) |> apply_patches(source)
@@ -389,16 +385,16 @@ defmodule Number42.Refactors.Ex.LiftPinnedEctoExpr do
       end)
       |> MapSet.new()
 
-    if MapSet.member?(used, base) do
-      2
-      |> Stream.iterate(&(&1 + 1))
-      |> Enum.find_value(fn n ->
-        candidate = "#{base}_#{n}"
-        if MapSet.member?(used, candidate), do: nil, else: candidate
-      end)
-    else
-      base
-    end
+    if MapSet.member?(used, base), do: next_free_name(base, used), else: base
+  end
+
+  defp next_free_name(base, used) do
+    2
+    |> Stream.iterate(&(&1 + 1))
+    |> Enum.find_value(fn n ->
+      candidate = "#{base}_#{n}"
+      if MapSet.member?(used, candidate), do: nil, else: candidate
+    end)
   end
 
   defp walk_children(exprs, :block, host_stack, in_ecto?),

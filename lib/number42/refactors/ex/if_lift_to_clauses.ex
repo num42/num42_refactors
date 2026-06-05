@@ -812,35 +812,36 @@ defmodule Number42.Refactors.Ex.IfLiftToClauses do
 
   defp render_head_slots(params, patterns, head_uses) do
     params
-    |> Enum.map(fn {name, ast, _default} ->
-      if name == nil do
-        # Anonymous slot (literal, `_name`, or pattern). Pass through.
-        {Sourceror.to_string(ast), :pattern}
-      else
-        case Map.get(patterns, name) do
-          nil ->
-            if MapSet.member?(head_uses, name),
-              do: {Atom.to_string(name), :bare},
-              else: {underscore_for(name), :bare}
+    |> Enum.map(&render_head_slot_entry(&1, patterns, head_uses))
+  end
 
-          {:eq, lit} ->
-            {Sourceror.to_string(lit), :literal}
+  # Anonymous slot (literal, `_name`, or pattern). Pass through.
+  defp render_head_slot_entry({nil, ast, _default}, _patterns, _head_uses),
+    do: {Sourceror.to_string(ast), :pattern}
 
-          {:fields, _} = tree ->
-            # Only emit `= name` binder when the do-body actually
-            # references the whole param; otherwise the pattern
-            # alone is enough (no `= _foo` noise).
-            text =
-              if MapSet.member?(head_uses, name) do
-                render_pattern_tree(tree) <> " = " <> Atom.to_string(name)
-              else
-                render_pattern_tree(tree)
-              end
+  defp render_head_slot_entry({name, _ast, _default}, patterns, head_uses) do
+    case Map.get(patterns, name) do
+      nil ->
+        if MapSet.member?(head_uses, name),
+          do: {Atom.to_string(name), :bare},
+          else: {underscore_for(name), :bare}
 
-            {text, :pattern}
-        end
-      end
-    end)
+      {:eq, lit} ->
+        {Sourceror.to_string(lit), :literal}
+
+      {:fields, _} = tree ->
+        {render_fields_slot(tree, name, head_uses), :pattern}
+    end
+  end
+
+  # Only emit `= name` binder when the do-body actually references the whole
+  # param; otherwise the pattern alone is enough (no `= _foo` noise).
+  defp render_fields_slot(tree, name, head_uses) do
+    if MapSet.member?(head_uses, name) do
+      render_pattern_tree(tree) <> " = " <> Atom.to_string(name)
+    else
+      render_pattern_tree(tree)
+    end
   end
 
   defp render_leaf({:value, lit}), do: Sourceror.to_string(lit)

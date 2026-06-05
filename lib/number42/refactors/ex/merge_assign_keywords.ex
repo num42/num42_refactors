@@ -242,11 +242,7 @@ defmodule Number42.Refactors.Ex.MergeAssignKeywords do
           {runs, [m]}
 
         {{:assign, lhs, sig, _, _, _} = m, [{:assign, prev_lhs, prev_sig, _, _, _} | _] = acc} ->
-          if lhs == prev_lhs and sig == prev_sig do
-            {runs, [m | acc]}
-          else
-            {flush_run(acc, runs), [m]}
-          end
+          extend_or_flush_run(lhs == prev_lhs and sig == prev_sig, m, acc, runs)
 
         {:other, []} ->
           {runs, []}
@@ -259,6 +255,9 @@ defmodule Number42.Refactors.Ex.MergeAssignKeywords do
     |> Enum.reverse()
     |> Enum.filter(&(length(&1) >= 2))
   end
+
+  defp extend_or_flush_run(true, m, acc, runs), do: {runs, [m | acc]}
+  defp extend_or_flush_run(false, m, acc, runs), do: {flush_run(acc, runs), [m]}
 
   defp import_widen_patch({:import, _, [_mod_ast, kw]} = node, source) when is_list(kw) do
     fetch_only_list(kw) |> widen_patches_for_only_list(node, source)
@@ -286,11 +285,7 @@ defmodule Number42.Refactors.Ex.MergeAssignKeywords do
 
           {{:assign_step, sig, _, _, _} = m,
            [{:assign_step, prev_sig, _, _, _} | _] = current_run} ->
-            if sig == prev_sig do
-              {acc, [m | current_run]}
-            else
-              {flush_chain_run(current_run, acc), [m]}
-            end
+            extend_or_flush_chain_run(sig == prev_sig, m, current_run, acc)
 
           {{:other_step, _} = o, []} ->
             {[o | acc], []}
@@ -306,6 +301,11 @@ defmodule Number42.Refactors.Ex.MergeAssignKeywords do
       do: {:changed, final},
       else: :unchanged
   end
+
+  defp extend_or_flush_chain_run(true, m, current_run, acc), do: {acc, [m | current_run]}
+
+  defp extend_or_flush_chain_run(false, m, current_run, acc),
+    do: {flush_chain_run(current_run, acc), [m]}
 
   defp merges_local_assign?(patches), do: patches |> Enum.any?(&local_assign_patch?/1)
   defp only_list_atoms({:__block__, _, [list]}) when is_list(list), do: only_list_atoms(list)

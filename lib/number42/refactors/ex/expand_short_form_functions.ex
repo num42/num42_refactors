@@ -204,15 +204,8 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
           |> Enum.reduce(MapSet.new(), &MapSet.union/2)
 
         case resolve_name(name, candidates, module_subtokens, ctx) do
-          {:ok, new_name_atom} ->
-            cond do
-              new_name_atom == name -> []
-              MapSet.member?(occupied_names, new_name_atom) -> []
-              true -> [{name, new_name_atom}]
-            end
-
-          :skip ->
-            []
+          {:ok, new_name_atom} -> rename_or_skip(name, new_name_atom, occupied_names)
+          :skip -> []
         end
       end)
       |> Map.new()
@@ -225,6 +218,16 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
   end
 
   defp patches_for_module(_, _), do: []
+
+  # A resolved rename is dropped if it's a no-op or would collide with
+  # an occupied name; otherwise it becomes a {old, new} pair.
+  defp rename_or_skip(name, new_name_atom, occupied_names) do
+    cond do
+      new_name_atom == name -> []
+      MapSet.member?(occupied_names, new_name_atom) -> []
+      true -> [{name, new_name_atom}]
+    end
+  end
 
   defp tagged_candidates(module_compounds, alias_compounds, import_compounds) do
     (Enum.map(module_compounds, &{&1, :module_name}) ++
@@ -270,20 +273,18 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
         [parts |> List.last() |> Atom.to_string() |> Macro.underscore()]
 
       {:alias, _, [{{:., _, [{:__aliases__, _, _}, :{}]}, _, multi}]} ->
-        multi
-        |> Enum.flat_map(fn
-          {:__aliases__, _, parts} when is_list(parts) ->
-            [parts |> List.last() |> Atom.to_string() |> Macro.underscore()]
-
-          _ ->
-            []
-        end)
+        Enum.flat_map(multi, &alias_compound/1)
 
       _ ->
         []
     end)
     |> Enum.uniq()
   end
+
+  defp alias_compound({:__aliases__, _, parts}) when is_list(parts),
+    do: [parts |> List.last() |> Atom.to_string() |> Macro.underscore()]
+
+  defp alias_compound(_), do: []
 
   defp collect_import_compounds(exprs) do
     exprs
@@ -357,29 +358,31 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
 
     resolve_opts = build_resolve_opts(self, module_subtokens, ctx)
 
-    expanded =
-      parts
-      |> Enum.reduce_while([], fn part, acc ->
-        # Long enough: keep as-is.
-        if String.length(part) > 3 do
-          {:cont, [part | acc]}
-        else
-          resolve_part(part, candidates, resolve_opts, other_parts, acc)
-        end
-      end)
+    parts
+    |> expand_parts(candidates, resolve_opts, other_parts)
+    |> finalize_name(self)
+  end
 
-    case expanded do
-      :skip ->
-        :skip
+  defp expand_parts(parts, candidates, resolve_opts, other_parts) do
+    Enum.reduce_while(parts, [], fn part, acc ->
+      # Long enough: keep as-is.
+      if String.length(part) > 3 do
+        {:cont, [part | acc]}
+      else
+        resolve_part(part, candidates, resolve_opts, other_parts, acc)
+      end
+    end)
+  end
 
-      reversed_parts ->
-        new_name_string = reversed_parts |> Enum.reverse() |> Enum.join("_")
+  defp finalize_name(:skip, _self), do: :skip
 
-        if new_name_string == self do
-          :skip
-        else
-          {:ok, String.to_atom(new_name_string)}
-        end
+  defp finalize_name(reversed_parts, self) do
+    new_name_string = reversed_parts |> Enum.reverse() |> Enum.join("_")
+
+    if new_name_string == self do
+      :skip
+    else
+      {:ok, String.to_atom(new_name_string)}
     end
   end
 

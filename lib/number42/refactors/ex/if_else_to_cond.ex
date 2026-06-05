@@ -168,44 +168,49 @@ defmodule Number42.Refactors.Ex.IfElseToCond do
 
       # Case B: do nests, else terminal.
       true ->
-        guarded =
-          Enum.map(do_branches, fn b ->
-            new_cond =
-              case b.cond do
-                nil -> cond_ast
-                inner -> combine_and(cond_ast, inner)
-              end
-
-            %{b | cond: new_cond}
-          end)
-
+        guarded = Enum.map(do_branches, &guard_branch(cond_ast, &1))
         {:ok, guarded ++ else_branches}
     end
+  end
+
+  defp guard_branch(cond_ast, b) do
+    new_cond =
+      case b.cond do
+        nil -> cond_ast
+        inner -> combine_and(cond_ast, inner)
+      end
+
+    %{b | cond: new_cond}
   end
 
   # Decompose a single branch body. If body is `if/else`, recurse. Otherwise it's a terminal branch.
   defp collect_from_branch(body, pre_stmts) do
     case if_shape(body) do
-      {:ok, inner} ->
-        # Nested if/else — collect its branches, prepend pre_stmts to first one.
-        case collect_branches(inner) do
-          {:ok, [first | rest]} ->
-            {:ok, [%{first | pre: pre_stmts ++ first.pre} | rest]}
+      {:ok, inner} -> collect_from_nested_if(inner, pre_stmts)
+      :error -> collect_from_non_if(body, pre_stmts)
+    end
+  end
 
-          err ->
-            err
-        end
+  # Nested if/else — collect its branches, prepend pre_stmts to first one.
+  defp collect_from_nested_if(inner, pre_stmts) do
+    case collect_branches(inner) do
+      {:ok, [first | rest]} ->
+        {:ok, [%{first | pre: pre_stmts ++ first.pre} | rest]}
 
-      :error ->
-        # Maybe it's a block with statements + a final if/else?
-        case extract_block_tail_if(body) do
-          {:ok, leading, inner_if} ->
-            collect_from_branch(inner_if, pre_stmts ++ leading)
+      err ->
+        err
+    end
+  end
 
-          :no ->
-            # Terminal — this branch is the final body.
-            {:ok, [%{cond: nil, body: body, pre: pre_stmts}]}
-        end
+  # Maybe it's a block with statements + a final if/else?
+  defp collect_from_non_if(body, pre_stmts) do
+    case extract_block_tail_if(body) do
+      {:ok, leading, inner_if} ->
+        collect_from_branch(inner_if, pre_stmts ++ leading)
+
+      :no ->
+        # Terminal — this branch is the final body.
+        {:ok, [%{cond: nil, body: body, pre: pre_stmts}]}
     end
   end
 
