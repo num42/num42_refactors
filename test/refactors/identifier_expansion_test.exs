@@ -481,6 +481,159 @@ defmodule Number42.Refactors.IdentifierExpansionTest do
   end
 
   # -------------------------------------------------------------------
+  # synth_compound_name/4 — mechanical fragment merge (moved from AstHelpers)
+  # -------------------------------------------------------------------
+
+  describe "synth_compound_name/4" do
+    test "joins all four parts with underscores" do
+      assert "handle_mount_load_impl" =
+               IdentifierExpansion.synth_compound_name("handle", "mount", "load", "impl")
+    end
+
+    test "host alone with scrutinee single-token" do
+      assert "host_fetch" = IdentifierExpansion.synth_compound_name("", "host", "fetch", "")
+    end
+
+    test "drops host when scrutinee has 2+ subtokens" do
+      assert "fetch_user_by_id" =
+               IdentifierExpansion.synth_compound_name("", "host", "fetch_user_by_id", "")
+    end
+
+    test "drops host when scrutinee 2+ but keeps prefix" do
+      assert "handle_fetch_user_by_id" =
+               IdentifierExpansion.synth_compound_name("handle", "host", "fetch_user_by_id", "")
+    end
+
+    test "overlap merge at prefix-host boundary" do
+      assert "handle_request_fetch" =
+               IdentifierExpansion.synth_compound_name("handle", "handle_request", "fetch", "")
+    end
+
+    test "overlap merge at host-scrutinee boundary (single-token scrutinee keeps host)" do
+      # scrutinee = single token "load" → host kept; tail of host overlaps scrut head
+      assert "host_load" =
+               IdentifierExpansion.synth_compound_name("", "host_load", "load", "")
+    end
+
+    test "overlap merge at body-suffix boundary" do
+      assert "handle_request" =
+               IdentifierExpansion.synth_compound_name("handle", "request", "request", "")
+    end
+
+    test "[a,b,c] + [b,c,d] = [a,b,c,d]" do
+      assert "a_b_c_d" = IdentifierExpansion.synth_compound_name("a_b_c", "b_c_d", "", "")
+    end
+
+    test "[a] + [a] = [a]" do
+      assert "a" = IdentifierExpansion.synth_compound_name("a", "a", "", "")
+    end
+
+    test "[a,b] + [c,d] = [a,b,c,d] (no overlap)" do
+      assert "a_b_c_d" = IdentifierExpansion.synth_compound_name("a_b", "c_d", "", "")
+    end
+
+    test "empty parts collapse cleanly (no leading/trailing underscores)" do
+      assert "host_fetch" = IdentifierExpansion.synth_compound_name("", "host", "fetch", "")
+      assert "host_fetch" = IdentifierExpansion.synth_compound_name(nil, "host", "fetch", nil)
+    end
+
+    test "all empty -> empty string" do
+      assert "" = IdentifierExpansion.synth_compound_name("", "", "", "")
+    end
+
+    test "atoms accepted as well as strings" do
+      assert "handle_mount_load" =
+               IdentifierExpansion.synth_compound_name(:handle, :mount, :load, "")
+    end
+
+    test "scrutinee 2+ and prefix overlaps scrutinee head" do
+      # prefix=[handle], host=[anything], scrut=[handle, request, fetch]
+      # → host dropped, prefix merges with scrut head
+      assert "handle_request_fetch" =
+               IdentifierExpansion.synth_compound_name(
+                 "handle",
+                 "anything",
+                 "handle_request_fetch",
+                 ""
+               )
+    end
+
+    test "suffix overlaps end of body" do
+      # body ends with "fetch", suffix starts with "fetch" → only one
+      assert "host_fetch_impl" =
+               IdentifierExpansion.synth_compound_name("", "host", "fetch", "fetch_impl")
+    end
+  end
+
+  # -------------------------------------------------------------------
+  # generate_function_name/3 — semantic naming entry point
+  # -------------------------------------------------------------------
+
+  describe "generate_function_name/3 — call-derived (no family)" do
+    test "operation + multi-token noun drops host" do
+      assert "handle_fetch_user_by_id" =
+               IdentifierExpansion.generate_function_name("handle", "fetch_user_by_id")
+    end
+
+    test "single-token noun keeps host from opts" do
+      assert "handle_host_fetch" =
+               IdentifierExpansion.generate_function_name("handle", "fetch", %{host: "host"})
+    end
+
+    test "empty noun falls back to operation + host" do
+      assert "extracted_render_row" =
+               IdentifierExpansion.generate_function_name("extracted", "", %{host: "render_row"})
+    end
+
+    test "strips ?/! markers off inputs" do
+      assert "handle_host_valid" =
+               IdentifierExpansion.generate_function_name("handle", "valid?", %{host: "host"})
+    end
+  end
+
+  describe "generate_function_name/3 — pattern-derived (result family)" do
+    test "result-family clauses yield on_<noun>_result, dropping operation" do
+      clauses = [
+        {:->, [], [[{:__block__, [], [{:ok, {:value, [], nil}}]}], {:value, [], nil}]},
+        {:->, [], [[{:__block__, [], [:error]}], {:default, [], nil}]}
+      ]
+
+      assert "on_fetch_result" =
+               IdentifierExpansion.generate_function_name("handle", "fetch", %{
+                 host: "host",
+                 clauses: clauses
+               })
+    end
+  end
+
+  # -------------------------------------------------------------------
+  # pattern_family_suffix/1 — clause-family recognition
+  # -------------------------------------------------------------------
+
+  describe "pattern_family_suffix/1" do
+    test "empty clause list → nil" do
+      assert nil == IdentifierExpansion.pattern_family_suffix([])
+    end
+
+    test "all :ok/:error clauses (one tagged) → result" do
+      clauses = [
+        {:->, [], [[{:__block__, [], [{:ok, {:v, [], nil}}]}], {:v, [], nil}]},
+        {:->, [], [[{:__block__, [], [:error]}], {:d, [], nil}]}
+      ]
+
+      assert "result" = IdentifierExpansion.pattern_family_suffix(clauses)
+    end
+
+    test "non-result clauses → nil" do
+      clauses = [
+        {:->, [], [[{:__block__, [], [:other]}], {:v, [], nil}]}
+      ]
+
+      assert nil == IdentifierExpansion.pattern_family_suffix(clauses)
+    end
+  end
+
+  # -------------------------------------------------------------------
   # Helpers
   # -------------------------------------------------------------------
 

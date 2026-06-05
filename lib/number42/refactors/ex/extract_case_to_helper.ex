@@ -816,80 +816,14 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelper do
         :__block__
       ]
 
-  defp strip_name_suffix(name),
-    do: name |> to_string() |> String.replace_suffix("?", "") |> String.replace_suffix("!", "")
-
   # Name the helper after what the dispatch *decides on* — the clause
   # patterns — when those patterns form a recognizable family, else fall
   # back to the mechanical `handle_<host>_<scrutinee>` (the scrutinee
   # call name). Pattern-derived names beat call-derived ones: the call
   # is "how we got the value", the patterns are "what we branch on".
   defp synth_handler_name(host_name, scrutinee_name, clauses) do
-    scrutinee = strip_name_suffix(scrutinee_name)
-
-    case pattern_family_suffix(clauses) do
-      nil ->
-        synth_compound_name("handle", strip_name_suffix(host_name), scrutinee, "")
-
-      suffix ->
-        # `on_<scrutinee>_<suffix>` — the family suffix already encodes
-        # the dispatch identity, so the host name is redundant noise.
-        synth_compound_name("on", "", scrutinee, suffix)
-    end
+    generate_function_name("handle", scrutinee_name, %{host: host_name, clauses: clauses})
   end
-
-  # Recognize a pattern *family* across the clauses and return its
-  # semantic name suffix, or nil when no family matches. Generic by
-  # design — a family is "all clauses share a recognizable leading-tag
-  # shape". Each family is one `{predicate_on_leading_tags, suffix}`
-  # entry; add a family by appending a tuple here, call sites stay
-  # untouched. The canonical one is the `:ok`/`:error` result family →
-  # `_result`.
-  defp pattern_family_suffix(clauses) do
-    tags = clauses |> Enum.map(&leading_tag/1)
-    families = [{&result_family?/1, "result"}]
-
-    Enum.find_value(families, fn {matches?, suffix} ->
-      if matches?.(tags), do: suffix
-    end)
-  end
-
-  # The result family: every clause leads with `:ok` or `:error` (bare
-  # atom `:ok`/`:error` or a tagged tuple `{:ok, …}`/`{:error, …}`), with
-  # at least one clause actually tagged so we don't fire on a plain
-  # `:ok | :other` enum. This is the shape `{:ok, _}` / `{:error, _}`
-  # dispatch the issue calls out, generalized over the tuple/atom mix.
-  defp result_family?(tags) do
-    Enum.all?(tags, &(&1 in [:ok, :error])) and :ok in tags
-  end
-
-  # The "leading tag" of a clause: the first element's atom when the
-  # pattern is a tuple, or the atom itself for a bare-atom pattern. Any
-  # other shape (bound var, `nil`, map, list, pin, …) has no leading tag.
-  # Sourceror wraps atoms/literals in `:__block__`, hence the unwrapping.
-  defp leading_tag({:->, _meta, [[pattern_node], _body]}) do
-    {pattern, _guard} = unwrap_when(pattern_node)
-    pattern_leading_tag(pattern)
-  end
-
-  defp leading_tag(_), do: nil
-
-  # 2-element tuple: Sourceror represents `{a, b}` as a `:__block__`
-  # wrapping a raw 2-tuple. The first element is the tag.
-  defp pattern_leading_tag({:__block__, _, [{tag_node, _second}]}),
-    do: atom_literal(tag_node)
-
-  # 3+-element tuple: `{:{}, _, [first | _]}`.
-  defp pattern_leading_tag({:{}, _, [first | _]}), do: atom_literal(first)
-
-  # Bare atom pattern (`:ok`, `:error`, `nil`, …), possibly wrapped.
-  defp pattern_leading_tag({:__block__, _, [atom]}) when is_atom(atom), do: atom
-  defp pattern_leading_tag(atom) when is_atom(atom), do: atom
-  defp pattern_leading_tag(_), do: nil
-
-  defp atom_literal({:__block__, _, [atom]}) when is_atom(atom), do: atom
-  defp atom_literal(atom) when is_atom(atom), do: atom
-  defp atom_literal(_), do: nil
 
   defp unwrap_when({:when, _meta, [pat, guard]}), do: {pat, guard}
   defp unwrap_when(pat), do: {pat, nil}

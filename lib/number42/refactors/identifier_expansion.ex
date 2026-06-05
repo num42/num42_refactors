@@ -121,6 +121,12 @@ defmodule Number42.Refactors.IdentifierExpansion do
   # `opts[:known]`.
   @irregular_participles MapSet.new(~w(found built sent held kept met read run done))
 
+  # Family registry for `pattern_family_suffix/1` — one
+  # `{predicate, suffix}` per recognized clause shape. The predicate
+  # receives the list of leading tags. Add a family by appending here;
+  # call sites stay untouched.
+  @name_families [{&__MODULE__.result_family?/1, "result"}]
+
   @doc """
   Try to expand `short` against the given `candidates`.
 
@@ -710,4 +716,208 @@ defmodule Number42.Refactors.IdentifierExpansion do
       min_score: Map.get(opts, :min_score, 80)
     }
   end
+
+  # -----------------------------------------------------------------
+  # Function-name synthesis — the naming root for every refactor that
+  # invents a helper name. Consolidated here from the per-refactor
+  # `synth_*`/`pattern_family_*` logic that used to live in
+  # `extract_case_to_helper` and `AstHelpers`.
+  # -----------------------------------------------------------------
+
+  @doc """
+  Synthesize a helper-function name from an operation and its
+  carrier/output noun.
+
+  This is the semantic entry point: callers say *what the helper does*
+  (`operation`) and *what it works on* (`noun`), optionally tagging a
+  recognized clause-pattern family via `opts[:clauses]` so result-style
+  dispatch helpers get an `on_<noun>_result` shape.
+
+  Resolution:
+
+  - With `opts[:clauses]` that form a recognized pattern family →
+    `on_<noun>_<family_suffix>` (the family encodes the dispatch
+    identity, so `operation` is dropped as redundant).
+  - Otherwise → `<operation>_<host>_<noun>` via `synth_compound_name/4`,
+    where `host` (from `opts[:host]`) is dropped when `noun` already
+    splits into 2+ subtokens.
+
+  `?`/`!` markers on `operation`/`noun`/`host` are stripped — they'd
+  terminate the identifier mid-name.
+
+  ## Examples
+
+      iex> alias Number42.Refactors.IdentifierExpansion
+      iex> IdentifierExpansion.generate_function_name("handle", "fetch_user_by_id")
+      "handle_fetch_user_by_id"
+
+      iex> alias Number42.Refactors.IdentifierExpansion
+      iex> IdentifierExpansion.generate_function_name("extracted", "", %{host: "render_row"})
+      "extracted_render_row"
+  """
+  @spec generate_function_name(
+          String.t() | atom() | nil,
+          String.t() | atom() | nil,
+          %{optional(:host) => String.t() | atom() | nil, optional(:clauses) => list()}
+        ) :: String.t()
+  def generate_function_name(operation, noun, opts \\ %{}) do
+    op = strip_marker(operation)
+    noun = strip_marker(noun)
+    host = opts |> Map.get(:host) |> strip_marker()
+    clauses = Map.get(opts, :clauses, [])
+
+    case pattern_family_suffix(clauses) do
+      nil -> synth_compound_name(op, host, noun, "")
+      suffix -> synth_compound_name("on", "", noun, suffix)
+    end
+  end
+
+  @doc """
+  Build a synthesised helper name from up to four snake_case fragments.
+
+  Fragments in order: `prefix`, `host`, `scrutinee`, `suffix`. Each is
+  split on `_`, empty strings filtered out, then folded into a single
+  list with **overlap-merge** at every seam — if the tail of the
+  accumulator equals the head of the next fragment, the overlap is
+  taken only once. Overlap is checked longest-first.
+
+      [a, b, c] ⊕ [b, c, d]  →  [a, b, c, d]
+      [a]       ⊕ [a]        →  [a]
+      [a, b]    ⊕ [c, d]     →  [a, b, c, d]
+
+  ## Host-drop heuristic
+
+  If `scrutinee` splits into **2 or more subtokens**, `host` is treated
+  as redundant and dropped — the scrutinee already encodes the dispatch
+  identity. `prefix` and `suffix` still merge with the scrutinee.
+
+      synth_compound_name("handle", "host", "fetch_user_by_id", "")
+      → "handle_fetch_user_by_id"
+
+  Single-token scrutinees keep `host`:
+
+      synth_compound_name("handle", "host", "fetch", "")
+      → "handle_host_fetch"
+
+  Inputs may be strings, atoms, or `nil`/`""` (treated as empty).
+  Caller is responsible for stripping `?`/`!` suffixes that would
+  otherwise terminate identifiers mid-name.
+  """
+  @spec synth_compound_name(
+          String.t() | atom() | nil,
+          String.t() | atom() | nil,
+          String.t() | atom() | nil,
+          String.t() | atom() | nil
+        ) :: String.t()
+  def synth_compound_name(prefix, host, scrutinee, suffix) do
+    prefix_parts = to_subtokens(prefix)
+    host_parts = to_subtokens(host)
+    scrutinee_parts = to_subtokens(scrutinee)
+    suffix_parts = to_subtokens(suffix)
+
+    fragments =
+      if length(scrutinee_parts) >= 2 do
+        [prefix_parts, scrutinee_parts, suffix_parts]
+      else
+        [prefix_parts, host_parts, scrutinee_parts, suffix_parts]
+      end
+
+    fragments
+    |> Enum.reject(&(&1 == []))
+    |> Enum.reduce([], &overlap_merge(&2, &1))
+    |> Enum.join("_")
+  end
+
+  @doc """
+  Recognize a pattern *family* across a list of `case`/`fn` clauses and
+  return its semantic name suffix, or `nil` when no family matches.
+
+  Generic by design — a family is "all clauses share a recognizable
+  leading-tag shape". Each family is one `{predicate_on_leading_tags,
+  suffix}` entry; add a family by appending a tuple to `@name_families`,
+  call sites stay untouched. The canonical one is the `:ok`/`:error`
+  result family → `"result"`.
+
+  ## Examples
+
+      iex> alias Number42.Refactors.IdentifierExpansion
+      iex> IdentifierExpansion.pattern_family_suffix([])
+      nil
+  """
+  @spec pattern_family_suffix(list()) :: String.t() | nil
+  def pattern_family_suffix(clauses) do
+    tags = Enum.map(clauses, &leading_tag/1)
+
+    Enum.find_value(@name_families, fn {matches?, suffix} ->
+      if matches?.(tags), do: suffix
+    end)
+  end
+
+  @doc false
+  # The result family: every clause leads with `:ok` or `:error` (bare
+  # atom `:ok`/`:error` or a tagged tuple `{:ok, …}`/`{:error, …}`), with
+  # at least one clause actually tagged so we don't fire on a plain
+  # `:ok | :other` enum.
+  def result_family?(tags) do
+    Enum.all?(tags, &(&1 in [:ok, :error])) and :ok in tags
+  end
+
+  # The "leading tag" of a clause: the first element's atom when the
+  # pattern is a tuple, or the atom itself for a bare-atom pattern. Any
+  # other shape (bound var, `nil`, map, list, pin, …) has no leading tag.
+  # Sourceror wraps atoms/literals in `:__block__`, hence the unwrapping.
+  defp leading_tag({:->, _meta, [[pattern_node], _body]}) do
+    {pattern, _guard} = unwrap_when(pattern_node)
+    pattern_leading_tag(pattern)
+  end
+
+  defp leading_tag(_), do: nil
+
+  # 2-element tuple: Sourceror represents `{a, b}` as a `:__block__`
+  # wrapping a raw 2-tuple. The first element is the tag.
+  defp pattern_leading_tag({:__block__, _, [{tag_node, _second}]}),
+    do: atom_literal(tag_node)
+
+  # 3+-element tuple: `{:{}, _, [first | _]}`.
+  defp pattern_leading_tag({:{}, _, [first | _]}), do: atom_literal(first)
+
+  # Bare atom pattern (`:ok`, `:error`, `nil`, …), possibly wrapped.
+  defp pattern_leading_tag({:__block__, _, [atom]}) when is_atom(atom), do: atom
+  defp pattern_leading_tag(atom) when is_atom(atom), do: atom
+  defp pattern_leading_tag(_), do: nil
+
+  defp atom_literal({:__block__, _, [atom]}) when is_atom(atom), do: atom
+  defp atom_literal(atom) when is_atom(atom), do: atom
+  defp atom_literal(_), do: nil
+
+  defp unwrap_when({:when, _meta, [pat, guard]}), do: {pat, guard}
+  defp unwrap_when(pat), do: {pat, nil}
+
+  defp strip_marker(nil), do: nil
+
+  defp strip_marker(name) do
+    name
+    |> to_string()
+    |> String.replace_suffix("?", "")
+    |> String.replace_suffix("!", "")
+  end
+
+  defp overlap_merge([], next), do: next
+  defp overlap_merge(acc, []), do: acc
+
+  defp overlap_merge(acc, next) do
+    max_overlap = min(length(acc), length(next))
+
+    overlap =
+      max_overlap..1//-1
+      |> Enum.find(0, fn n ->
+        Enum.take(acc, -n) == Enum.take(next, n)
+      end)
+
+    acc ++ Enum.drop(next, overlap)
+  end
+
+  defp to_subtokens(nil), do: []
+  defp to_subtokens(atom) when is_atom(atom), do: to_subtokens(Atom.to_string(atom))
+  defp to_subtokens(str) when is_binary(str), do: String.split(str, "_", trim: true)
 end
