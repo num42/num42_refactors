@@ -32,6 +32,7 @@
   # exercised by the test suite); the contract in the dependency is simply
   # incomplete. We silence the noise per file/type rather than touching the
   # dependency or rewriting every refactor onto the Zipper API.
+  {"lib/number42/refactors/ex/case_to_function_clauses.ex", :call},
   {"lib/number42/refactors/ex/case_true_false.ex", :call},
   {"lib/number42/refactors/ex/collapse_nested_case_to_with.ex", :call},
   {"lib/number42/refactors/ex/enum_capture.ex", :call},
