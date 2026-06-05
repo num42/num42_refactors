@@ -89,6 +89,38 @@ defmodule Number42.Refactors.IdentifierExpansion do
     "params" => "param"
   }
 
+  # Antonym pairs for `negate/2`. Declared one-directional; the lookup
+  # map is built bidirectionally so `valid↔invalid` round-trips. Each
+  # word maps to exactly one antonym — no word may appear on both sides
+  # of different pairs, or the bidirectional fold would collide.
+  @antonym_pairs [
+    {"valid", "invalid"},
+    {"authorized", "unauthorized"},
+    {"enabled", "disabled"},
+    {"present", "absent"},
+    {"allowed", "forbidden"},
+    {"active", "inactive"},
+    {"visible", "hidden"},
+    {"empty", "full"}
+  ]
+
+  @antonyms @antonym_pairs
+            |> Enum.flat_map(fn {a, b} -> [{a, b}, {b, a}] end)
+            |> Map.new()
+
+  # Prefix-strip rules for morphological negation. Each prefix, when
+  # present, is removed to recover the positive form (`unlocked →
+  # locked`). The same prefixes are candidates for *adding* on the
+  # fallback path, but `un_` is the canonical one we attach.
+  @negation_prefixes ~w(un in dis)
+
+  # Irregular past participles that carry no `-ed`/`-en` tell so the
+  # ending heuristic can't class them as booleans. Boolean-shaped in
+  # code (`found?`, `built?`, `sent?`) → fall back to `not_`. Open set
+  # in principle; projects extend the effective behavior via
+  # `opts[:known]`.
+  @irregular_participles MapSet.new(~w(found built sent held kept met read run done))
+
   @doc """
   Try to expand `short` against the given `candidates`.
 
@@ -151,6 +183,91 @@ defmodule Number42.Refactors.IdentifierExpansion do
       :cont -> ranked_candidates(short, candidates, opts)
     end
   end
+
+  @doc """
+  Derive the antonym of a snake_case identifier.
+
+  Resolution order (first hit wins):
+
+  1. `opts[:known]` override — a project-supplied `.refactor.exs`
+     mapping, same mechanism as `resolve/3`'s `known`.
+  2. Built-in bidirectional antonym map (`valid↔invalid`, …).
+  3. `is_<stem>` / `has_<stem>` predicate shapes — `is_` negates the
+     stem recursively (`is_valid → is_invalid`), `has_` inserts `no_`
+     (`has_value → has_no_value`).
+  4. `not_<x>` strips to `<x>` (round-trip partner of the fallback).
+  5. A leading `un`/`in`/`dis` prefix strips to the positive form.
+  6. Fallback: prepend `not_`/`un_`. `<stem>` with no other rule gets
+     `not_<stem>` so it round-trips with rule 4; everything else gets
+     `un_<word>`.
+
+  Always returns a string — never `:skip`. The fallback may produce a
+  cosmetically odd name (`un_frobnicate`); callers that need a cleaner
+  result should supply an `opts[:known]` override.
+
+  ## Examples
+
+      iex> alias Number42.Refactors.IdentifierExpansion
+      iex> IdentifierExpansion.negate("valid")
+      "invalid"
+
+      iex> alias Number42.Refactors.IdentifierExpansion
+      iex> IdentifierExpansion.negate("not_found")
+      "found"
+  """
+  @spec negate(String.t(), %{optional(:known) => %{String.t() => String.t()}}) :: String.t()
+  def negate(word, opts \\ %{}) when is_binary(word) do
+    known = Map.get(opts, :known, %{})
+
+    cond do
+      Map.has_key?(known, word) -> Map.fetch!(known, word)
+      Map.has_key?(@antonyms, word) -> Map.fetch!(@antonyms, word)
+      true -> negate_morphological(word)
+    end
+  end
+
+  defp negate_morphological(word) do
+    cond do
+      match?("is_" <> _, word) -> negate_predicate(word, "is_")
+      match?("has_" <> _, word) -> "has_no_" <> trim_prefix(word, "has_")
+      match?("not_" <> _, word) -> trim_prefix(word, "not_")
+      stripped = strippable_prefix(word) -> stripped
+      true -> fallback_negation(word)
+    end
+  end
+
+  # No rule fired — guess the word class from its ending to pick a
+  # prefix that reads naturally. Participle/adjective endings
+  # (`-ed`/`-able`/`-ible`/`-en`) read as booleans → `not_`
+  # (`not_found`, `not_editable`), the round-trip partner of the
+  # `not_`-strip rule. Everything else → `un_` (`un_frobnicate`).
+  defp fallback_negation(word) do
+    if boolean_shaped?(word),
+      do: "not_" <> word,
+      else: "un_" <> word
+  end
+
+  defp boolean_shaped?(word) do
+    String.ends_with?(word, ~w(ed able ible en)) or
+      MapSet.member?(@irregular_participles, word)
+  end
+
+  defp negate_predicate("is_" <> stem, "is_"), do: "is_" <> negate(stem)
+
+  # Strip the first matching `un`/`in`/`dis` prefix that leaves a
+  # non-empty remainder. Returns the positive form, or nil when no
+  # prefix applies (so the `cond` falls through to the `not_` fallback).
+  defp strippable_prefix(word) do
+    Enum.find_value(@negation_prefixes, fn prefix ->
+      case word do
+        <<^prefix::binary, rest::binary>> when rest != "" -> rest
+        _ -> nil
+      end
+    end)
+  end
+
+  defp trim_prefix(word, prefix),
+    do: binary_part(word, byte_size(prefix), byte_size(word) - byte_size(prefix))
 
   # Pre-heuristic shortcuts shared by `resolve/3` and
   # `resolve_ranked/3` — they must agree on whitelist/stop/known/

@@ -399,6 +399,88 @@ defmodule Number42.Refactors.IdentifierExpansionTest do
   end
 
   # -------------------------------------------------------------------
+  # negate/1, negate/2 — antonym derivation
+  # -------------------------------------------------------------------
+
+  describe "negate/1 — built-in antonym map" do
+    test "valid → invalid" do
+      assert "invalid" = IdentifierExpansion.negate("valid")
+    end
+
+    test "authorized → unauthorized" do
+      assert "unauthorized" = IdentifierExpansion.negate("authorized")
+    end
+
+    test "enabled → disabled" do
+      assert "disabled" = IdentifierExpansion.negate("enabled")
+    end
+
+    test "present → absent" do
+      assert "absent" = IdentifierExpansion.negate("present")
+    end
+
+    test "map is bidirectional: invalid → valid" do
+      assert "valid" = IdentifierExpansion.negate("invalid")
+    end
+
+    test "map is bidirectional: disabled → enabled" do
+      assert "enabled" = IdentifierExpansion.negate("disabled")
+    end
+
+    test "map is bidirectional: absent → present" do
+      assert "present" = IdentifierExpansion.negate("absent")
+    end
+  end
+
+  describe "negate/1 — morphological prefix rules" do
+    test "not_x strips to x (involutive)" do
+      assert "found" = IdentifierExpansion.negate("not_found")
+    end
+
+    test "x gains not_ when no map/other rule fires" do
+      # `found` is not in the map and has no strippable prefix →
+      # the not_-rule is the round-trip partner of not_found → found.
+      assert "not_found" = IdentifierExpansion.negate("found")
+    end
+
+    test "un-prefix strips: unlocked → locked" do
+      assert "locked" = IdentifierExpansion.negate("unlocked")
+    end
+
+    test "dis-prefix strips: disconnected → connected" do
+      assert "connected" = IdentifierExpansion.negate("disconnected")
+    end
+  end
+
+  describe "negate/1 — is_/has_ predicate handling" do
+    test "is_valid → is_invalid (negates the predicate stem, keeps is_)" do
+      assert "is_invalid" = IdentifierExpansion.negate("is_valid")
+    end
+
+    test "has_value → has_no_value" do
+      assert "has_no_value" = IdentifierExpansion.negate("has_value")
+    end
+  end
+
+  describe "negate/1 — fallback" do
+    test "unknown word gains un_ prefix" do
+      assert "un_frobnicate" = IdentifierExpansion.negate("frobnicate")
+    end
+  end
+
+  describe "negate/2 — .refactor.exs override" do
+    test "opts[:known] override beats built-in map" do
+      opts = %{known: %{"valid" => "bogus"}}
+      assert "bogus" = IdentifierExpansion.negate("valid", opts)
+    end
+
+    test "falls through to built-in when key absent from override" do
+      opts = %{known: %{"other" => "x"}}
+      assert "invalid" = IdentifierExpansion.negate("valid", opts)
+    end
+  end
+
+  # -------------------------------------------------------------------
   # Helpers
   # -------------------------------------------------------------------
 
