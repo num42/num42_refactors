@@ -195,6 +195,28 @@ defmodule Number42.Refactors.Ex.DedupeClausePrologueTest do
 
       assert_unchanged(@subject, source)
     end
+
+    # A bodyless head declaring a default arg parses as `{:def, _, [head]}`
+    # — one element, no body_kw. The clause parser must not assume a body.
+    test "leaves a function group with a bodyless default-arg head untouched" do
+      source = """
+      defmodule M do
+        def find(ast, path \\\\ [])
+
+        def find(%{a: x}, path) do
+          log(path)
+          {x, path}
+        end
+
+        def find(_, path) do
+          log(path)
+          {nil, path}
+        end
+      end
+      """
+
+      assert_unchanged(@subject, source)
+    end
   end
 
   describe "idempotence" do

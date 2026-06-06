@@ -154,7 +154,7 @@ defmodule Number42.Refactors.Ex.PushParamIntoCallee do
   defp parse_inputs_from_config({:ok, contents}) do
     {config, _} = Code.eval_string(contents)
 
-    Keyword.get(config, :inputs, [])
+    Map.get(config, :inputs, [])
     |> Enum.flat_map(&Path.wildcard/1)
     |> Enum.uniq()
     |> Enum.filter(&File.regular?/1)

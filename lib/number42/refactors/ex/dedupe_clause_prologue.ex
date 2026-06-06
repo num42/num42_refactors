@@ -184,20 +184,25 @@ defmodule Number42.Refactors.Ex.DedupeClausePrologue do
   end
 
   defp parse_clauses(clauses) do
-    parsed =
-      Enum.map(clauses, fn {:def, _, [head, body_kw]} ->
-        {bare_head, guard} = split_guard(head)
-
-        with {name, params} <- extract_fn_signature(bare_head),
-             {:ok, body} <- do_body(body_kw) do
-          %{name: name, params: params, guard: guard, stmts: body_to_exprs(body)}
-        else
-          _ -> :error
-        end
-      end)
+    parsed = Enum.map(clauses, &parse_clause/1)
 
     if Enum.all?(parsed, &is_map/1), do: {:ok, parsed}, else: :skip
   end
+
+  defp parse_clause({:def, _, [head, body_kw]}) do
+    {bare_head, guard} = split_guard(head)
+
+    with {name, params} <- extract_fn_signature(bare_head),
+         {:ok, body} <- do_body(body_kw) do
+      %{name: name, params: params, guard: guard, stmts: body_to_exprs(body)}
+    else
+      _ -> :error
+    end
+  end
+
+  # Bodyless heads (`def foo(a, b \\ default)`) and any other non-clause
+  # node carry no prologue to dedupe — bail the whole group.
+  defp parse_clause(_), do: :error
 
   defp ensure_no_control_flow(parsed) do
     any_cf? =
