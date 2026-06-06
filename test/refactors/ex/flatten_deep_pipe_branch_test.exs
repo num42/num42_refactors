@@ -163,6 +163,67 @@ defmodule Number42.Refactors.Ex.FlattenDeepPipeBranchTest do
       assert_unchanged(@subject, source)
     end
 
+    test "skips a non-exhaustive case with an effectful shared pre-pipe (Enum.each)" do
+      source = """
+      defmodule M do
+        def run(x) do
+          case x do
+            :a -> x |> Enum.each(&log/1) |> step_a() |> end_it()
+            :b -> x |> Enum.each(&log/1) |> step_b() |> end_it()
+          end
+        end
+      end
+      """
+
+      assert_unchanged(@subject, source)
+    end
+
+    test "skips a non-exhaustive case even when only the shared suffix is effectful" do
+      source = """
+      defmodule M do
+        def run(x) do
+          case x do
+            :a -> x |> prep() |> step_a() |> Enum.each(&log/1)
+            :b -> x |> prep() |> step_b() |> Enum.each(&log/1)
+          end
+        end
+      end
+      """
+
+      assert_unchanged(@subject, source)
+    end
+  end
+
+  describe "exhaustive case allows hoisting effectful shared stages" do
+    test "fires for an exhaustive case (catch-all) with an effectful shared pre-pipe" do
+      before_source = """
+      defmodule M do
+        def run(x) do
+          case x do
+            :a -> x |> Enum.each(&log/1) |> step_a() |> end_it()
+            _ -> x |> Enum.each(&log/1) |> step_b() |> end_it()
+          end
+        end
+      end
+      """
+
+      expected = """
+      defmodule M do
+        def run(x) do
+          x
+          |> Enum.each(&log/1)
+          |> run_branch(x)
+          |> end_it()
+        end
+
+        defp run_branch(piped, :a), do: piped |> step_a()
+        defp run_branch(piped, _), do: piped |> step_b()
+      end
+      """
+
+      assert_rewrites(@subject, before_source, expected)
+    end
+
     test "skips when the scrutinee is not a bare variable" do
       source = """
       defmodule M do

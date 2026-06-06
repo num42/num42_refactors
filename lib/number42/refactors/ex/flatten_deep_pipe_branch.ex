@@ -50,8 +50,12 @@ defmodule Number42.Refactors.Ex.FlattenDeepPipeBranch do
     * A branch not piping from the scrutinee, or not a pipe at all.
     * Fewer than two branches, or no shared prefix/suffix, or an empty
       divergent middle in any branch.
-    * An effectful shared stage (`log!()`), where hoisting could change
-      observable behaviour.
+    * An effectful shared stage (`log!()`, `Enum.each(&log/1)`) lifted
+      out of a **non-exhaustive** `case`. An unmatched input raises
+      `CaseClauseError` before any branch runs in the original, so
+      hoisting the effect would fire it on inputs the original never
+      reached. Effectful shared stages are only hoisted when the `case`
+      is exhaustive (has a catch-all `_ ->` / bare-variable clause).
     * A `case` that is not the entire function body.
     * `defmacro`/`defmacrop`, or a head with an existing `when`-guard.
 
@@ -202,13 +206,31 @@ defmodule Number42.Refactors.Ex.FlattenDeepPipeBranch do
 
     with true <- p >= 1 and s >= 1,
          true <- Enum.all?(middles, &(&1 != [])),
-         true <- Enum.all?(prefix ++ suffix, &(not effectful_stage?(&1))),
+         true <- shared_stages_hoistable?(prefix ++ suffix, branches),
          :ok <- middles_isolated_from_patterns(branches, middles) do
       {:ok, %{prefix: prefix, suffix: suffix, middles: middles, branches: branches}}
     else
       _ -> :skip
     end
   end
+
+  # A shared stage is hoisted to run around the dispatch. For an
+  # **exhaustive** `case` exactly one branch ever runs, so a hoisted
+  # effectful stage keeps its single execution. For a **non-exhaustive**
+  # `case` an unmatched input raises `CaseClauseError` before any branch
+  # runs in the original — hoisting an effectful stage would fire that
+  # effect on inputs the original never reached. So effectful shared
+  # stages are only hoistable when the `case` is exhaustive.
+  defp shared_stages_hoistable?(shared_stages, branches) do
+    exhaustive_case?(branches) or Enum.all?(shared_stages, &(not effectful_stage?(&1)))
+  end
+
+  # The `case` is exhaustive when some branch matches every input — a
+  # catch-all `_ ->` or a bare-variable clause.
+  defp exhaustive_case?(branches), do: Enum.any?(branches, &catch_all_pattern?(&1.pattern))
+
+  defp catch_all_pattern?({name, _, ctx}) when is_atom(name) and is_atom(ctx), do: true
+  defp catch_all_pattern?(_), do: false
 
   defp middles_isolated_from_patterns(branches, middles) do
     branches
@@ -221,12 +243,18 @@ defmodule Number42.Refactors.Ex.FlattenDeepPipeBranch do
     |> ok_or_skip()
   end
 
-  # A shared stage is hoisted to run around the dispatch. Because case
-  # branches are mutually exclusive, the stage already ran exactly once;
-  # hoisting preserves that. We still skip on clearly-effectful stages
-  # (bang functions, known effect modules, `send`) as a conservative
-  # guard against subtle ordering assumptions.
+  # `effectful_stage?/1` decides whether a stage carries an observable
+  # effect: bang functions, known effect modules, `send`, ETS, and
+  # iterate-for-effect calls (`Enum.each`). `shared_stages_hoistable?/2`
+  # combines that with `exhaustive_case?/1` — effectful shared stages
+  # may only be hoisted when the `case` is exhaustive.
   @effect_modules ~w(Repo Logger GenServer File IO Agent Task Process)a
+
+  # Functions whose sole purpose is to run a side effect per element and
+  # discard the result — hoisting one out of a non-exhaustive `case`
+  # would fire its effect on an input that the original `case` never
+  # reached. Flagged as effectful regardless of the host module.
+  @effect_for_each ~w(each)a
 
   defp effectful_stage?(stage) do
     stage
@@ -236,6 +264,10 @@ defmodule Number42.Refactors.Ex.FlattenDeepPipeBranch do
 
   defp effectful_node?({{:., _, [{:__aliases__, _, [mod]}, _fun]}, _, _args})
        when mod in @effect_modules,
+       do: true
+
+  defp effectful_node?({{:., _, [{:__aliases__, _, _}, fun]}, _, _args})
+       when fun in @effect_for_each,
        do: true
 
   defp effectful_node?({{:., _, [:ets, _fun]}, _, _args}), do: true
