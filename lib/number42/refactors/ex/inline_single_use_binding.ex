@@ -14,6 +14,20 @@ defmodule Number42.Refactors.Ex.InlineSingleUseBinding do
   expression so operator precedence is preserved (`(a + b) * 2`, not
   `a + b * 2`).
 
+  ## Default-OFF (opt-in only)
+
+  This refactor is **disabled by default**. Splicing an RHS across the
+  many shapes a use site can take (Ecto pins, macro keyword args,
+  control-flow bodies) has produced enough invalid output that it is not
+  safe to run unattended. Enable it deliberately, per project, via
+  `.refactor.exs`:
+
+      configured_modules: [
+        {Number42.Refactors.Ex.InlineSingleUseBinding, enabled: true}
+      ]
+
+  Without `enabled: true` in its own opts, `transform/2` is a no-op.
+
   ## When we inline
 
   A `var = rhs` statement is inlined only when **all** hold:
@@ -81,8 +95,13 @@ defmodule Number42.Refactors.Ex.InlineSingleUseBinding do
   def reformat_after?, do: true
 
   @impl Number42.Refactors.Refactor
-  def transform(source, _opts),
-    do: Sourceror.parse_string(source) |> apply_to_parse_result(source)
+  def transform(source, opts) do
+    if Keyword.get(opts, :enabled, false) do
+      Sourceror.parse_string(source) |> apply_to_parse_result(source)
+    else
+      source
+    end
+  end
 
   defp apply_to_parse_result({:ok, ast}, source),
     do: ast |> first_block_patches() |> patch_or_passthrough(source)
