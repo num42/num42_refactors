@@ -70,6 +70,18 @@
      skip_in_modules: [
        Number42.Refactors.IdentifierExpansionTest
      ]}
+
+    # `RepeatedPatternToMacro` is **opt-in / default-off**: it collapses N
+    # structurally identical zero-arity functions into a generated `for`
+    # block. We deliberately do NOT enable it here. The trade-off is real:
+    # generated clauses are invisible to go-to-definition, can't carry
+    # per-clause `@doc`/`@spec`, and Dialyzer sees synthesised heads — a
+    # readability/tooling cost we don't want on the library's own source.
+    # To switch it on for a consuming project, add to that project's
+    # `.refactor.exs`:
+    #
+    #     {Number42.Refactors.Ex.RepeatedPatternToMacro,
+    #      enabled: true, min_functions: 3}
   ]
 
   # `heex:` is not set — the library has no CoreComponents of its own,
