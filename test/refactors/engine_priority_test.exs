@@ -8,7 +8,7 @@ defmodule Number42.Refactors.EnginePriorityTest do
   alias Number42.Refactors.Ex.InlineSingleExpressionDef
   alias Number42.Refactors.Ex.MultiAliasExpand
   alias Number42.Refactors.Ex.RejectIsNil
-  alias Number42.Refactors.Ex.SortFunctions
+  alias Number42.Refactors.Ex.RemoveBlankBetweenAttrAndDef
 
   describe "pipeline_modules/1 default ordering" do
     test "high-priority modules run before default ones" do
@@ -24,13 +24,13 @@ defmodule Number42.Refactors.EnginePriorityTest do
       mods = Engine.pipeline_modules()
       idx_alias = mods |> Enum.find_index(&(&1 == AliasOrder))
       idx_inline = mods |> Enum.find_index(&(&1 == InlineSingleExpressionDef))
-      idx_sort = mods |> Enum.find_index(&(&1 == SortFunctions))
+      idx_blank = mods |> Enum.find_index(&(&1 == RemoveBlankBetweenAttrAndDef))
 
       assert idx_alias < idx_inline,
              "InlineSingleExpressionDef (priority 50) should run after AliasOrder (default 100)"
 
-      assert idx_inline < idx_sort,
-             "SortFunctions (priority 30) should run after InlineSingleExpressionDef (priority 50)"
+      assert idx_inline < idx_blank,
+             "RemoveBlankBetweenAttrAndDef (priority 10) should run after InlineSingleExpressionDef (priority 50)"
     end
   end
 
