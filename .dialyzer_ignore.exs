@@ -57,6 +57,7 @@
   {"lib/number42/refactors/ex/map_new_lambda_to_for_comprehension.ex", :call},
   {"lib/number42/refactors/ex/map_new_lambda_to_for_comprehension.ex", :no_return},
   {"lib/number42/refactors/ex/map_new_to_pipe.ex", :call},
+  {"lib/number42/refactors/ex/negated_boolean_name.ex", :call},
   {"lib/number42/refactors/ex/pipe_reassign.ex", :call},
   {"lib/number42/refactors/ex/reduce_as_map.ex", :call},
   {"lib/number42/refactors/ex/reduce_map_put.ex", :call},
