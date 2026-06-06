@@ -35,6 +35,7 @@
   {"lib/number42/refactors/ex/case_to_function_clauses.ex", :call},
   {"lib/number42/refactors/ex/case_true_false.ex", :call},
   {"lib/number42/refactors/ex/collapse_nested_case_to_with.ex", :call},
+  {"lib/number42/refactors/ex/debug_inspect_cleanup.ex", :call},
   {"lib/number42/refactors/ex/enum_capture.ex", :call},
   {"lib/number42/refactors/ex/enum_capture.ex", :pattern_match},
   {"lib/number42/refactors/ex/enum_into_to_map_new.ex", :call},
