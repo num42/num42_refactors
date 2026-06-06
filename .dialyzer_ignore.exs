@@ -60,6 +60,12 @@
   {"lib/number42/refactors/ex/merge_pipeline_into_comprehension.ex", :call},
   {"lib/number42/refactors/ex/negated_boolean_name.ex", :call},
   {"lib/number42/refactors/ex/pipe_reassign.ex", :call},
+  # `push_param_into_callee.ex` calls `Patch.replace` in
+  # `rewrite_callee_clause/2` and `call_site_patch/4`; the `:call` plus the
+  # two `:no_return` findings (the anonymous mapper and `rewrite_callee_clause/2`)
+  # are pure follow-ons from the spec gap above.
+  {"lib/number42/refactors/ex/push_param_into_callee.ex", :call},
+  {"lib/number42/refactors/ex/push_param_into_callee.ex", :no_return},
   {"lib/number42/refactors/ex/reduce_as_map.ex", :call},
   {"lib/number42/refactors/ex/reduce_map_put.ex", :call},
   {"lib/number42/refactors/ex/redundant_boolean_if.ex", :call},
