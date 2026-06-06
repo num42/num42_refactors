@@ -103,7 +103,7 @@ defmodule Number42.Refactors.Ex.HoistInvariantOutOfComprehension do
   def transform(source, _opts), do: Sourceror.parse_string(source) |> apply_patches(source)
 
   defp apply_patches({:ok, ast}, source),
-    do: ast |> collect_lifts(nil) |> Enum.take(1) |> emit_or_passthrough(source)
+    do: ast |> collect_lifts(no_host()) |> Enum.take(1) |> emit_or_passthrough(source)
 
   defp apply_patches({:error, _}, source), do: source
 
@@ -114,9 +114,17 @@ defmodule Number42.Refactors.Ex.HoistInvariantOutOfComprehension do
 
   # ── Tree walk: track the innermost block-member statement that hosts
   #    the comprehension, so the binding lands in a legal position. ──
+  #
+  # `host` is a `%{stmt, convert}` context: `stmt` is the statement the
+  # binding is prepended to; `convert` is `{enclosing_node, key}` when
+  # that statement is the *sole* expression of a keyword-form `do:`
+  # body — inserting a second statement there needs a `do/end` block,
+  # so the patch rewrites the enclosing construct instead.
+
+  defp no_host, do: %{stmt: nil, convert: nil}
 
   defp collect_lifts({:__block__, _, exprs}, _host) when is_list(exprs),
-    do: exprs |> Enum.flat_map(&collect_lifts(&1, &1))
+    do: exprs |> Enum.flat_map(&collect_lifts(&1, stmt_host(&1)))
 
   defp collect_lifts(node, host) do
     lifts_here(node, host) ++ descend(node, host)
@@ -135,18 +143,40 @@ defmodule Number42.Refactors.Ex.HoistInvariantOutOfComprehension do
 
   # `do`/`else`/… block bodies re-root the host to each statement in
   # the block. Everything else keeps the current host and recurses.
-  defp child_groups({_form, _meta, args}, host) do
-    {head, blocks} = split_block_keyword(args)
+  defp child_groups({_form, _meta, _args} = node, host) do
+    {head, blocks} = split_block_keyword(node_args(node))
 
     head_lifts = head |> Enum.flat_map(&collect_lifts(&1, host))
-    block_lifts = blocks |> Enum.flat_map(&collect_block(&1, host))
+    block_lifts = blocks |> Enum.flat_map(&collect_block(&1, node))
     head_lifts ++ block_lifts
   end
 
-  defp collect_block({key, body}, _host) when key in [:do, :else, :rescue, :catch, :after],
-    do: body |> body_to_exprs() |> Enum.flat_map(&collect_lifts(&1, &1))
+  defp node_args({_form, _meta, args}), do: args
 
-  defp collect_block(other, host), do: collect_lifts(other, host)
+  defp collect_block({key, body}, enclosing) when key in [:do, :else, :rescue, :catch, :after] do
+    exprs = body_to_exprs(body)
+    convert = keyword_form_convert(enclosing, key, exprs)
+    exprs |> Enum.flat_map(&collect_lifts(&1, block_host(&1, convert)))
+  end
+
+  defp collect_block(other, enclosing), do: collect_lifts(other, stmt_host(enclosing))
+
+  # A single-statement keyword-form body (`def f(x), do: expr`) can hold
+  # only one expression. When the binding has to be prepended there, the
+  # enclosing construct must be rewritten as a `do/end` block. Block-form
+  # bodies (carrying `:do`/`:end` location meta on the enclosing call)
+  # and multi-statement bodies already accept extra statements directly.
+  defp keyword_form_convert({_form, meta, _args} = enclosing, key, [_single])
+       when is_list(meta) do
+    if block_form?(meta), do: nil, else: {enclosing, key}
+  end
+
+  defp keyword_form_convert(_enclosing, _key, _exprs), do: nil
+
+  defp block_form?(meta), do: Keyword.has_key?(meta, :do)
+
+  defp stmt_host(stmt), do: %{stmt: stmt, convert: nil}
+  defp block_host(stmt, convert), do: %{stmt: stmt, convert: convert}
 
   defp split_block_keyword(args) when is_list(args) do
     case List.last(args) do
@@ -174,7 +204,7 @@ defmodule Number42.Refactors.Ex.HoistInvariantOutOfComprehension do
 
   # ── Comprehension detection at the current node ──
 
-  defp lifts_here(node, host) when not is_nil(host) do
+  defp lifts_here(node, %{stmt: stmt} = host) when not is_nil(stmt) do
     case comprehension(node) do
       {:ok, bound, body} -> lift_for_body(node, host, bound, body)
       :no -> []
@@ -230,10 +260,10 @@ defmodule Number42.Refactors.Ex.HoistInvariantOutOfComprehension do
 
   defp lift_for_body(_node, _host, _bound, nil), do: []
 
-  defp lift_for_body(_node, host, bound, body) do
+  defp lift_for_body(_node, %{stmt: stmt, convert: convert}, bound, body) do
     case invariant_call(body, bound) do
       nil -> []
-      expr -> [%{host: host, expr: expr}]
+      expr -> [%{host: stmt, convert: convert, expr: expr}]
     end
   end
 
@@ -275,6 +305,23 @@ defmodule Number42.Refactors.Ex.HoistInvariantOutOfComprehension do
 
   # ── Patch emission ──
 
+  # Keyword-form host (`def f(x), do: <for>`): a `do:` body holds a
+  # single expression, so we can't prepend a binding there. Rewrite the
+  # enclosing construct into a `do/end` block whose body is the binding
+  # followed by the rebound host — the only legal place for two
+  # statements. The whole construct is replaced in one patch.
+  defp build_patches(%{host: host, convert: {enclosing, key}, expr: expr}) do
+    name = binding_name(expr, enclosing)
+    binding = {:=, [], [{String.to_atom(name), [], nil}, strip_comments(expr)]}
+    rebound = rebind_expr(host, expr, name) |> strip_comments()
+    block = {:__block__, [], [binding, rebound]}
+
+    range = Sourceror.get_range(enclosing)
+    new_text = enclosing |> to_do_end_block(key, block) |> Sourceror.to_string()
+
+    [Patch.new(range, new_text, false)]
+  end
+
   # Single replace on the host statement: prepend `name = expr` then
   # render the host with every occurrence of `expr` rebound to `name`.
   # Rewriting the whole host in one patch sidesteps the overlapping-range
@@ -289,6 +336,32 @@ defmodule Number42.Refactors.Ex.HoistInvariantOutOfComprehension do
     host_text = rebind_expr(host, expr, name) |> strip_comments() |> Sourceror.to_string()
 
     [Patch.new(range, "#{name} = #{expr_text}\n\n#{indent}#{host_text}", false)]
+  end
+
+  # Swap the enclosing construct's keyword-form `key:` body for a
+  # `do/end` block. Forcing `:do`/`:end` location meta onto the call is
+  # what makes Sourceror render the block form instead of the keyword
+  # form; the location values themselves are placeholders re-derived by
+  # the final `mix format` pass.
+  defp to_do_end_block({form, meta, args}, key, block) do
+    new_args = replace_block_body(args, key, block)
+
+    new_meta =
+      meta
+      |> Keyword.put_new(:do, line: 1, column: 1)
+      |> Keyword.put_new(:end, line: 1, column: 1)
+
+    {form, new_meta, new_args}
+  end
+
+  defp replace_block_body(args, key, block) do
+    List.update_at(args, -1, fn kw ->
+      Enum.map(kw, fn
+        {{:__block__, m, [^key]}, _body} -> {{:__block__, m, [key]}, block}
+        {^key, _body} -> {key, block}
+        pair -> pair
+      end)
+    end)
   end
 
   defp rebind_expr(host, expr, name) do

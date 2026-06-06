@@ -41,6 +41,49 @@ defmodule Number42.Refactors.Ex.HoistInvariantOutOfComprehensionTest do
       assert {:ok, _} = Code.string_to_quoted(actual)
       assert String.contains?(actual, ~s|= String.length("hello")|)
     end
+
+    test "converts a `do:`-keyword function body to `do/end` when hoisting" do
+      before_source = """
+      defmodule M do
+        def f(rows), do: for(row <- rows, do: format(row, Enum.sum([1, 2, 3])))
+      end
+      """
+
+      expected = """
+      defmodule M do
+        def f(rows) do
+          sum = Enum.sum([1, 2, 3])
+          for(row <- rows, do: format(row, sum))
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, expected)
+    end
+
+    test "the converted `do/end` output compiles" do
+      before_source = """
+      defmodule M do
+        def f(rows), do: for(row <- rows, do: format(row, Enum.sum([1, 2, 3])))
+
+        defp format(row, sum), do: {row, sum}
+      end
+      """
+
+      actual = apply_refactor(@subject, before_source)
+
+      assert_compiles(actual)
+    end
+
+    test "converting a `do:`-keyword body is idempotent" do
+      source = """
+      defmodule M do
+        def f(rows), do: for(row <- rows, do: format(row, Enum.sum([1, 2, 3])))
+      end
+      """
+
+      assert_idempotent(@subject, source)
+    end
   end
 
   describe "rewrites — Enum.map" do
