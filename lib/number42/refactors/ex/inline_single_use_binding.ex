@@ -115,9 +115,11 @@ defmodule Number42.Refactors.Ex.InlineSingleUseBinding do
   defp patches_for_binding({:=, _, [lhs, rhs]} = binding, idx, exprs) do
     with {:ok, var} <- bare_lhs_var(lhs),
          true <- pure?(rhs),
+         false <- control_flow_rhs?(rhs),
          {:ok, use_expr} <- next_statement(exprs, idx),
          1 <- read_count(use_expr, var),
-         false <- read_after?(var, exprs, idx + 1) do
+         false <- read_after?(var, exprs, idx + 1),
+         false <- used_in_pin?(use_expr, var) do
       [delete_binding_patch(binding), inline_patch(use_expr, var, rhs)]
     else
       _ -> nil
@@ -125,6 +127,28 @@ defmodule Number42.Refactors.Ex.InlineSingleUseBinding do
   end
 
   defp patches_for_binding(_, _idx, _exprs), do: nil
+
+  # A control-flow expression (`if`/`case`/`cond`/`with`/`unless`/`fn`)
+  # carries `do:`/`else:` keyword args or a multi-clause block. Spliced
+  # into a larger expression — `{^if x, do: :a, else: :b, rest}` — the
+  # trailing keywords bleed into the surrounding term and the result no
+  # longer parses. Paren-wrapping it would compile but reads worse than
+  # the named binding, so leave these alone.
+  @control_flow_heads [:if, :unless, :case, :cond, :with, :fn]
+  defp control_flow_rhs?({head, _, _}) when head in @control_flow_heads, do: true
+  defp control_flow_rhs?(_), do: false
+
+  # The sole read sits behind a `^` pin (Ecto query / match pin). The
+  # inline would land an expression at a pin position (`^(if …)`), which
+  # is illegal. Skip — only bare reads are safe to splice.
+  defp used_in_pin?(use_expr, var) do
+    use_expr
+    |> Macro.prewalker()
+    |> Enum.any?(fn
+      {:^, _, [{^var, _, ctx}]} when is_atom(ctx) -> true
+      _ -> false
+    end)
+  end
 
   # A bare-variable LHS — `{name, meta, ctx}` with atom context. Anything
   # else (tuple/map/struct pattern, pinned var) is not a simple binding.

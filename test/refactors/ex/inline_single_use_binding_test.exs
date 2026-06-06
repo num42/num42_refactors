@@ -160,6 +160,51 @@ defmodule Number42.Refactors.Ex.InlineSingleUseBindingTest do
       end
       """)
     end
+
+    # Inlining `if`/`case`/`cond`/`with`/`fn`/`unless` splices a body
+    # carrying do:/else: keywords into a larger term; the trailing
+    # keywords bleed out and the result no longer parses (e.g. into a
+    # tuple: `{^if x, do: :a, else: :b, rest}`).
+    test "skips an if-expression RHS" do
+      assert_unchanged(@subject, """
+      defmodule M do
+        def f(x) do
+          dir = if x == :asc, do: :asc_nulls_last, else: :desc_nulls_last
+          order(dir)
+        end
+      end
+      """)
+    end
+
+    test "skips a case-expression RHS" do
+      assert_unchanged(@subject, """
+      defmodule M do
+        def f(x) do
+          v =
+            case x do
+              1 -> :a
+              _ -> :b
+            end
+
+          use_it(v)
+        end
+      end
+      """)
+    end
+
+    # The sole read sits behind a `^` pin (Ecto query / match pin).
+    # Splicing lands an expression at the pin position (`^(expr)`),
+    # which is illegal — leave the binding in place.
+    test "skips a use behind a pin (^var)" do
+      assert_unchanged(@subject, """
+      defmodule M do
+        def f(x) do
+          dir = Map.get(x, :dir)
+          from(r in q, order_by: [{^dir, r.id}])
+        end
+      end
+      """)
+    end
   end
 
   describe "idempotence & compilation" do
