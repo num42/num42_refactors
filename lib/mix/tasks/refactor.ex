@@ -373,7 +373,8 @@ defmodule Mix.Tasks.Refactor do
     Number42.Refactors.Ex.DelegateExactDuplicates,
     Number42.Refactors.Ex.ExtractParametricClone,
     Number42.Refactors.Ex.ExtractRenamedClone,
-    Number42.Refactors.Ex.ExtractSharedModule
+    Number42.Refactors.Ex.ExtractSharedModule,
+    Number42.Refactors.Ex.PushParamIntoCallee
   ]
 
   defp explain(mod) do
