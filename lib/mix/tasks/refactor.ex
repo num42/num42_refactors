@@ -22,6 +22,7 @@ defmodule Mix.Tasks.Refactor do
       mix refactor --dry-run          # print git-style diff per file, don't write
       mix refactor --only AliasUsage  # run only this refactor (skip the rest)
       mix refactor --only AliasUsage --only RejectIsNil  # multiple
+      mix refactor --exclude SortKeywords                # run all but this one
       mix refactor --stop             # halt on the first file that changes
       mix refactor --log              # print refactor name + rationale + diff
       mix refactor --test             # run the test for each file the refactor changed
@@ -35,6 +36,11 @@ defmodule Mix.Tasks.Refactor do
   `--only` accepts the short module suffix (`AliasUsage`), the snake-case
   filename stem (`alias_usage`), or the fully-qualified module name. Pass
   it multiple times to whitelist several refactors.
+
+  `--exclude` is the inverse blacklist: run every refactor *except* the
+  named ones. Accepts the same name forms as `--only` and can be passed
+  multiple times. Merged on top of the config's `skipped_modules`, so
+  CLI exclusions add to (never replace) the project's permanent skips.
 
   `--stop` (`-s`) makes the task return as soon as one file actually
   changed. The change is written (or, with `--dry-run`, printed) before
@@ -135,6 +141,7 @@ defmodule Mix.Tasks.Refactor do
   @switches [
     dry_run: :boolean,
     only: :keep,
+    exclude: :keep,
     stop: :boolean,
     log: :boolean,
     test: :boolean,
@@ -155,6 +162,10 @@ defmodule Mix.Tasks.Refactor do
     files = expand_inputs(inputs)
 
     only_modules = resolve_only(Keyword.get_values(opts, :only))
+    excluded_modules = resolve_only(Keyword.get_values(opts, :exclude))
+
+    skipped_modules =
+      (Map.get(config, :skipped_modules, []) ++ excluded_modules) |> Enum.uniq()
 
     configured_modules =
       config
@@ -163,7 +174,7 @@ defmodule Mix.Tasks.Refactor do
 
     engine_opts = [
       only_modules: only_modules,
-      skipped_modules: Map.get(config, :skipped_modules, []),
+      skipped_modules: skipped_modules,
       configured_modules: configured_modules,
       project_config: config,
       dry_run: Keyword.get(opts, :dry_run, false)

@@ -245,6 +245,23 @@ defmodule Number42.Refactors.Ex.EnumCaptureTest do
     test "list literal with multiple slot refs is left alone" do
       assert_unchanged(@subject, "Enum.map(items, fn i -> [i.id, i.name, i.id] end)")
     end
+
+    # issue #95: capturing into a multi-line collection literal buries
+    # the slot among sibling entries and is no shorter than the lambda.
+    # A single-slot multi-line map would pass `check_slot_count`, so it
+    # must be screened out by the multi-line guard instead.
+    test "multi-line map literal with single slot ref is left alone" do
+      assert_unchanged(@subject, """
+      Enum.map(missing_item_ids, fn item_id ->
+        %{
+          brand_id: brand_id,
+          id: UUID.generate(),
+          item_id: item_id,
+          inserted_at: now
+        }
+      end)\
+      """)
+    end
   end
 
   describe "rewrites — non-trivial but allowed" do
