@@ -59,6 +59,16 @@
      skip_in_modules: [
        Number42.Refactors.AstHelpers,
        Number42.Refactors.AstDiff
+     ]},
+
+    # `HoistHardcodedConfig` lifts inline URL/absolute-path literals into
+    # a `@module_attribute`. The IdentifierExpansion tests pass real URL
+    # literals straight into `derive_constant_name/2` as fixtures — the
+    # literal *is* the test input, so hoisting it to an attribute is
+    # pure churn that obscures what the assertion exercises.
+    {Number42.Refactors.Ex.HoistHardcodedConfig,
+     skip_in_modules: [
+       Number42.Refactors.IdentifierExpansionTest
      ]}
   ]
 
