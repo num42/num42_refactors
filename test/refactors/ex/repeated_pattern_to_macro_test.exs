@@ -252,6 +252,40 @@ defmodule Number42.Refactors.Ex.RepeatedPatternToMacroTest do
       assert_unchanged(@subject, source, @on)
     end
 
+    test "zero-arity bodies with a same-named free variable are skipped" do
+      source = """
+      defmodule FreeVar do
+        def red, do: foo + 1
+        def green, do: foo + 2
+        def blue, do: foo + 3
+      end
+      """
+
+      # `foo` is a free variable read in every body — lifting it into a
+      # `for` table would emit `def unquote(fun)(), do: foo + unquote(arg1)`
+      # where `foo` is undefined → won't compile. Must skip.
+      assert_unchanged(@subject, source, @on)
+    end
+
+    test "if a free-var group were (wrongly) collapsed it would not compile" do
+      source = """
+      defmodule FreeVarCompile do
+        def red, do: foo + 1
+        def green, do: foo + 2
+        def blue, do: foo + 3
+      end
+      """
+
+      # Belt-and-braces: the only safe output for a free-var body is the
+      # untouched source (which compiles only because `foo` is unbound at
+      # runtime — but a generated `for` over it would be a compile error,
+      # see above). We assert the pass produced compilable code, i.e. it
+      # did not synthesise an `unquote(arg)` body referencing free `foo`.
+      rewritten = apply_refactor(@subject, source, @on)
+
+      refute rewritten =~ "for {fun,"
+    end
+
     test "no varying literals (identical bodies) → skip, leave for exact-dup pass" do
       source = """
       defmodule Same do

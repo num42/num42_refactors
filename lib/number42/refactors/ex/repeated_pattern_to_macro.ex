@@ -192,7 +192,16 @@ defmodule Number42.Refactors.Ex.RepeatedPatternToMacro do
   defp bare_head({name, _, nil}) when is_atom(name), do: {name, nil}
   defp bare_head(_), do: :error
 
-  defp literal_only?(body), do: free_vars(body, MapSet.new()) |> Enum.empty?()
+  # A body is literal-only when it reads no free variable. `free_vars/2`
+  # filters against a *known* scope and so can't find them with an empty
+  # scope — compute the free set directly: every used var name minus the
+  # names bound within the body itself.
+  @spec literal_only?(term()) :: boolean()
+  defp literal_only?(body) do
+    used_var_names(body)
+    |> MapSet.difference(bound_in(body))
+    |> Enum.empty?()
+  end
 
   # A def carrying leading/trailing comments (a `@doc` attaches as a
   # comment in Sourceror's view) or `@doc`/`@spec` is blocked: per-clause
