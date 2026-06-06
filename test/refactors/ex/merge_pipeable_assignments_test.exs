@@ -149,6 +149,60 @@ defmodule Number42.Refactors.Ex.MergePipeableAssignmentsTest do
     end
   end
 
+  describe "skips — non-pipeable literal seeds (issue: struct→map corruption)" do
+    test "skips a struct-literal seed" do
+      source = """
+      defmodule M do
+        defp f(all_entries, scope) do
+          workbook = %Workbook{all_entries: all_entries, sheets: []}
+          persist(workbook, scope)
+        end
+      end
+      """
+
+      assert_unchanged(@subject, source)
+    end
+
+    test "skips a map-literal seed" do
+      source = """
+      defmodule M do
+        defp f(all_entries, scope) do
+          payload = %{all_entries: all_entries, sheets: []}
+          persist(payload, scope)
+        end
+      end
+      """
+
+      assert_unchanged(@subject, source)
+    end
+
+    test "skips a list-literal seed" do
+      source = """
+      defmodule M do
+        defp f(a, scope) do
+          items = [a, 1, 2]
+          persist(items, scope)
+        end
+      end
+      """
+
+      assert_unchanged(@subject, source)
+    end
+
+    test "skips a tuple-literal seed" do
+      source = """
+      defmodule M do
+        defp f(a, scope) do
+          pair = {a, 1}
+          persist(pair, scope)
+        end
+      end
+      """
+
+      assert_unchanged(@subject, source)
+    end
+  end
+
   describe "skips" do
     test "skips when an intermediate var is read after the chain" do
       source = """

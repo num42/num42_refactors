@@ -161,6 +161,17 @@ defmodule Number42.Refactors.Ex.MergePipeableAssignments do
 
   defp as_call({{:., _, _}, _, args} = call) when is_list(args) and args != [], do: {:ok, call}
 
+  # Literal constructors share the `{atom, meta, args}` shape with calls
+  # but are not pipeable functions: `%Struct{}`, `%{}`, `{a, b, c}`,
+  # `<<…>>`, and bare module aliases. `:__block__` is Sourceror's wrapper
+  # for lists and 2-tuples (`[a, b]`, `{a, b}`) and for parenthesised
+  # groups — also never a call. Splitting any of these leading-arg-first
+  # and rendering the rest as a pipe stage produces invalid syntax
+  # (`Struct |> %(%{…})`, a bare `|>` with an empty stage) and silently
+  # degrades `%Struct{}` to a map.
+  @non_call_constructors [:%, :%{}, :{}, :<<>>, :__aliases__, :__block__]
+  defp as_call({fun, _, _}) when fun in @non_call_constructors, do: :skip
+
   defp as_call({fun, _, args} = call) when is_atom(fun) and is_list(args) and args != [] do
     if Macro.operator?(fun, length(args)) or fun == :|>, do: :skip, else: {:ok, call}
   end
