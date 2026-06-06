@@ -213,12 +213,26 @@ defmodule Number42.Refactors.Ex.EnumCapture do
   defp ensure_simple_capture_shape({:__block__, _, [inner]}),
     do: ensure_simple_capture_shape(inner)
 
-  defp ensure_simple_capture_shape({:{}, _, _} = node), do: check_slot_count(node)
-  defp ensure_simple_capture_shape({_a, _b} = node), do: check_slot_count(node)
-  defp ensure_simple_capture_shape({:%{}, _, _} = node), do: check_slot_count(node)
-  defp ensure_simple_capture_shape({:%, _, _} = node), do: check_slot_count(node)
-  defp ensure_simple_capture_shape(node) when is_list(node), do: check_slot_count(node)
+  defp ensure_simple_capture_shape({:{}, _, _} = node), do: capture_into_container(node)
+  defp ensure_simple_capture_shape({_a, _b} = node), do: capture_into_container(node)
+  defp ensure_simple_capture_shape({:%{}, _, _} = node), do: capture_into_container(node)
+  defp ensure_simple_capture_shape({:%, _, _} = node), do: capture_into_container(node)
+  defp ensure_simple_capture_shape(node) when is_list(node), do: capture_into_container(node)
   defp ensure_simple_capture_shape(_), do: :ok
+
+  # Capturing into a collection literal (`%{…}`, `[…]`, `{…}`, `%S{…}`)
+  # is only a win when the literal is a one-liner. A multi-line literal
+  # buries the slot (`item_id: &1`) among sibling entries and the
+  # `&(…)` form is no shorter than the original lambda — the opposite of
+  # this refactor's goal (issue #95). Leave those alone.
+  defp capture_into_container(node) do
+    if multi_line?(node), do: :skip, else: check_slot_count(node)
+  end
+
+  defp multi_line?({_, meta, _}) when is_list(meta),
+    do: meta[:line] != nil and meta[:closing] != nil and meta[:line] != meta[:closing][:line]
+
+  defp multi_line?(_), do: false
   defp ensure_single_statement({:__block__, _, exprs}) when length(exprs) > 1, do: :skip
   defp ensure_single_statement(_), do: :ok
 
