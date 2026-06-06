@@ -1138,7 +1138,6 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
 
         {:ok, name_str} = resolve_collision(base_name, already_used)
         helper_name = String.to_atom(name_str)
-        new_used = Map.put(used, target_module, Map.put(already_used, name_str, :reserved))
 
         # Classify holes into outer (real params, passed at call-site)
         # and inner (locally-bound vars, unified inside the helper body
@@ -1149,6 +1148,8 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
             {[], state}
 
           {outer_holes, local_groups, all_bound} ->
+            new_used = Map.put(used, target_module, Map.put(already_used, name_str, :reserved))
+
             emit_intra_plan_with_classification(intra_entries, %{
               target_module: target_module,
               skeleton: skeleton,
