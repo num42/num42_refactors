@@ -43,7 +43,17 @@
     # refactor. Re-enable once the heuristics are robust enough.
     Number42.Refactors.Ex.ExtractParametricClone,
     Number42.Refactors.Ex.ExtractRenamedClone,
-    Number42.Refactors.Ex.DelegateExactDuplicates
+    Number42.Refactors.Ex.DelegateExactDuplicates,
+
+    # Cross-file move-method with a disk side-effect: prepare/1 appends
+    # the relocated function to the target module's file and transform
+    # rewrites the host (→ defdelegate) and every call site. Highest-risk
+    # refactor in the suite. The library's own source has many thin
+    # forwarder-shaped functions and thematically similar AST walkers
+    # that the envy heuristic could mis-trigger on; keep it off our own
+    # bootstrap. Try locally with
+    # `mix refactor --only RelocateMisplacedFunction --dry-run`.
+    Number42.Refactors.Ex.RelocateMisplacedFunction
   ],
 
   # Per-refactor options. Keys are fully-qualified modules, values are
