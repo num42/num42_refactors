@@ -225,8 +225,21 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlock do
   # --- helper naming ---
 
   defp helper_name(fn_name, existing_names) do
-    candidate = :"#{fn_name}_block"
+    candidate = suffixed_name(fn_name, "_block")
     if MapSet.member?(existing_names, candidate), do: :skip, else: {:ok, candidate}
+  end
+
+  # Append `_block` to the source name, but keep a trailing `!`/`?` at
+  # the very end — `verify_siblings!` must become `verify_siblings_block!`,
+  # not the illegal `verify_siblings!_block` (a bang is only valid as the
+  # final character of an identifier).
+  defp suffixed_name(fn_name, suffix) do
+    name = Atom.to_string(fn_name)
+
+    case String.split_at(name, -1) do
+      {stem, marker} when marker in ["!", "?"] -> :"#{stem}#{suffix}#{marker}"
+      {_, _} -> :"#{name}#{suffix}"
+    end
   end
 
   defp def_names(body_exprs) do

@@ -38,6 +38,67 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
 
       assert_rewrites(@subject, before_source, after_source)
     end
+
+    # A trailing `!`/`?` is only legal as the final character of an
+    # identifier. `verify!` + `_block` must become `verify_block!`, not
+    # the unparseable `verify!_block`.
+    test "keeps a trailing bang at the end of the generated helper name" do
+      before_source = """
+      defmodule M do
+        defp verify!(scope, ids) do
+          loaded = load(scope)
+          expected = build(ids)
+          compare(loaded, expected)
+        end
+      end
+      """
+
+      after_source = """
+      defmodule M do
+        defp verify!(scope, ids) do
+          {loaded, expected} = verify_block!(scope, ids)
+          compare(loaded, expected)
+        end
+
+        defp verify_block!(scope, ids) do
+          loaded = load(scope)
+          expected = build(ids)
+          {loaded, expected}
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, after_source)
+    end
+
+    test "keeps a trailing question mark at the end of the generated helper name" do
+      before_source = """
+      defmodule M do
+        defp valid?(a, b) do
+          x = foo(a)
+          y = bar(b)
+          check(x, y)
+        end
+      end
+      """
+
+      after_source = """
+      defmodule M do
+        defp valid?(a, b) do
+          {x, y} = valid_block?(a, b)
+          check(x, y)
+        end
+
+        defp valid_block?(a, b) do
+          x = foo(a)
+          y = bar(b)
+          {x, y}
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, after_source)
+    end
   end
 
   describe "rewrites — single live-out value" do
