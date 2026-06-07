@@ -879,7 +879,7 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunction do
     {config, _} = Code.eval_string(contents)
 
     config
-    |> Keyword.get(:inputs, [])
+    |> Map.get(:inputs, [])
     |> Enum.flat_map(&Path.wildcard/1)
     |> Enum.uniq()
     |> Enum.filter(&File.regular?/1)
