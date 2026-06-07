@@ -49,16 +49,29 @@ defmodule Number42.Refactors.Ex.RemoveDeadPrivateFunction do
   nothing is deleted. We never delete a private when a dynamic dispatch
   is reachable.
 
-  ## `quote` blocks
+  ## Macros & `quote` blocks
 
-  `collect_calls/1` walks `quote` bodies like any other AST, so a name
-  referenced inside a `quote` counts as used. Qualified self-calls
-  (`__MODULE__.fn(...)` / `ThisModule.fn(...)`, the common shape inside
-  `quote` for macros) are also counted as roots. And a `quote` block
-  that dispatches through a dynamic `unquote(...)` at the call-name
-  position keeps every private in the module — we cannot resolve which
-  one it names at expansion time. All three are the safe direction for
-  a destructive pass.
+  `collect_definitions/1` only walks `def`/`defp` bodies, so calls made
+  from a `defmacro`/`defmacrop` are invisible to the base call graph.
+  A macro body runs at expansion time and can name any private — both
+  the compile-time code *before* the `quote` and the quoted AST — so
+  every local call in a macro body is added as a reachability root.
+  Qualified self-calls (`__MODULE__.fn(...)` / `ThisModule.fn(...)`, the
+  common shape inside `quote`) are also counted as roots. And a `quote`
+  block that dispatches through a dynamic `unquote(...)` at the
+  call-name position keeps every private in the module — we cannot
+  resolve which one it names at expansion time. All are the safe
+  direction for a destructive pass.
+
+  ## Sigil templates (HEEx/EEx)
+
+  Sourceror keeps a sigil's content (`~H\"""…\"""`, `~F`, …) as an
+  unparsed string literal, so a helper called only from a template —
+  `{format_datetime(@x)}` in a HEEx body — is invisible to the call
+  graph. We scan every sigil's text for tokens matching a defined
+  function name and keep **all** arities of any match (name-only,
+  arity-agnostic). Over-keeping here is the safe direction for a
+  destructive pass.
 
   ## Known limit
 
@@ -87,17 +100,12 @@ defmodule Number42.Refactors.Ex.RemoveDeadPrivateFunction do
   function that became dead *because* of an earlier removal is caught
   then).
 
-  ## Default-OFF (opt-in only)
+  ## Reachability across macros
 
-  Disabled by default — `transform/2` is a no-op unless its own opts carry
-  `enabled: true`. A dogfood run surfaced a false positive: a `defp` that
-  is only referenced from inside a `quote do … end` macro body reads as
-  uncalled and gets deleted, silently dropping live code. Enable per
-  project once the call-graph follows quoted references:
-
-      configured_modules: [
-        {Number42.Refactors.Ex.RemoveDeadPrivateFunction, enabled: true}
-      ]
+  Two dogfood false positives are guarded: a `defp` referenced only from
+  inside a `quote do … end` macro body, and a `defp` called from the
+  compile-time body of a `defmacro` (before its `quote`). Both count as
+  reachable.
   """
 
   use Number42.Refactors.Refactor
@@ -124,12 +132,8 @@ defmodule Number42.Refactors.Ex.RemoveDeadPrivateFunction do
   def reformat_after?, do: true
 
   @impl Number42.Refactors.Refactor
-  def transform(source, opts) do
-    if Keyword.get(opts, :enabled, false) do
-      Sourceror.parse_string(source) |> apply_to_parse_result(source)
-    else
-      source
-    end
+  def transform(source, _opts) do
+    Sourceror.parse_string(source) |> apply_to_parse_result(source)
   end
 
   defp apply_to_parse_result({:ok, ast}, source),
@@ -177,14 +181,82 @@ defmodule Number42.Refactors.Ex.RemoveDeadPrivateFunction do
     end
   end
 
-  # Roots = public `def`s (external contract) plus any private named by
-  # a qualified self-call `__MODULE__.fn(...)` / `ThisModule.fn(...)`.
-  # The local call graph only sees *unqualified* calls, so a private
-  # reached solely through a qualified self-reference (common inside
-  # `quote` blocks for macros) would otherwise look dead.
+  # Roots = public `def`s (external contract), any private named by a
+  # qualified self-call `__MODULE__.fn(...)` / `ThisModule.fn(...)`, and
+  # every local call made from a `defmacro`/`defmacrop` body.
+  #
+  # The local call graph (`collect_definitions/1`) only walks `def`/`defp`
+  # bodies, so a private reached solely through a qualified self-reference
+  # or from inside a macro would otherwise look dead. A macro body runs at
+  # expansion time — both the code *before* the `quote` and the quoted code
+  # can name a private, so we count the whole body.
   defp reachability_roots(definitions, body_exprs, module_name) do
-    public_def_roots(definitions) ++ self_qualified_uses(body_exprs, module_name)
+    public_def_roots(definitions) ++
+      self_qualified_uses(body_exprs, module_name) ++
+      macro_body_uses(body_exprs) ++
+      sigil_referenced_defs(definitions, body_exprs)
   end
+
+  # Local calls made from any `defmacro`/`defmacrop` body, as roots.
+  # `collect_calls/1` walks the whole body (pre-`quote` compile-time code
+  # and the quoted AST alike), so a private named anywhere in a macro stays
+  # alive — the conservative direction for a destructive pass.
+  defp macro_body_uses(body_exprs) do
+    body_exprs
+    |> Enum.flat_map(&macro_clause_calls/1)
+  end
+
+  defp macro_clause_calls({kind, _, [_head, body_kw]})
+       when kind in [:defmacro, :defmacrop] and is_list(body_kw) do
+    body_kw |> Keyword.values() |> Enum.flat_map(&collect_calls/1)
+  end
+
+  defp macro_clause_calls(_), do: []
+
+  # Names referenced inside a sigil literal (`~H`, `~F`, … HEEx/EEx
+  # templates), as roots. Sourceror keeps sigil content as an unparsed
+  # string, so the call graph never sees a `{format_datetime(@x)}` call
+  # or a `<.list_items />` component invocation in a template. We scan
+  # every sigil's text for *any* identifier token matching a defined
+  # function name and keep all arities of every match — name-only,
+  # arity-agnostic. Over-keeping a `defp` whose name merely appears as a
+  # word in a template is the safe direction for a destructive pass.
+  defp sigil_referenced_defs(definitions, body_exprs) do
+    tokens = body_exprs |> sigil_text() |> sigil_tokens()
+
+    definitions
+    |> Enum.filter(&MapSet.member?(tokens, Atom.to_string(&1.name)))
+    |> Enum.map(&{&1.name, &1.arity})
+  end
+
+  # Identifier-shaped substrings of the template text. Compared as
+  # strings against the (string) definition names — never atomised, so
+  # arbitrary template words don't leak into the atom table.
+  defp sigil_tokens(text) do
+    ~r/[a-z_][a-zA-Z0-9_]*[!?]?/
+    |> Regex.scan(text)
+    |> List.flatten()
+    |> MapSet.new()
+  end
+
+  defp sigil_text(body_exprs) do
+    body_exprs
+    |> Enum.flat_map(fn expr ->
+      expr
+      |> Macro.prewalker()
+      |> Enum.flat_map(&sigil_literal_parts/1)
+    end)
+    |> Enum.join("\n")
+  end
+
+  defp sigil_literal_parts({sigil, _, [{:<<>>, _, parts}, _mods]}) when is_atom(sigil) do
+    case Atom.to_string(sigil) do
+      "sigil_" <> _ -> Enum.filter(parts, &is_binary/1)
+      _ -> []
+    end
+  end
+
+  defp sigil_literal_parts(_), do: []
 
   # Public `def`s are the reachability roots — the module's external
   # contract. A module with none is reached some other way; skip it.

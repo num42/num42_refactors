@@ -47,14 +47,22 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlock do
   - The prefix references **no module attribute** (`@rate`) — the
     helper is a sibling `defp` and attributes are in scope, but an
     attribute-parameterised block is subtle; conservative skip for v1.
+  - No prefix binding contains **string interpolation or a sigil**
+    (`"… \#{x} …"`, `~H` templates). Interpolation carries implicit
+    reads and a multi-line heredoc range Sourceror can't slice
+    precisely, so a range-patch relocation would leave a dangling
+    triple-quote in the host.
 
   ## Parameters and return
 
-  - **Parameters** = the prefix's free variables, which (because the
-    prefix leads the body) can only be the function's own arguments.
-  - **Return** = the prefix-bound names that are still read in the tail
-    (`AstHelpers.read_after?/3`). One live-out binding returns the bare
-    value (`total = report_block(order)`); two or more return a tuple
+  - **Parameters** = the prefix's free variables (`AstHelpers.free_vars/2`
+    over the prefix, restricted to the host's parameters). Because the
+    prefix leads the body, a free var can only resolve to a parameter,
+    so only the parameters the prefix actually reads are threaded — not
+    the whole signature.
+  - **Return** = the prefix-bound names that are still read in the tail.
+    One live-out binding returns the bare value
+    (`total = report_block(order)`); two or more return a tuple
     (`{total, tax} = report_block(order)`). At least one is required.
 
   ## Idempotence & determinism
@@ -65,16 +73,12 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlock do
   finds an extractable run there; the engine's fixpoint loop handles
   other functions on later passes.
 
-  ## Default-OFF (opt-in only)
+  ## Extraction safety
 
-  Disabled by default — `transform/2` is a no-op unless its own opts carry
-  `enabled: true`. A dogfood run surfaced rewrites that leave empty
-  statement stubs in the host body and emit mis-indented extracted defps.
-  Enable per project once the host-body rewrite is clean:
-
-      configured_modules: [
-        {Number42.Refactors.Ex.ExtractFunctionFromBlock, enabled: true}
-      ]
+  The helper's parameters are the prefix's free variables only (not the
+  whole host signature), so no unused-argument warnings. Bindings holding
+  string interpolation or a sigil are skipped — relocating an interpolated
+  heredoc by range patch left a dangling `\"""` in the host.
   """
 
   use Number42.Refactors.Refactor
@@ -104,12 +108,8 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlock do
   def reformat_after?, do: true
 
   @impl Number42.Refactors.Refactor
-  def transform(source, opts) do
-    if Keyword.get(opts, :enabled, false) do
-      Sourceror.parse_string(source) |> apply_to_parse_result(source)
-    else
-      source
-    end
+  def transform(source, _opts) do
+    Sourceror.parse_string(source) |> apply_to_parse_result(source)
   end
 
   defp apply_to_parse_result({:ok, ast}, source), do: apply_to_ast(ast, source)
@@ -131,31 +131,41 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlock do
 
   defp first_extraction(nil, _mod_ast, _source), do: nil
 
-  defp first_extraction(body_exprs, mod_ast, source) do
+  defp first_extraction(body_exprs, _mod_ast, source) do
     existing_names = def_names(body_exprs)
+    multi_keys = multi_clause_keys(body_exprs)
 
     body_exprs
-    |> Enum.find_value(fn expr -> extraction_for_def(expr, existing_names, mod_ast, source) end)
+    |> Enum.find_value(fn expr ->
+      extraction_for_def(expr, existing_names, multi_keys, source)
+    end)
   end
 
-  defp extraction_for_def({kind, _, [head, body_kw]} = def_node, existing_names, _mod_ast, source)
+  defp extraction_for_def(
+         {kind, _, [head, body_kw]} = def_node,
+         existing_names,
+         multi_keys,
+         source
+       )
        when kind in [:def, :defp] and is_list(body_kw) do
     with {fn_name, params} <- extract_fn_signature(strip_when(head)),
+         false <- MapSet.member?(multi_keys, {fn_name, length(params)}),
          {:ok, param_names} <- bare_param_names(params),
          {:ok, body} <- do_body(body_kw),
          exprs = body_to_exprs(body),
          {:ok, prefix, tail} <- maximal_binding_prefix(exprs),
          :ok <- ensure_extractable(prefix),
          true <- meaningful_tail?(tail),
+         args = prefix_free_vars(prefix, param_names),
          live_out = live_out_bindings(prefix, tail),
          {:ok, helper_name} <- helper_name(fn_name, existing_names) do
-      build_extraction(prefix, live_out, param_names, helper_name, def_node, source)
+      build_extraction(prefix, live_out, args, helper_name, def_node, source)
     else
       _ -> nil
     end
   end
 
-  defp extraction_for_def(_, _existing_names, _mod_ast, _source), do: nil
+  defp extraction_for_def(_, _existing_names, _multi_keys, _source), do: nil
 
   # --- block selection ---
 
@@ -198,9 +208,27 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlock do
     cond do
       Enum.any?(prefix, &references_attribute?/1) -> :skip
       Enum.any?(prefix, &has_control_flow?/1) -> :skip
+      Enum.any?(prefix, &has_interpolation_or_sigil?/1) -> :skip
       true -> :ok
     end
   end
+
+  # String interpolation (`{:<<>>, _, _}`) and sigils (`~H`, `~s`, …)
+  # carry implicit reads (`@assigns`) and multi-line heredoc ranges that
+  # Sourceror can't slice precisely — relocating such a binding by range
+  # patch leaves a dangling heredoc terminator in the host. Skip rather
+  # than corrupt.
+  defp has_interpolation_or_sigil?(ast) do
+    ast
+    |> Macro.prewalker()
+    |> Enum.any?(fn
+      {:<<>>, _, _} -> true
+      {form, _, _} when is_atom(form) -> sigil?(form)
+      _ -> false
+    end)
+  end
+
+  defp sigil?(form), do: form |> Atom.to_string() |> String.starts_with?("sigil_")
 
   defp references_attribute?(ast) do
     ast
@@ -222,21 +250,45 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlock do
 
   # --- data-flow ---
 
-  defp live_out_bindings(prefix, tail) do
-    bound = prefix |> Enum.map(&binding_name/1)
+  # The prefix's free variables, restricted to the host's parameters and
+  # kept in parameter-declaration order. Because the prefix leads the
+  # body, a free var can only resolve to a parameter — so these are
+  # exactly the helper's arguments. Threading every parameter instead
+  # would leave the helper with unused arguments (warnings-as-errors).
+  #
+  # Scanned **left-to-right**, accumulating bound names: a name is free
+  # only on a read that precedes its own binding. A binding that shadows
+  # a parameter and reads it on the RHS (`s = s / 100`) is therefore
+  # still a free read of that parameter — a whole-block `used - bound`
+  # would wrongly cancel it.
+  defp prefix_free_vars(prefix, param_names) do
+    params = MapSet.new(param_names)
 
-    # A bound name is live-out if any tail statement reads it free.
-    bound
-    |> Enum.filter(fn name ->
-      Enum.any?(tail, &MapSet.member?(free_in_expr(&1), name))
-    end)
+    {free, _bound} =
+      Enum.reduce(prefix, {MapSet.new(), MapSet.new()}, fn {:=, _, [lhs, rhs]}, {free, bound} ->
+        reads = used_var_names(rhs) |> MapSet.difference(bound) |> MapSet.intersection(params)
+        {MapSet.union(free, reads), MapSet.union(bound, MapSet.new(pattern_var_names(lhs)))}
+      end)
+
+    Enum.filter(param_names, &MapSet.member?(free, &1))
+  end
+
+  defp live_out_bindings(prefix, tail) do
+    read_in_tail =
+      tail |> Enum.map(&used_var_names/1) |> Enum.reduce(MapSet.new(), &MapSet.union/2)
+
+    # A prefix-bound name is live-out if the tail references it anywhere.
+    # `used_var_names` (a plain read set, no binding subtraction) is the
+    # safe side: a `cond`/`with` clause head reads its test vars, and
+    # over-returning a value the tail happens to rebind is harmless,
+    # while under-returning leaves the tail with an undefined variable.
+    prefix
+    |> Enum.map(&binding_name/1)
+    |> Enum.filter(&MapSet.member?(read_in_tail, &1))
     |> Enum.uniq()
   end
 
   defp binding_name({:=, _, [{name, _, ctx}, _]}) when is_atom(name) and is_atom(ctx), do: name
-
-  defp free_in_expr(expr),
-    do: MapSet.difference(used_var_names(expr), collect_bound_vars(expr))
 
   # --- helper naming ---
 
@@ -272,6 +324,29 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlock do
     end)
     |> MapSet.new()
   end
+
+  # `{name, arity}` keys defined by more than one clause. The helper is
+  # inserted as a sibling directly after the host clause; doing that to
+  # one clause of a multi-clause function splits the group ("clauses
+  # with the same name and arity should be grouped together"). Skip
+  # multi-clause hosts rather than reorder the module.
+  defp multi_clause_keys(body_exprs) do
+    body_exprs
+    |> Enum.flat_map(&def_arity_key/1)
+    |> Enum.frequencies()
+    |> Enum.filter(fn {_key, count} -> count > 1 end)
+    |> Enum.map(fn {key, _count} -> key end)
+    |> MapSet.new()
+  end
+
+  defp def_arity_key({kind, _, [head | _]}) when kind in [:def, :defp] do
+    case extract_fn_signature(strip_when(head)) do
+      {name, args} -> [{name, length(args)}]
+      _ -> []
+    end
+  end
+
+  defp def_arity_key(_), do: []
 
   # --- patch construction ---
 

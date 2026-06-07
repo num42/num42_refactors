@@ -137,6 +137,35 @@ defmodule Number42.Refactors.IdentifierExpansion do
     {"golden_ratio", (1 + :math.sqrt(5)) / 2}
   ]
 
+  # Well-known integers for `derive_constant_name/2`. Exact match only —
+  # these values carry the same meaning in any project. Extend by
+  # appending a `{value, name}` pair.
+  @well_known_ints %{
+    60 => "seconds_per_minute",
+    100 => "percent",
+    255 => "max_byte",
+    360 => "degrees_full",
+    1000 => "kilo",
+    1024 => "kibi",
+    3600 => "seconds_per_hour",
+    65_535 => "max_word",
+    86_400 => "seconds_per_day"
+  }
+
+  # Call-name → name-stem heuristics for the `opts[:context]` axis. The
+  # surrounding call (`String.slice`, `Enum.take`, …) names a bound on
+  # its numeric argument. One `{call_substring, stem}` per recognized
+  # shape, longest/most-specific first.
+  @context_stems [
+    {"slice", "max_slice"},
+    {"truncate", "max_length"},
+    {"take", "max_take"},
+    {"chunk", "chunk_size"},
+    {"timeout", "timeout"},
+    {"retries", "max_retries"},
+    {"retry", "max_retries"}
+  ]
+
   @doc """
   Try to expand `short` against the given `candidates`.
 
@@ -743,16 +772,21 @@ defmodule Number42.Refactors.IdentifierExpansion do
   1. `opts[:key]` — when the literal sat at `key: value` (a config
      keyword or a map entry), the key *is* the name (`base_url`,
      `timeout`). `?`/`!` markers are stripped.
-  2. Well-known numeric values — `pi`, `e`, … matched within a small
-     float tolerance.
-  3. Type-based fallback — never fails: url-shaped string →
-     `default_url`, other string → `default_string`, integer →
-     `magic_number`, float → `default_float`, anything else →
-     `constant`.
+  2. `opts[:context]` — the surrounding call name (`String.slice`,
+     `Enum.take`, …). A recognized call names a bound on its numeric
+     argument (`slice → max_slice`, `take → max_take`). No match →
+     fall through.
+  3. Well-known values — floats (`pi`, `e`, … within a tolerance) and
+     integers (`60 → seconds_per_minute`, `1024 → kibi`, …).
+  4. Millisecond multiples — a round multiple of `1000` reads as a
+     second-scaled timeout: `5000 → timeout_5s_ms`.
+  5. Value-in-name fallback — never fails and never collides:
+     integer → `int_<value>` (`int_42`, negatives `int_neg_7`),
+     float → `default_float`, url-shaped string → `default_url`,
+     other string → `default_string`, anything else → `constant`.
 
   Always returns a snake_case string (no leading `@`); the caller
-  renders the attribute. Pass `opts[:key]` for a meaningful name —
-  the fallback is deliberately generic.
+  renders the attribute.
 
   ## Examples
 
@@ -761,17 +795,42 @@ defmodule Number42.Refactors.IdentifierExpansion do
       "base_url"
 
       iex> alias Number42.Refactors.IdentifierExpansion
+      iex> IdentifierExpansion.derive_constant_name(3600, %{})
+      "seconds_per_hour"
+
+      iex> alias Number42.Refactors.IdentifierExpansion
+      iex> IdentifierExpansion.derive_constant_name(5000, %{})
+      "timeout_5s_ms"
+
+      iex> alias Number42.Refactors.IdentifierExpansion
+      iex> IdentifierExpansion.derive_constant_name(200, %{context: "slice"})
+      "max_slice"
+
+      iex> alias Number42.Refactors.IdentifierExpansion
       iex> IdentifierExpansion.derive_constant_name(42, %{})
-      "magic_number"
+      "int_42"
   """
-  @spec derive_constant_name(term(), %{optional(:key) => String.t() | atom() | nil}) ::
-          String.t()
+  @spec derive_constant_name(term(), %{
+          optional(:key) => String.t() | atom() | nil,
+          optional(:context) => String.t() | atom() | nil
+        }) :: String.t()
   def derive_constant_name(value, opts \\ %{}) do
-    case Map.get(opts, :key) do
-      nil -> derive_constant_name_from_value(value)
-      key -> strip_marker(key)
+    cond do
+      key = Map.get(opts, :key) -> strip_marker(key)
+      name = context_name(value, Map.get(opts, :context)) -> name
+      true -> derive_constant_name_from_value(value)
     end
   end
+
+  # Call-name heuristic: an integer bounded by a recognized call gets a
+  # bound-shaped name. Only fires for integers under a matching call —
+  # otherwise nil, so the value fallback takes over.
+  defp context_name(value, context) when is_integer(value) and context not in [nil, ""] do
+    str = to_string(context)
+    Enum.find_value(@context_stems, fn {needle, stem} -> if str =~ needle, do: stem end)
+  end
+
+  defp context_name(_value, _context), do: nil
 
   defp derive_constant_name_from_value(value) when is_float(value) do
     case well_known_float(value) do
@@ -780,13 +839,28 @@ defmodule Number42.Refactors.IdentifierExpansion do
     end
   end
 
-  defp derive_constant_name_from_value(value) when is_integer(value), do: "magic_number"
+  defp derive_constant_name_from_value(value) when is_integer(value) do
+    cond do
+      name = Map.get(@well_known_ints, value) -> name
+      ms = millisecond_name(value) -> ms
+      true -> "int_#{encode_int(value)}"
+    end
+  end
 
   defp derive_constant_name_from_value(value) when is_binary(value) do
     if url_shaped?(value), do: "default_url", else: "default_string"
   end
 
   defp derive_constant_name_from_value(_value), do: "constant"
+
+  # Round multiples of 1000 read as second-scaled ms timeouts.
+  defp millisecond_name(value) when value > 1000 and rem(value, 1000) == 0,
+    do: "timeout_#{div(value, 1000)}s_ms"
+
+  defp millisecond_name(_value), do: nil
+
+  defp encode_int(value) when value < 0, do: "neg_#{-value}"
+  defp encode_int(value), do: Integer.to_string(value)
 
   # Match a float against well-known mathematical constants within a
   # tolerance — literal `3.14159…` rarely equals the BEAM's full-

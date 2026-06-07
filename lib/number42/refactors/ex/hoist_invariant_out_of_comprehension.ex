@@ -69,17 +69,13 @@ defmodule Number42.Refactors.Ex.HoistInvariantOutOfComprehension do
   variable in the enclosing statement so the binding never shadows an
   existing one.
 
-  ## Default-OFF (opt-in only)
+  ## Capture-shorthand safety
 
-  Disabled by default — `transform/2` is a no-op unless its own opts carry
-  `enabled: true`. A dogfood run surfaced rewrites that hoist a capture
-  shorthand (`Atom.to_string(&1)`) out of its `&(...)` context, leaving a
-  bare `&1` that no longer compiles. Enable per project once capture-form
-  invariants are excluded:
-
-      configured_modules: [
-        {Number42.Refactors.Ex.HoistInvariantOutOfComprehension, enabled: true}
-      ]
+  A `&(...)` capture binds `&1`, `&2`, … only inside its own subtree, so a
+  subexpression that references a capture arg (`Atom.to_string(&1)`) is
+  **never** hoisted — pulled out of the capture the bare `&1` would no
+  longer compile. Conservative skip: any candidate holding a `&n` is left
+  in place.
   """
 
   use Number42.Refactors.Refactor
@@ -112,12 +108,8 @@ defmodule Number42.Refactors.Ex.HoistInvariantOutOfComprehension do
   def reformat_after?, do: true
 
   @impl Number42.Refactors.Refactor
-  def transform(source, opts) do
-    if Keyword.get(opts, :enabled, false) do
-      Sourceror.parse_string(source) |> apply_patches(source)
-    else
-      source
-    end
+  def transform(source, _opts) do
+    Sourceror.parse_string(source) |> apply_patches(source)
   end
 
   defp apply_patches({:ok, ast}, source),
@@ -301,7 +293,20 @@ defmodule Number42.Refactors.Ex.HoistInvariantOutOfComprehension do
   defp children(_), do: []
 
   defp hoistable_call?(node, bound) do
-    call_node?(node) and pure?(node) and not depends_on_bound?(node, bound)
+    call_node?(node) and pure?(node) and not depends_on_bound?(node, bound) and
+      not captures_arg?(node)
+  end
+
+  # A `&(...)` capture shorthand binds `&1`, `&2`, … only within its own
+  # subtree. A node holding a capture arg loses that binding when hoisted
+  # out, leaving a bare `&1` that no longer compiles — never lift it.
+  defp captures_arg?(node) do
+    node
+    |> Macro.prewalk(false, fn
+      {:&, _, [n]} = inner, _acc when is_integer(n) -> {inner, true}
+      inner, acc -> {inner, acc}
+    end)
+    |> elem(1)
   end
 
   defp call_node?({{:., _, [{:__aliases__, _, _}, fun]}, _, args})

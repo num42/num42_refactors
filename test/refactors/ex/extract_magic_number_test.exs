@@ -5,24 +5,6 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
 
   @subject ExtractMagicNumber
 
-  # ExtractMagicNumber is opt-in / default-off. Every test that exercises
-  # the rewrite passes `enabled: true`; a dedicated test asserts the
-  # default-off behaviour.
-  @on [enabled: true]
-
-  describe "default-off" do
-    test "without opt-in config the source is left untouched" do
-      source = ~S'''
-      defmodule M do
-        def a, do: 3600
-        def b, do: 3600
-      end
-      '''
-
-      assert_unchanged(@subject, source)
-    end
-  end
-
   describe "rewrites" do
     test "hoists a repeated integer literal into a module attribute" do
       assert_rewrites(
@@ -35,12 +17,11 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
         ''',
         ~S'''
         defmodule M do
-          @magic_number 3600
-          def a, do: @magic_number
-          def b, do: @magic_number
+          @seconds_per_hour 3600
+          def a, do: @seconds_per_hour
+          def b, do: @seconds_per_hour
         end
-        ''',
-        @on
+        '''
       )
     end
 
@@ -59,8 +40,7 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
           def a, do: connect(timeout: @timeout)
           def b, do: reconnect(timeout: @timeout)
         end
-        ''',
-        @on
+        '''
       )
     end
 
@@ -79,8 +59,7 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
           def a, do: @default_float
           def b, do: @default_float
         end
-        ''',
-        @on
+        '''
       )
     end
 
@@ -95,13 +74,12 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
         ''',
         ~S'''
         defmodule M do
-          @magic_number 3600
-          @magic_number_2 7200
-          def a, do: {@magic_number, @magic_number_2}
-          def b, do: {@magic_number, @magic_number_2}
+          @seconds_per_hour 3600
+          @int_7200 7200
+          def a, do: {@seconds_per_hour, @int_7200}
+          def b, do: {@seconds_per_hour, @int_7200}
         end
-        ''',
-        @on
+        '''
       )
     end
   end
@@ -114,8 +92,7 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
         defmodule M do
           def a, do: 3600
         end
-        ''',
-        @on
+        '''
       )
     end
 
@@ -128,7 +105,7 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
           def b, do: 3600
         end
         ''',
-        @on ++ [min_occurrences: 3]
+        min_occurrences: 3
       )
     end
 
@@ -144,13 +121,13 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
         ''',
         ~S'''
         defmodule M do
-          @magic_number 3600
-          def a, do: @magic_number
-          def b, do: @magic_number
-          def c, do: @magic_number
+          @seconds_per_hour 3600
+          def a, do: @seconds_per_hour
+          def b, do: @seconds_per_hour
+          def c, do: @seconds_per_hour
         end
         ''',
-        @on ++ [min_occurrences: 3]
+        min_occurrences: 3
       )
     end
   end
@@ -164,8 +141,7 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
           def a, do: {0, 1, 2, 0.0, 1.0, 0.5}
           def b, do: {0, 1, 2, 0.0, 1.0, 0.5}
         end
-        ''',
-        @on
+        '''
       )
     end
 
@@ -178,13 +154,12 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
           def a, do: @timeout
           def b, do: @timeout
         end
-        ''',
-        @on
+        '''
       )
     end
 
     test "no defmodule wrapper — nothing to do" do
-      assert_unchanged(@subject, "def a, do: 3600\ndef b, do: 3600", @on)
+      assert_unchanged(@subject, "def a, do: 3600\ndef b, do: 3600")
     end
 
     test "literals in pattern positions are never hoisted (module attr is illegal in a pattern)" do
@@ -199,8 +174,7 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
           def f(404), do: :a
           def f(_), do: :b
         end
-        ''',
-        @on
+        '''
       )
     end
 
@@ -216,14 +190,105 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
         ''',
         ~S'''
         defmodule M do
-          @magic_number 404
+          @int_404 404
           def f(404), do: :not_found
-          def g, do: @magic_number
-          def h, do: @magic_number
+          def g, do: @int_404
+          def h, do: @int_404
+        end
+        '''
+      )
+    end
+  end
+
+  describe "capture arity is not a data literal (Bug 1)" do
+    test "a literal in the arity position of &fun/N is never hoisted" do
+      # `&do_search_items/3` — the `3` is an arity, not data. Replacing it
+      # with `@magic_number` yields `&do_search_items/@magic_number`, an
+      # invalid capture. The arity literal must be neither candidate nor
+      # counted, so the two body 3s alone fall below the threshold.
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          def s, do: [{:items, &do_search_items/3}, {:assets, &do_search_assets/3}]
+        end
+        '''
+      )
+    end
+
+    test "an arity literal does not pad the count of a same-valued data literal" do
+      # Two arity `3`s plus one data `3`. If arities were counted the data
+      # `3` would cross the threshold and hoist; excluded, the lone data
+      # `3` stays below it.
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          def s, do: {&a/3, &b/3}
+          def t, do: 3
+        end
+        '''
+      )
+    end
+  end
+
+  describe "macro hygiene — quote bodies (Bug 2)" do
+    test "a literal inside quote do ... end is never hoisted" do
+      # A `@magic_number` hoisted from a quote-body would resolve at
+      # expansion time in the *calling* module, where the attribute does
+      # not exist → undefined module attribute. Literals under `quote`
+      # are pruned entirely.
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          defmacro __using__(_opts) do
+            quote do
+              def a, do: connect(timeout: 5000)
+              def b, do: reconnect(timeout: 5000)
+            end
+          end
+        end
+        '''
+      )
+    end
+  end
+
+  describe "call-context names (Aufgabe 4)" do
+    test "derives a name from the surrounding call when no keyword key applies" do
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def a(x), do: String.slice(x, 0, 200)
+          def b(x), do: String.slice(x, 0, 200)
         end
         ''',
-        @on
+        ~S'''
+        defmodule M do
+          @max_slice 200
+          def a(x), do: String.slice(x, 0, @max_slice)
+          def b(x), do: String.slice(x, 0, @max_slice)
+        end
+        '''
       )
+    end
+  end
+
+  describe "blank line after attribute block (Aufgabe 5)" do
+    test "a blank line separates the hoisted attribute from the first definition" do
+      actual =
+        ExtractMagicNumber.transform(
+          ~S'''
+          defmodule M do
+            def a, do: 3600
+            def b, do: 3600
+          end
+          ''',
+          []
+        )
+
+      assert actual =~ "@seconds_per_hour 3600\n\n  def a"
     end
   end
 
@@ -236,8 +301,7 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
           def a, do: 3600
           def b, do: 3600
         end
-        ''',
-        @on
+        '''
       )
     end
 
@@ -249,8 +313,7 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
           def a, do: connect(timeout: 5000)
           def b, do: reconnect(timeout: 5000)
         end
-        ''',
-        @on
+        '''
       )
     end
   end

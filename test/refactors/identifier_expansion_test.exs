@@ -677,12 +677,83 @@ defmodule Number42.Refactors.IdentifierExpansionTest do
                IdentifierExpansion.derive_constant_name("hello", %{})
     end
 
-    test "integer → magic_number" do
-      assert "magic_number" = IdentifierExpansion.derive_constant_name(42, %{})
-    end
-
     test "float → default_float" do
       assert "default_float" = IdentifierExpansion.derive_constant_name(0.5, %{})
+    end
+  end
+
+  describe "derive_constant_name/2 — well-known integers (Bug 3)" do
+    test "1000 → kilo" do
+      assert "kilo" = IdentifierExpansion.derive_constant_name(1000, %{})
+    end
+
+    test "1024 → kibi" do
+      assert "kibi" = IdentifierExpansion.derive_constant_name(1024, %{})
+    end
+
+    test "60 → seconds_per_minute" do
+      assert "seconds_per_minute" = IdentifierExpansion.derive_constant_name(60, %{})
+    end
+
+    test "3600 → seconds_per_hour" do
+      assert "seconds_per_hour" = IdentifierExpansion.derive_constant_name(3600, %{})
+    end
+
+    test "86400 → seconds_per_day" do
+      assert "seconds_per_day" = IdentifierExpansion.derive_constant_name(86_400, %{})
+    end
+
+    test "100 → percent" do
+      assert "percent" = IdentifierExpansion.derive_constant_name(100, %{})
+    end
+
+    test "255 → max_byte" do
+      assert "max_byte" = IdentifierExpansion.derive_constant_name(255, %{})
+    end
+
+    test "65535 → max_word" do
+      assert "max_word" = IdentifierExpansion.derive_constant_name(65_535, %{})
+    end
+
+    test "360 → degrees_full" do
+      assert "degrees_full" = IdentifierExpansion.derive_constant_name(360, %{})
+    end
+  end
+
+  describe "derive_constant_name/2 — millisecond multiples (Bug 3)" do
+    test "5000 → timeout_5s_ms" do
+      assert "timeout_5s_ms" = IdentifierExpansion.derive_constant_name(5000, %{})
+    end
+
+    test "30000 → timeout_30s_ms" do
+      assert "timeout_30s_ms" = IdentifierExpansion.derive_constant_name(30_000, %{})
+    end
+  end
+
+  describe "derive_constant_name/2 — value-in-name fallback (Bug 3)" do
+    test "an arbitrary integer encodes its value, not magic_number" do
+      assert "int_42" = IdentifierExpansion.derive_constant_name(42, %{})
+    end
+
+    test "negative integers stay valid identifiers" do
+      assert "int_neg_7" = IdentifierExpansion.derive_constant_name(-7, %{})
+    end
+  end
+
+  describe "derive_constant_name/2 — call-context axis (Aufgabe 4)" do
+    test "slice/length call names a max-length constant" do
+      assert "max_slice" =
+               IdentifierExpansion.derive_constant_name(200, %{context: "slice"})
+    end
+
+    test "key still beats context" do
+      assert "limit" =
+               IdentifierExpansion.derive_constant_name(200, %{key: "limit", context: "slice"})
+    end
+
+    test "context falls back to value when it derives nothing useful" do
+      assert "int_200" =
+               IdentifierExpansion.derive_constant_name(200, %{context: "foo"})
     end
   end
 

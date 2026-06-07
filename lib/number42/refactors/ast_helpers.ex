@@ -1712,21 +1712,26 @@ defmodule Number42.Refactors.AstHelpers do
     # a `/3` definition with one default (issue: dead-code removal deleting
     # live default-arg functions). The returned reachable set is keyed by
     # the *declared* arity so callers can match it against `&1.arity`.
+    # Several definition groups can share one callable arity — a split
+    # clause `def f/2` alongside `def f(a, b \\ x)` both answer `{f, 2}`.
+    # Index `{name, a}` to *all* such groups so neither group's call edges
+    # nor declared arity is lost to a map collision (would wrongly delete a
+    # private only reached from the dropped group).
     graph =
       definitions
       |> Enum.flat_map(fn %{name: name, arity: arity, min_arity: min, calls: calls} ->
         for a <- min..arity, do: {{name, a}, {arity, calls}}
       end)
-      |> Map.new()
+      |> Enum.group_by(fn {key, _} -> key end, fn {_, group} -> group end)
 
-    arity_graph = Map.new(graph, fn {key, {_declared, calls}} -> {key, calls} end)
+    arity_graph = Map.new(graph, fn {key, groups} -> {key, union_calls(groups)} end)
     reachable_callable = transitive_closure(roots, arity_graph)
 
     # Map any reached callable arity back to the declared arity, so the
     # result matches definitions keyed by `&1.arity`.
     reachable =
       reachable_callable
-      |> Enum.flat_map(&declared_key(&1, graph))
+      |> Enum.flat_map(&declared_keys(&1, graph))
       |> MapSet.new()
 
     if dynamic_dispatch_reachable?(definitions, reachable) do
@@ -1736,11 +1741,14 @@ defmodule Number42.Refactors.AstHelpers do
     end
   end
 
-  defp declared_key({name, _arity} = key, graph) do
-    case Map.get(graph, key) do
-      {declared, _calls} -> [{name, declared}]
-      nil -> []
-    end
+  defp union_calls(groups) do
+    Enum.reduce(groups, MapSet.new(), fn {_declared, calls}, acc -> MapSet.union(acc, calls) end)
+  end
+
+  defp declared_keys({name, _arity} = key, graph) do
+    graph
+    |> Map.get(key, [])
+    |> Enum.map(fn {declared, _calls} -> {name, declared} end)
   end
 
   @doc """
