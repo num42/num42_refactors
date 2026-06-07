@@ -47,9 +47,8 @@ defmodule Number42.Refactors.BlockSegmentation do
     |> Enum.with_index()
     |> Enum.map(fn {ast, index} ->
       writes = AstHelpers.bound_in(ast)
-
-      reads =
-        MapSet.union(MapSet.difference(AstHelpers.used_var_names(ast), writes), rhs_reads(ast))
+      used = AstHelpers.used_var_names(ast)
+      reads = used |> MapSet.difference(writes) |> MapSet.union(rhs_reads(ast))
 
       %{ast: ast, index: index, reads: reads, writes: writes}
     end)
