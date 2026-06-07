@@ -68,6 +68,18 @@ defmodule Number42.Refactors.Ex.HoistInvariantOutOfComprehension do
   falling back to `hoisted`. The name is disambiguated against every
   variable in the enclosing statement so the binding never shadows an
   existing one.
+
+  ## Default-OFF (opt-in only)
+
+  Disabled by default — `transform/2` is a no-op unless its own opts carry
+  `enabled: true`. A dogfood run surfaced rewrites that hoist a capture
+  shorthand (`Atom.to_string(&1)`) out of its `&(...)` context, leaving a
+  bare `&1` that no longer compiles. Enable per project once capture-form
+  invariants are excluded:
+
+      configured_modules: [
+        {Number42.Refactors.Ex.HoistInvariantOutOfComprehension, enabled: true}
+      ]
   """
 
   use Number42.Refactors.Refactor
@@ -100,7 +112,13 @@ defmodule Number42.Refactors.Ex.HoistInvariantOutOfComprehension do
   def reformat_after?, do: true
 
   @impl Number42.Refactors.Refactor
-  def transform(source, _opts), do: Sourceror.parse_string(source) |> apply_patches(source)
+  def transform(source, opts) do
+    if Keyword.get(opts, :enabled, false) do
+      Sourceror.parse_string(source) |> apply_patches(source)
+    else
+      source
+    end
+  end
 
   defp apply_patches({:ok, ast}, source),
     do: ast |> collect_lifts(no_host()) |> Enum.take(1) |> emit_or_passthrough(source)

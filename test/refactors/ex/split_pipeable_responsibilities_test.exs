@@ -5,6 +5,30 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilitiesTest do
 
   @subject SplitPipeableResponsibilities
 
+  # SplitPipeableResponsibilities is opt-in / default-off. Every test that
+  # exercises the rewrite passes `enabled: true`; a dedicated test asserts
+  # the default-off behaviour.
+  @on [enabled: true]
+
+  describe "default-off" do
+    test "without opt-in config the source is left untouched" do
+      source = """
+      defmodule M do
+        def report(order) do
+          subtotal = sum_lines(order)
+          discount = lookup_discount(order)
+          net = subtotal - discount
+          doubled = net * 2
+          adjusted = doubled + 1
+          format(adjusted)
+        end
+      end
+      """
+
+      assert_unchanged(@subject, source)
+    end
+  end
+
   describe "rewrites — single carrier becomes a pipe" do
     test "splits a clean two-phase body where one value flows across into a pipe" do
       before_source = """
@@ -47,7 +71,7 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilitiesTest do
       end
       """
 
-      assert_rewrites(@subject, before_source, after_source)
+      assert_rewrites(@subject, before_source, after_source, @on)
     end
   end
 
@@ -64,7 +88,7 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilitiesTest do
       end
       """
 
-      assert_unchanged(@subject, source)
+      assert_unchanged(@subject, source, @on)
     end
 
     test "leaves a body containing a Logger. call untouched" do
@@ -79,7 +103,7 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilitiesTest do
       end
       """
 
-      assert_unchanged(@subject, source)
+      assert_unchanged(@subject, source, @on)
     end
 
     test "leaves a body containing a send/2 call untouched" do
@@ -94,7 +118,7 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilitiesTest do
       end
       """
 
-      assert_unchanged(@subject, source)
+      assert_unchanged(@subject, source, @on)
     end
 
     test "leaves a body containing a bang function untouched" do
@@ -109,7 +133,7 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilitiesTest do
       end
       """
 
-      assert_unchanged(@subject, source)
+      assert_unchanged(@subject, source, @on)
     end
   end
 
@@ -124,7 +148,7 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilitiesTest do
       end
       """
 
-      assert_unchanged(@subject, source)
+      assert_unchanged(@subject, source, @on)
     end
 
     test "leaves a body with no clean low-carrier cut untouched" do
@@ -144,7 +168,7 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilitiesTest do
       end
       """
 
-      assert_unchanged(@subject, source)
+      assert_unchanged(@subject, source, @on)
     end
 
     test "leaves a body with control flow untouched" do
@@ -166,7 +190,7 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilitiesTest do
       end
       """
 
-      assert_unchanged(@subject, source)
+      assert_unchanged(@subject, source, @on)
     end
   end
 
@@ -194,7 +218,7 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilitiesTest do
       end
       """
 
-      assert_unchanged(@subject, already_split)
+      assert_unchanged(@subject, already_split, @on)
     end
   end
 end

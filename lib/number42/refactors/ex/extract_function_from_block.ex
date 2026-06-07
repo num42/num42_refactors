@@ -64,6 +64,17 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlock do
   `… = helper(…)` call, so the maximal-binding-prefix scan no longer
   finds an extractable run there; the engine's fixpoint loop handles
   other functions on later passes.
+
+  ## Default-OFF (opt-in only)
+
+  Disabled by default — `transform/2` is a no-op unless its own opts carry
+  `enabled: true`. A dogfood run surfaced rewrites that leave empty
+  statement stubs in the host body and emit mis-indented extracted defps.
+  Enable per project once the host-body rewrite is clean:
+
+      configured_modules: [
+        {Number42.Refactors.Ex.ExtractFunctionFromBlock, enabled: true}
+      ]
   """
 
   use Number42.Refactors.Refactor
@@ -93,8 +104,13 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlock do
   def reformat_after?, do: true
 
   @impl Number42.Refactors.Refactor
-  def transform(source, _opts),
-    do: Sourceror.parse_string(source) |> apply_to_parse_result(source)
+  def transform(source, opts) do
+    if Keyword.get(opts, :enabled, false) do
+      Sourceror.parse_string(source) |> apply_to_parse_result(source)
+    else
+      source
+    end
+  end
 
   defp apply_to_parse_result({:ok, ast}, source), do: apply_to_ast(ast, source)
   defp apply_to_parse_result({:error, _}, source), do: source
@@ -225,8 +241,21 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlock do
   # --- helper naming ---
 
   defp helper_name(fn_name, existing_names) do
-    candidate = :"#{fn_name}_block"
+    candidate = suffixed_name(fn_name, "_block")
     if MapSet.member?(existing_names, candidate), do: :skip, else: {:ok, candidate}
+  end
+
+  # Append `_block` to the source name, but keep a trailing `!`/`?` at
+  # the very end — `verify_siblings!` must become `verify_siblings_block!`,
+  # not the illegal `verify_siblings!_block` (a bang is only valid as the
+  # final character of an identifier).
+  defp suffixed_name(fn_name, suffix) do
+    name = Atom.to_string(fn_name)
+
+    case String.split_at(name, -1) do
+      {stem, marker} when marker in ["!", "?"] -> :"#{stem}#{suffix}#{marker}"
+      {_, _} -> :"#{name}#{suffix}"
+    end
   end
 
   defp def_names(body_exprs) do

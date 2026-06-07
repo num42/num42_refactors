@@ -86,6 +86,18 @@ defmodule Number42.Refactors.Ex.RemoveDeadPrivateFunction do
   loop picks up any remaining dead functions on later passes (and a
   function that became dead *because* of an earlier removal is caught
   then).
+
+  ## Default-OFF (opt-in only)
+
+  Disabled by default — `transform/2` is a no-op unless its own opts carry
+  `enabled: true`. A dogfood run surfaced a false positive: a `defp` that
+  is only referenced from inside a `quote do … end` macro body reads as
+  uncalled and gets deleted, silently dropping live code. Enable per
+  project once the call-graph follows quoted references:
+
+      configured_modules: [
+        {Number42.Refactors.Ex.RemoveDeadPrivateFunction, enabled: true}
+      ]
   """
 
   use Number42.Refactors.Refactor
@@ -112,8 +124,13 @@ defmodule Number42.Refactors.Ex.RemoveDeadPrivateFunction do
   def reformat_after?, do: true
 
   @impl Number42.Refactors.Refactor
-  def transform(source, _opts),
-    do: Sourceror.parse_string(source) |> apply_to_parse_result(source)
+  def transform(source, opts) do
+    if Keyword.get(opts, :enabled, false) do
+      Sourceror.parse_string(source) |> apply_to_parse_result(source)
+    else
+      source
+    end
+  end
 
   defp apply_to_parse_result({:ok, ast}, source),
     do: ast |> first_module_patches() |> patch_or_passthrough(source)

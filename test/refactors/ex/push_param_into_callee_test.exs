@@ -5,6 +5,11 @@ defmodule Number42.Refactors.Ex.PushParamIntoCalleeTest do
 
   @subject PushParamIntoCallee
 
+  # PushParamIntoCallee is opt-in / default-off. Every test that exercises
+  # the rewrite passes `enabled: true`; a dedicated test asserts the
+  # default-off behaviour.
+  @on [enabled: true]
+
   # Cross-file context: prepare/1 scans every input source, finds every
   # call site of each private callee, and proves every caller passes the
   # identical pure, context-free, callee-resolvable expression at the
@@ -12,6 +17,22 @@ defmodule Number42.Refactors.Ex.PushParamIntoCalleeTest do
   # Tests feed that context via opts[:prepared] — same shape the engine
   # produces from prepare/1.
   defp prepared(sources), do: PushParamIntoCallee.build_plan(sources)
+
+  describe "default-off" do
+    test "without enabled: true the source is left untouched" do
+      src = """
+      defmodule MyApp.Worker do
+        def run(a), do: process(a, 42)
+        def run_other(b), do: process(b, 42)
+
+        defp process(data, factor), do: data * factor
+      end
+      """
+
+      plan = prepared([{"worker.ex", src}])
+      assert_unchanged(@subject, src, prepared: plan)
+    end
+  end
 
   describe "rewrites" do
     test "every caller passes the same literal: param dropped, value pushed into callee" do
@@ -34,7 +55,7 @@ defmodule Number42.Refactors.Ex.PushParamIntoCalleeTest do
       """
 
       plan = prepared([{"worker.ex", src}])
-      assert_rewrites(@subject, src, expected, prepared: plan)
+      assert_rewrites(@subject, src, expected, @on ++ [prepared: plan])
     end
 
     test "param used multiple times in body: every occurrence substituted" do
@@ -57,7 +78,7 @@ defmodule Number42.Refactors.Ex.PushParamIntoCalleeTest do
       """
 
       plan = prepared([{"calc.ex", src}])
-      assert_rewrites(@subject, src, expected, prepared: plan)
+      assert_rewrites(@subject, src, expected, @on ++ [prepared: plan])
     end
 
     test "stdlib pure call with literal args is eligible" do
@@ -80,7 +101,7 @@ defmodule Number42.Refactors.Ex.PushParamIntoCalleeTest do
       """
 
       plan = prepared([{"greeter.ex", src}])
-      assert_rewrites(@subject, src, expected, prepared: plan)
+      assert_rewrites(@subject, src, expected, @on ++ [prepared: plan])
     end
 
     test "dropped param at position 0 still works" do
@@ -103,7 +124,7 @@ defmodule Number42.Refactors.Ex.PushParamIntoCalleeTest do
       """
 
       plan = prepared([{"front.ex", src}])
-      assert_rewrites(@subject, src, expected, prepared: plan)
+      assert_rewrites(@subject, src, expected, @on ++ [prepared: plan])
     end
 
     test "multi-clause callee: param dropped from every clause, var substituted per clause" do
@@ -128,7 +149,7 @@ defmodule Number42.Refactors.Ex.PushParamIntoCalleeTest do
       """
 
       plan = prepared([{"multi.ex", src}])
-      assert_rewrites(@subject, src, expected, prepared: plan)
+      assert_rewrites(@subject, src, expected, @on ++ [prepared: plan])
     end
 
     test "callee reopened across two files: callers in both files are rewritten" do
@@ -162,8 +183,8 @@ defmodule Number42.Refactors.Ex.PushParamIntoCalleeTest do
       end
       """
 
-      assert_rewrites(@subject, file_a, expected_a, prepared: plan)
-      assert_rewrites(@subject, file_b, expected_b, prepared: plan)
+      assert_rewrites(@subject, file_a, expected_a, @on ++ [prepared: plan])
+      assert_rewrites(@subject, file_b, expected_b, @on ++ [prepared: plan])
     end
   end
 
@@ -179,7 +200,7 @@ defmodule Number42.Refactors.Ex.PushParamIntoCalleeTest do
       """
 
       plan = prepared([{"worker.ex", src}])
-      assert_idempotent(@subject, src, prepared: plan)
+      assert_idempotent(@subject, src, @on ++ [prepared: plan])
     end
   end
 
@@ -195,7 +216,7 @@ defmodule Number42.Refactors.Ex.PushParamIntoCalleeTest do
       """
 
       plan = prepared([{"mixed.ex", src}])
-      assert_unchanged(@subject, src, prepared: plan)
+      assert_unchanged(@subject, src, @on ++ [prepared: plan])
     end
 
     test "call-site-local variable in the argument" do
@@ -209,7 +230,7 @@ defmodule Number42.Refactors.Ex.PushParamIntoCalleeTest do
       """
 
       plan = prepared([{"localvar.ex", src}])
-      assert_unchanged(@subject, src, prepared: plan)
+      assert_unchanged(@subject, src, @on ++ [prepared: plan])
     end
 
     test "impure argument expression" do
@@ -223,7 +244,7 @@ defmodule Number42.Refactors.Ex.PushParamIntoCalleeTest do
       """
 
       plan = prepared([{"impure.ex", src}])
-      assert_unchanged(@subject, src, prepared: plan)
+      assert_unchanged(@subject, src, @on ++ [prepared: plan])
     end
 
     test "module attribute in the argument (per-module, not callee-resolvable)" do
@@ -238,7 +259,7 @@ defmodule Number42.Refactors.Ex.PushParamIntoCalleeTest do
       """
 
       plan = prepared([{"attr.ex", src}])
-      assert_unchanged(@subject, src, prepared: plan)
+      assert_unchanged(@subject, src, @on ++ [prepared: plan])
     end
 
     test "__MODULE__ in the argument (resolves differently per module)" do
@@ -252,7 +273,7 @@ defmodule Number42.Refactors.Ex.PushParamIntoCalleeTest do
       """
 
       plan = prepared([{"mod.ex", src}])
-      assert_unchanged(@subject, src, prepared: plan)
+      assert_unchanged(@subject, src, @on ++ [prepared: plan])
     end
 
     test "default argument in the callee head" do
@@ -266,7 +287,7 @@ defmodule Number42.Refactors.Ex.PushParamIntoCalleeTest do
       """
 
       plan = prepared([{"defaults.ex", src}])
-      assert_unchanged(@subject, src, prepared: plan)
+      assert_unchanged(@subject, src, @on ++ [prepared: plan])
     end
 
     test "capture of the callee (&fun/arity) anywhere in the corpus" do
@@ -280,7 +301,7 @@ defmodule Number42.Refactors.Ex.PushParamIntoCalleeTest do
       """
 
       plan = prepared([{"capture.ex", src}])
-      assert_unchanged(@subject, src, prepared: plan)
+      assert_unchanged(@subject, src, @on ++ [prepared: plan])
     end
 
     test "apply/3 dispatch to the callee" do
@@ -294,7 +315,7 @@ defmodule Number42.Refactors.Ex.PushParamIntoCalleeTest do
       """
 
       plan = prepared([{"apply.ex", src}])
-      assert_unchanged(@subject, src, prepared: plan)
+      assert_unchanged(@subject, src, @on ++ [prepared: plan])
     end
 
     test "public function (def) is never touched — external callers unknown" do
@@ -308,7 +329,7 @@ defmodule Number42.Refactors.Ex.PushParamIntoCalleeTest do
       """
 
       plan = prepared([{"pub.ex", src}])
-      assert_unchanged(@subject, src, prepared: plan)
+      assert_unchanged(@subject, src, @on ++ [prepared: plan])
     end
 
     test "callee param is pattern-matched, not a plain var" do
@@ -322,7 +343,7 @@ defmodule Number42.Refactors.Ex.PushParamIntoCalleeTest do
       """
 
       plan = prepared([{"pattern.ex", src}])
-      assert_unchanged(@subject, src, prepared: plan)
+      assert_unchanged(@subject, src, @on ++ [prepared: plan])
     end
 
     test "a call site passing a non-uniform extra arity is left alone" do
@@ -337,7 +358,7 @@ defmodule Number42.Refactors.Ex.PushParamIntoCalleeTest do
       """
 
       plan = prepared([{"arity.ex", src}])
-      assert_unchanged(@subject, src, prepared: plan)
+      assert_unchanged(@subject, src, @on ++ [prepared: plan])
     end
 
     test "no call sites at all (dead-ish helper) is left alone" do
@@ -348,7 +369,7 @@ defmodule Number42.Refactors.Ex.PushParamIntoCalleeTest do
       """
 
       plan = prepared([{"unused.ex", src}])
-      assert_unchanged(@subject, src, prepared: plan)
+      assert_unchanged(@subject, src, @on ++ [prepared: plan])
     end
 
     test "pipe into callee is skipped (position math hazard)" do
@@ -362,7 +383,7 @@ defmodule Number42.Refactors.Ex.PushParamIntoCalleeTest do
       """
 
       plan = prepared([{"piped.ex", src}])
-      assert_unchanged(@subject, src, prepared: plan)
+      assert_unchanged(@subject, src, @on ++ [prepared: plan])
     end
 
     test "callee param is referenced in a guard" do
@@ -376,7 +397,7 @@ defmodule Number42.Refactors.Ex.PushParamIntoCalleeTest do
       """
 
       plan = prepared([{"guarded.ex", src}])
-      assert_unchanged(@subject, src, prepared: plan)
+      assert_unchanged(@subject, src, @on ++ [prepared: plan])
     end
   end
 end

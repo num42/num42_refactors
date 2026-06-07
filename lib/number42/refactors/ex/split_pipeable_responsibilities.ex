@@ -72,6 +72,18 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilities do
   longer a multi-binding run — so a second pass finds nothing to split.
   The generated `phase_n` helpers each end in a value return, which is
   itself not re-splittable under the constraints.
+
+  ## Default-OFF (opt-in only)
+
+  Disabled by default — `transform/2` is a no-op unless its own opts carry
+  `enabled: true`. A dogfood run surfaced rewrites that drop a function's
+  tail expression (producing an unterminated string literal and empty
+  statement stubs). Enable per project once the phase split preserves the
+  host's return:
+
+      configured_modules: [
+        {Number42.Refactors.Ex.SplitPipeableResponsibilities, enabled: true}
+      ]
   """
 
   use Number42.Refactors.Refactor
@@ -103,8 +115,13 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilities do
   def reformat_after?, do: true
 
   @impl Number42.Refactors.Refactor
-  def transform(source, opts),
-    do: Sourceror.parse_string(source) |> apply_to_parse_result(source, opts)
+  def transform(source, opts) do
+    if Keyword.get(opts, :enabled, false) do
+      Sourceror.parse_string(source) |> apply_to_parse_result(source, opts)
+    else
+      source
+    end
+  end
 
   defp apply_to_parse_result({:ok, ast}, source, opts), do: apply_to_ast(ast, source, opts)
   defp apply_to_parse_result({:error, _}, source, _opts), do: source
