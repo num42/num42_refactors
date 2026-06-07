@@ -65,6 +65,29 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunction do
   `dry_run: true` to build a full plan without touching the filesystem.
 
   `write_root` defaults to `File.cwd!/0`; tests pass a per-test tmp dir.
+
+  ## Default-OFF (opt-in only)
+
+  Disabled by default — both `prepare/1` and `transform/2` are no-ops
+  unless its own opts carry `enabled: true`. A dogfood run against
+  position-db surfaced two unsafe move classes the envy metric does not
+  catch:
+
+    * **Multi-clause functions with literal/pattern heads** — e.g.
+      `handle_event("reseed", …)` / `handle_event("clear_all_data", …)`
+      collapse into a single `defdelegate handle_event(arg, …)`, erasing
+      the per-event clause routing.
+    * **Framework callbacks** (`handle_event`, `mount`, `render`,
+      `handle_info`, …) relocated into a plain context module that lacks
+      the `use …, :live_view` providing `put_flash/3`, `push_navigate/2`,
+      the `~p` sigil, etc. — the target no longer compiles.
+
+  Enable per project once the metric also skips multi-clause/pattern
+  heads and framework callbacks:
+
+      configured_modules: [
+        {Number42.Refactors.Ex.RelocateMisplacedFunction, enabled: true}
+      ]
   """
 
   use Number42.Refactors.Refactor
@@ -121,7 +144,13 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunction do
   end
 
   @impl Number42.Refactors.Refactor
-  def prepare(opts), do: Keyword.get(opts, :source_files) |> prepared_for_paths(opts)
+  def prepare(opts) do
+    if Keyword.get(opts, :enabled, false) do
+      Keyword.get(opts, :source_files) |> prepared_for_paths(opts)
+    else
+      :no_cache
+    end
+  end
 
   @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
@@ -132,8 +161,13 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunction do
   def priority, do: 40
 
   @impl Number42.Refactors.Refactor
-  def transform(source, opts),
-    do: Keyword.get(opts, :prepared) |> rewrite_with_plan_or_passthrough(source)
+  def transform(source, opts) do
+    if Keyword.get(opts, :enabled, false) do
+      Keyword.get(opts, :prepared) |> rewrite_with_plan_or_passthrough(source)
+    else
+      source
+    end
+  end
 
   # ── Plan construction ────────────────────────────────────────────
 

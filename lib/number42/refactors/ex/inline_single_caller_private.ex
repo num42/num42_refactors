@@ -86,6 +86,24 @@ defmodule Number42.Refactors.Ex.InlineSingleCallerPrivate do
   helper, so the output is stable. To stay deterministic we rewrite at
   most **one** helper per pass (the first eligible one in source
   order); the engine's fixpoint loop picks up the rest on later passes.
+
+  ## Default-OFF (opt-in only)
+
+  Disabled by default — `transform/2` is a no-op unless its own opts
+  carry `enabled: true`. A dogfood run against position-db surfaced a
+  miscount across the fixpoint loop: inlining a helper `A` whose body
+  itself calls helper `B` can turn `B`'s single call site into two (the
+  original plus the freshly-spliced one), after which a later pass still
+  treats `B` as single-caller, inlines one site, and **deletes** `B` —
+  leaving the other call site referencing an undefined function. The
+  inline of a `rescue`-wrapped body also drops the rescue clause,
+  silently changing error behaviour. Enable per project once call
+  counting is recomputed after each inline and rescue-bearing bodies are
+  excluded:
+
+      configured_modules: [
+        {Number42.Refactors.Ex.InlineSingleCallerPrivate, enabled: true}
+      ]
   """
 
   use Number42.Refactors.Refactor
@@ -110,8 +128,13 @@ defmodule Number42.Refactors.Ex.InlineSingleCallerPrivate do
   @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
   @impl Number42.Refactors.Refactor
-  def transform(source, _opts),
-    do: Sourceror.parse_string(source) |> apply_to_parse_result(source)
+  def transform(source, opts) do
+    if Keyword.get(opts, :enabled, false) do
+      Sourceror.parse_string(source) |> apply_to_parse_result(source)
+    else
+      source
+    end
+  end
 
   defp apply_to_parse_result({:ok, ast}, source),
     do: ast |> first_module_patches() |> patch_or_passthrough(source)

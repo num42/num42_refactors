@@ -57,6 +57,19 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
 
   After the rewrite each occurrence is `@name`, no longer a bare
   literal, so the second pass counts zero occurrences and stops.
+
+  ## Default-OFF (opt-in only)
+
+  Disabled by default — `transform/2` is a no-op unless its own opts
+  carry `enabled: true`. The derived attribute names are frequently
+  meaningless (`@int_42`, `@timeout_5s_ms`) and the same literal can
+  carry different meanings within one module, so hoisting trades a clear
+  inline value for an opaquely-named indirection. Enable per project
+  once name derivation is trustworthy for that codebase:
+
+      configured_modules: [
+        {Number42.Refactors.Ex.ExtractMagicNumber, enabled: true}
+      ]
   """
 
   use Number42.Refactors.Refactor
@@ -86,8 +99,12 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
 
   @impl Number42.Refactors.Refactor
   def transform(source, opts) do
-    min = Keyword.get(opts, :min_occurrences, @default_min_occurrences)
-    Sourceror.parse_string(source) |> apply_patches(source, min)
+    if Keyword.get(opts, :enabled, false) do
+      min = Keyword.get(opts, :min_occurrences, @default_min_occurrences)
+      Sourceror.parse_string(source) |> apply_patches(source, min)
+    else
+      source
+    end
   end
 
   defp apply_patches({:ok, ast}, source, min),

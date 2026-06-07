@@ -64,6 +64,30 @@ defmodule Number42.Refactors.Ex.CaseToFunctionClauses do
 
   After the split the function has one implementation clause per branch,
   none of which is a `case`-only body. A second pass finds no match.
+
+  ## Default-OFF (opt-in only)
+
+  Disabled by default — `transform/2` is a no-op unless its own opts
+  carry `enabled: true`. A dogfood run against position-db surfaced a
+  binding-loss bug: when a branch body still references the scrutinee
+  variable, lifting the branch pattern into the head drops that binding —
+
+      def deliver(user, url) do
+        case user do
+          %User{confirmed_at: nil} -> confirm(user, url)
+          _ -> magic(user, url)
+        end
+      end
+      # becomes — `user` in the body is now unbound:
+      def deliver(%User{confirmed_at: nil}, url), do: confirm(user, url)
+      def deliver(_, url), do: magic(user, url)
+
+  Enable per project once the lift rebinds the scrutinee (`pattern =
+  user`) whenever a branch body still uses it:
+
+      configured_modules: [
+        {Number42.Refactors.Ex.CaseToFunctionClauses, enabled: true}
+      ]
   """
 
   use Number42.Refactors.Refactor
@@ -91,7 +115,13 @@ defmodule Number42.Refactors.Ex.CaseToFunctionClauses do
   def reformat_after?, do: true
 
   @impl Number42.Refactors.Refactor
-  def transform(source, _opts), do: Sourceror.parse_string(source) |> apply_patches(source)
+  def transform(source, opts) do
+    if Keyword.get(opts, :enabled, false) do
+      Sourceror.parse_string(source) |> apply_patches(source)
+    else
+      source
+    end
+  end
 
   defp apply_patches({:ok, ast}, source),
     do: build_patches(ast, source) |> patch_or_passthrough(source)
