@@ -20,15 +20,15 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
 
   ## Naming
 
-  Via `IdentifierExpansion.derive_constant_name/2`:
+  Via `IdentifierExpansion.derive_constant_name/2`, first hit wins:
 
-  - When the literal sits at `key: value` (a keyword), the key names
-    the attribute (`@timeout`).
-  - Otherwise a type-based fallback (`@magic_number` for integers,
-    `@default_float` for floats, well-known constants like `@pi`).
-
-  Distinct values that derive the same name are disambiguated with a
-  numeric suffix (`@magic_number`, `@magic_number_2`).
+  - The keyword key, when the literal sits at `key: value` (`@timeout`).
+  - The surrounding call name (`String.slice(x, 0, 200)` → `@max_slice`).
+  - Well-known values — integers (`3600 → @seconds_per_hour`,
+    `1024 → @kibi`) and floats (`@pi`).
+  - A millisecond multiple (`5000 → @timeout_5s_ms`).
+  - Value-in-name as a last resort (`@int_42`) — never the bare
+    `@magic_number`, so distinct values never collide on one name.
 
   ## Configuring `min_occurrences`
 
@@ -45,23 +45,18 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
   - **Already an attribute value** — a literal that *is* the value of
     an `@attr` definition is already named; it is excluded both as a
     candidate and from the occurrence count.
+  - **Pattern literals** — a literal in a match position (`def f(404)`,
+    `x = 404`) can't become a `@attr`; excluded and uncounted.
+  - **Capture arities** — the `3` in `&fun/3` is an arity, not data;
+    `&fun/@attr` is invalid, so it is excluded and uncounted.
+  - **Quote bodies** — a literal inside `quote do … end` would hoist
+    into a `@attr` that resolves in the *calling* module at expansion
+    time, where it does not exist; quote subtrees are pruned.
 
   ## Idempotence
 
   After the rewrite each occurrence is `@name`, no longer a bare
   literal, so the second pass counts zero occurrences and stops.
-
-  ## Default-OFF (opt-in only)
-
-  Disabled by default — `transform/2` is a no-op unless its own opts carry
-  `enabled: true`. A dogfood run surfaced rewrites that name every hoisted
-  literal `@magic_number` (colliding when a module has several distinct
-  numbers) and place the attribute without a separating blank line. Enable
-  per project once naming is per-value and placement is format-clean:
-
-      configured_modules: [
-        {Number42.Refactors.Ex.ExtractMagicNumber, enabled: true}
-      ]
   """
 
   use Number42.Refactors.Refactor
@@ -91,12 +86,8 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
 
   @impl Number42.Refactors.Refactor
   def transform(source, opts) do
-    if Keyword.get(opts, :enabled, false) do
-      min = Keyword.get(opts, :min_occurrences, @default_min_occurrences)
-      Sourceror.parse_string(source) |> apply_patches(source, min)
-    else
-      source
-    end
+    min = Keyword.get(opts, :min_occurrences, @default_min_occurrences)
+    Sourceror.parse_string(source) |> apply_patches(source, min)
   end
 
   defp apply_patches({:ok, ast}, source, min),
@@ -117,8 +108,13 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
   end
 
   defp module_patches(body, min) do
-    exprs = body |> body_to_exprs() |> Enum.map(&prune_nested_modules/1)
-    excluded = MapSet.union(attribute_value_nodes(exprs), pattern_literal_nodes(exprs))
+    exprs =
+      body |> body_to_exprs() |> Enum.map(&prune_nested_modules/1) |> Enum.map(&prune_quotes/1)
+
+    excluded =
+      [attribute_value_nodes(exprs), pattern_literal_nodes(exprs), capture_arity_nodes(exprs)]
+      |> Enum.reduce(&MapSet.union/2)
+
     occurrences = collect_occurrences(exprs, excluded)
 
     occurrences
@@ -133,6 +129,17 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
   defp prune_nested_modules(expr) do
     Macro.prewalk(expr, fn
       {:defmodule, _, _} -> {:__pruned__, [], nil}
+      node -> node
+    end)
+  end
+
+  # Replace `quote do … end` subtrees with an inert marker. A `@attr`
+  # hoisted out of a quote-body resolves at expansion time in the
+  # *calling* module, where the attribute does not exist — so literals
+  # inside a quote are off-limits, like nested modules.
+  defp prune_quotes(expr) do
+    Macro.prewalk(expr, fn
+      {:quote, _, _} -> {:__pruned__, [], nil}
       node -> node
     end)
   end
@@ -164,6 +171,23 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
   defp head_args({name, _, args}) when is_atom(name) and is_list(args), do: args
   defp head_args(_), do: []
 
+  # Literal nodes in the *arity* position of a `&fun/N` capture. The `N`
+  # is an arity, not data — `&fun/@magic_number` is an invalid capture.
+  # So arity literals are neither candidates nor counted.
+  defp capture_arity_nodes(exprs) do
+    exprs
+    |> Enum.flat_map(&Macro.prewalker/1)
+    |> Enum.flat_map(fn
+      {:&, _, [{:/, _, [{fun, _, _}, {:__block__, _, [arity]} = node]}]}
+      when is_atom(fun) and is_integer(arity) ->
+        [node]
+
+      _ ->
+        []
+    end)
+    |> MapSet.new()
+  end
+
   defp numeric_literal_nodes(ast) do
     ast
     |> Macro.prewalker()
@@ -185,35 +209,74 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
     |> MapSet.new()
   end
 
-  # %{value => [%{node, value, key}]} — every hoistable numeric-literal
-  # node, grouped by value, in source order, tagged with the keyword key
-  # it sat under (or nil).
+  # %{value => [%{node, value, key, context}]} — every hoistable
+  # numeric-literal node, grouped by value, in source order, tagged with
+  # the keyword key it sat under (or nil) and the name of the call that
+  # took it as an argument (or nil).
   defp collect_occurrences(exprs, excluded) do
     keys = keyword_value_keys(exprs)
+    contexts = call_contexts(exprs)
 
     exprs
-    |> Enum.flat_map(&literal_hits(&1, excluded, keys))
+    |> Enum.flat_map(&literal_hits(&1, excluded, keys, contexts))
     |> Enum.group_by(fn %{value: value} -> value end)
   end
 
-  defp literal_hits(expr, excluded, keys) do
+  defp literal_hits(expr, excluded, keys, contexts) do
     {_, hits} =
       Macro.prewalk(expr, [], fn node, acc ->
-        {node, prepend_hit(node, acc, excluded, keys)}
+        {node, prepend_hit(node, acc, excluded, keys, contexts)}
       end)
 
     Enum.reverse(hits)
   end
 
-  defp prepend_hit({:__block__, _, [value]} = node, acc, excluded, keys) when is_number(value) do
+  defp prepend_hit({:__block__, _, [value]} = node, acc, excluded, keys, contexts)
+       when is_number(value) do
     cond do
-      value in @idiomatic -> acc
-      MapSet.member?(excluded, node) -> acc
-      true -> [%{node: node, value: value, key: Map.get(keys, node)} | acc]
+      value in @idiomatic ->
+        acc
+
+      MapSet.member?(excluded, node) ->
+        acc
+
+      true ->
+        hit = %{
+          node: node,
+          value: value,
+          key: Map.get(keys, node),
+          context: Map.get(contexts, node)
+        }
+
+        [hit | acc]
     end
   end
 
-  defp prepend_hit(_node, acc, _excluded, _keys), do: acc
+  defp prepend_hit(_node, acc, _excluded, _keys, _contexts), do: acc
+
+  # Map a literal value-node to the name of the call that took it as a
+  # positional argument (`String.slice(x, 0, 200)` → `200 ↦ "slice"`).
+  # Names the constant by its bound when no keyword key applies.
+  defp call_contexts(exprs) do
+    exprs
+    |> Enum.flat_map(&Macro.prewalker/1)
+    |> Enum.flat_map(&call_arg_contexts/1)
+    |> Map.new()
+  end
+
+  defp call_arg_contexts({{:., _, [_mod, fun]}, _, args}) when is_atom(fun) and is_list(args),
+    do: tag_literal_args(fun, args)
+
+  defp call_arg_contexts({fun, _, args}) when is_atom(fun) and is_list(args),
+    do: tag_literal_args(fun, args)
+
+  defp call_arg_contexts(_), do: []
+
+  defp tag_literal_args(fun, args) do
+    args
+    |> Enum.filter(&match?({:__block__, _, [value]} when is_number(value), &1))
+    |> Enum.map(&{&1, Atom.to_string(fun)})
+  end
 
   # Map a literal value-node to the keyword key it sat under, for
   # genuine keyword *arguments* only. Block keywords (`do:`/`else:`/…)
@@ -248,7 +311,8 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
   end
 
   defp unique_name(value, hits, taken) do
-    base = IdentifierExpansion.derive_constant_name(value, %{key: key_for(hits)})
+    opts = %{key: key_for(hits), context: context_for(hits)}
+    base = IdentifierExpansion.derive_constant_name(value, opts)
 
     base
     |> Stream.iterate(&next_name(&1, base))
@@ -266,6 +330,8 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
   end
 
   defp key_for(hits), do: Enum.find_value(hits, fn %{key: key} -> key end)
+
+  defp context_for(hits), do: Enum.find_value(hits, fn %{context: context} -> context end)
 
   defp emit_patches([], _exprs), do: []
 
@@ -289,7 +355,7 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
       |> Enum.map_join("\n", fn {name, value, _hits} -> "@#{name} #{render(value)}" end)
 
     range = %{start: [line: line, column: 1], end: [line: line, column: 1]}
-    Patch.new(range, text <> "\n", false)
+    Patch.new(range, text <> "\n\n", false)
   end
 
   defp render(value) when is_float(value), do: Float.to_string(value)

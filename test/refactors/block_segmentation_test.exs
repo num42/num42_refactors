@@ -68,6 +68,20 @@ defmodule Number42.Refactors.BlockSegmentationTest do
 
       assert seg.ast == stmt
     end
+
+    test "a self-rebind reads the name it also writes" do
+      [seg] = BlockSegmentation.segment(body_exprs("acc = update(acc, item)"))
+
+      assert names(seg.writes) == [:acc]
+      assert names(seg.reads) == [:acc, :item]
+    end
+
+    test "a piped self-rebind reads the name it also writes" do
+      [seg] = BlockSegmentation.segment(body_exprs("acc = acc |> update(item)"))
+
+      assert names(seg.writes) == [:acc]
+      assert names(seg.reads) == [:acc, :item]
+    end
   end
 
   describe "carriers/1 — values flowing across statements" do

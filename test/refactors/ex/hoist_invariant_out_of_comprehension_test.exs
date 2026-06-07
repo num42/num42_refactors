@@ -5,27 +5,6 @@ defmodule Number42.Refactors.Ex.HoistInvariantOutOfComprehensionTest do
 
   @subject HoistInvariantOutOfComprehension
 
-  # HoistInvariantOutOfComprehension is opt-in / default-off. Every test
-  # that exercises the rewrite passes `enabled: true`; a dedicated test
-  # asserts the default-off behaviour.
-  @on [enabled: true]
-
-  describe "default-off" do
-    test "without opt-in config the source is left untouched" do
-      source = """
-      defmodule M do
-        def run(rows) do
-          for row <- rows do
-            format(row, Enum.sum([1, 2, 3]))
-          end
-        end
-      end
-      """
-
-      assert_unchanged(@subject, source)
-    end
-  end
-
   describe "rewrites — for" do
     test "hoists a loop-invariant pure call out of a `for` body" do
       before_source = """
@@ -38,7 +17,7 @@ defmodule Number42.Refactors.Ex.HoistInvariantOutOfComprehensionTest do
       end
       """
 
-      actual = apply_refactor(@subject, before_source, @on)
+      actual = apply_refactor(@subject, before_source)
 
       assert {:ok, _} = Code.string_to_quoted(actual)
       assert String.contains?(actual, "= Enum.sum([1, 2, 3])")
@@ -57,7 +36,7 @@ defmodule Number42.Refactors.Ex.HoistInvariantOutOfComprehensionTest do
       end
       """
 
-      actual = apply_refactor(@subject, before_source, @on)
+      actual = apply_refactor(@subject, before_source)
 
       assert {:ok, _} = Code.string_to_quoted(actual)
       assert String.contains?(actual, ~s|= String.length("hello")|)
@@ -79,7 +58,7 @@ defmodule Number42.Refactors.Ex.HoistInvariantOutOfComprehensionTest do
       end
       """
 
-      assert_rewrites(@subject, before_source, expected, @on)
+      assert_rewrites(@subject, before_source, expected)
     end
 
     test "the converted `do/end` output compiles" do
@@ -91,7 +70,7 @@ defmodule Number42.Refactors.Ex.HoistInvariantOutOfComprehensionTest do
       end
       """
 
-      actual = apply_refactor(@subject, before_source, @on)
+      actual = apply_refactor(@subject, before_source)
 
       assert_compiles(actual)
     end
@@ -103,7 +82,7 @@ defmodule Number42.Refactors.Ex.HoistInvariantOutOfComprehensionTest do
       end
       """
 
-      assert_idempotent(@subject, source, @on)
+      assert_idempotent(@subject, source)
     end
   end
 
@@ -117,7 +96,7 @@ defmodule Number42.Refactors.Ex.HoistInvariantOutOfComprehensionTest do
       end
       """
 
-      actual = apply_refactor(@subject, before_source, @on)
+      actual = apply_refactor(@subject, before_source)
 
       assert {:ok, _} = Code.string_to_quoted(actual)
       assert String.contains?(actual, ~s|= String.length("x")|)
@@ -137,7 +116,7 @@ defmodule Number42.Refactors.Ex.HoistInvariantOutOfComprehensionTest do
       end
       """
 
-      assert_unchanged(@subject, source, @on)
+      assert_unchanged(@subject, source)
     end
 
     test "leaves a subexpr that depends on a filter binding" do
@@ -151,7 +130,7 @@ defmodule Number42.Refactors.Ex.HoistInvariantOutOfComprehensionTest do
       end
       """
 
-      assert_unchanged(@subject, source, @on)
+      assert_unchanged(@subject, source)
     end
 
     test "leaves a subexpr that depends on a second generator var" do
@@ -165,7 +144,7 @@ defmodule Number42.Refactors.Ex.HoistInvariantOutOfComprehensionTest do
       end
       """
 
-      assert_unchanged(@subject, source, @on)
+      assert_unchanged(@subject, source)
     end
 
     test "leaves an Enum.map lambda subexpr that depends on the lambda param" do
@@ -177,7 +156,7 @@ defmodule Number42.Refactors.Ex.HoistInvariantOutOfComprehensionTest do
       end
       """
 
-      assert_unchanged(@subject, source, @on)
+      assert_unchanged(@subject, source)
     end
   end
 
@@ -193,7 +172,7 @@ defmodule Number42.Refactors.Ex.HoistInvariantOutOfComprehensionTest do
       end
       """
 
-      assert_unchanged(@subject, source, @on)
+      assert_unchanged(@subject, source)
     end
 
     test "leaves a bang/raising subexpr (Map.fetch!)" do
@@ -207,7 +186,7 @@ defmodule Number42.Refactors.Ex.HoistInvariantOutOfComprehensionTest do
       end
       """
 
-      assert_unchanged(@subject, source, @on)
+      assert_unchanged(@subject, source)
     end
 
     test "leaves an unknown remote call (opaque purity)" do
@@ -221,7 +200,7 @@ defmodule Number42.Refactors.Ex.HoistInvariantOutOfComprehensionTest do
       end
       """
 
-      assert_unchanged(@subject, source, @on)
+      assert_unchanged(@subject, source)
     end
   end
 
@@ -237,7 +216,7 @@ defmodule Number42.Refactors.Ex.HoistInvariantOutOfComprehensionTest do
       end
       """
 
-      assert_unchanged(@subject, source, @on)
+      assert_unchanged(@subject, source)
     end
 
     test "leaves a bare-variable argument alone (already hoisted)" do
@@ -251,7 +230,7 @@ defmodule Number42.Refactors.Ex.HoistInvariantOutOfComprehensionTest do
       end
       """
 
-      assert_unchanged(@subject, source, @on)
+      assert_unchanged(@subject, source)
     end
   end
 
@@ -268,7 +247,7 @@ defmodule Number42.Refactors.Ex.HoistInvariantOutOfComprehensionTest do
       end
       """
 
-      actual = apply_refactor(@subject, before_source, @on)
+      actual = apply_refactor(@subject, before_source)
 
       assert {:ok, _} = Code.string_to_quoted(actual)
       # Existing `sum = :sentinel` is preserved.
@@ -290,7 +269,7 @@ defmodule Number42.Refactors.Ex.HoistInvariantOutOfComprehensionTest do
       end
       """
 
-      assert_idempotent(@subject, source, @on)
+      assert_idempotent(@subject, source)
     end
 
     test "already-hoisted code is left unchanged" do
@@ -306,7 +285,40 @@ defmodule Number42.Refactors.Ex.HoistInvariantOutOfComprehensionTest do
       end
       """
 
-      assert_unchanged(@subject, source, @on)
+      assert_unchanged(@subject, source)
+    end
+  end
+
+  describe "skip — capture-shorthand arguments" do
+    # Dogfood (#122): a `&(...)` capture shorthand whose body holds a call
+    # on a capture arg (`Atom.to_string(&1)`) must not be hoisted — pulled
+    # out of the `&(...)` context the bare `&1` no longer compiles.
+    test "leaves a call on a capture arg inside &(...) in place" do
+      source = """
+      defmodule M do
+        @stage_groups [foo: [:a, :b]]
+
+        def grouped_options do
+          Enum.map(@stage_groups, fn {group_label, keys} ->
+            {group_label, Enum.map(keys, &{label(&1), Atom.to_string(&1)})}
+          end)
+        end
+      end
+      """
+
+      assert_unchanged(@subject, source)
+    end
+
+    test "leaves a capture-arg call hoisted out of an Enum.map &(...) capture" do
+      source = """
+      defmodule M do
+        def run(rows) do
+          Enum.map(rows, &Integer.to_string(&1))
+        end
+      end
+      """
+
+      assert_unchanged(@subject, source)
     end
   end
 
@@ -327,7 +339,7 @@ defmodule Number42.Refactors.Ex.HoistInvariantOutOfComprehensionTest do
       end
       """
 
-      assert_unchanged(@subject, source, @on)
+      assert_unchanged(@subject, source)
     end
   end
 end

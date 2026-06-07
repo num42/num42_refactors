@@ -5,28 +5,6 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
 
   @subject ExtractFunctionFromBlock
 
-  # ExtractFunctionFromBlock is opt-in / default-off. Every test that
-  # exercises the rewrite passes `enabled: true`; a dedicated test asserts
-  # the default-off behaviour.
-  @on [enabled: true]
-
-  describe "default-off" do
-    test "without opt-in config the source is left untouched" do
-      source = """
-      defmodule M do
-        def report(order) do
-          subtotal = sum_lines(order)
-          tax = subtotal * region_rate(order)
-          total = subtotal + tax
-          format(total, tax)
-        end
-      end
-      """
-
-      assert_unchanged(@subject, source)
-    end
-  end
-
   describe "rewrites — tuple return" do
     test "extracts a multi-binding prefix with two live-out bindings into a tuple-return helper" do
       before_source = """
@@ -58,7 +36,7 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
       end
       """
 
-      assert_rewrites(@subject, before_source, after_source, @on)
+      assert_rewrites(@subject, before_source, after_source)
     end
 
     # A trailing `!`/`?` is only legal as the final character of an
@@ -90,7 +68,7 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
       end
       """
 
-      assert_rewrites(@subject, before_source, after_source, @on)
+      assert_rewrites(@subject, before_source, after_source)
     end
 
     test "keeps a trailing question mark at the end of the generated helper name" do
@@ -119,7 +97,182 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
       end
       """
 
-      assert_rewrites(@subject, before_source, after_source, @on)
+      assert_rewrites(@subject, before_source, after_source)
+    end
+  end
+
+  describe "free variables — only the prefix's reads become params" do
+    # The prefix reads only `a`, never `b`. The helper must take `a`
+    # alone — passing `b` would emit an unused-variable warning and
+    # break under --warnings-as-errors.
+    test "passes only the variables the prefix actually reads" do
+      before_source = """
+      defmodule M do
+        def f(a, b) do
+          x = g(a)
+          y = h(a)
+          combine(x, y, b)
+        end
+      end
+      """
+
+      after_source = """
+      defmodule M do
+        def f(a, b) do
+          {x, y} = f_block(a)
+          combine(x, y, b)
+        end
+
+        defp f_block(a) do
+          x = g(a)
+          y = h(a)
+          {x, y}
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, after_source)
+    end
+  end
+
+  # `s` is a parameter AND re-bound in the prefix, reading itself on the
+  # RHS first (`s = s / 100`). That leading read is free, so `s` must be
+  # a helper parameter — a whole-block `used - bound` would cancel it
+  # and emit `s = s / 100` against an undefined `s`.
+  describe "free variables — parameter re-bound while reading itself" do
+    test "treats a self-shadowing read as a free parameter" do
+      before_source = """
+      defmodule M do
+        def scale(s, t) do
+          s = s / 100
+          c = s * factor(t)
+          render(c, s)
+        end
+      end
+      """
+
+      after_source = """
+      defmodule M do
+        def scale(s, t) do
+          {s, c} = scale_block(s, t)
+          render(c, s)
+        end
+
+        defp scale_block(s, t) do
+          s = s / 100
+          c = s * factor(t)
+          {s, c}
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, after_source)
+    end
+  end
+
+  # A prefix-bound name read inside a `cond` clause *test* (the LHS of
+  # `->`, which is a boolean expression, not a pattern) is live-out and
+  # must be returned. A naive `used - collect_bound_vars` mistakes the
+  # cond test var for a binding and drops it, leaving the tail with an
+  # undefined variable.
+  describe "live-out — name read in a cond clause test" do
+    test "returns a binding read only inside a cond condition" do
+      before_source = """
+      defmodule M do
+        def f(x) do
+          a = compute(x)
+          active? = check(a)
+          cond do
+            active? -> on(a)
+            true -> off(a)
+          end
+        end
+      end
+      """
+
+      after_source = """
+      defmodule M do
+        def f(x) do
+          {a, active?} = f_block(x)
+
+          cond do
+            active? -> on(a)
+            true -> off(a)
+          end
+        end
+
+        defp f_block(x) do
+          a = compute(x)
+          active? = check(a)
+          {a, active?}
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, after_source)
+    end
+  end
+
+  # The helper is spliced in as a sibling immediately after the host
+  # clause. For a multi-clause function that lands it *between* clauses,
+  # which the compiler rejects ("clauses ... should be grouped
+  # together"). Skip multi-clause hosts.
+  describe "skips multi-clause hosts" do
+    test "skips a function with more than one clause at the same arity" do
+      assert_unchanged(
+        @subject,
+        """
+        defmodule M do
+          def f(%{a: a}) do
+            x = g(a)
+            y = h(a)
+            use(x, y)
+          end
+
+          def f(_), do: :default
+        end
+        """
+      )
+    end
+  end
+
+  describe "skips interpolation / sigil bindings" do
+    # A binding whose RHS contains string interpolation can't be moved
+    # by range patches without corrupting the host body (the heredoc's
+    # closing `\"\"\"` is left behind). Skip rather than break.
+    test "skips when a prefix binding contains string interpolation" do
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          def build(item, label) do
+            ctx = context(item)
+            text = """
+            Label: #{label}
+            Context: #{ctx}
+            """
+            send(text, ctx)
+          end
+        end
+        '''
+      )
+    end
+
+    test "skips when a prefix binding contains a template sigil" do
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          def render(assigns) do
+            a = prep(assigns)
+            markup = ~H"""
+            <p>{@foo}</p>
+            """
+            emit(a, markup)
+          end
+        end
+        '''
+      )
     end
   end
 
@@ -150,7 +303,7 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
       end
       """
 
-      assert_rewrites(@subject, before_source, after_source, @on)
+      assert_rewrites(@subject, before_source, after_source)
     end
   end
 
@@ -165,8 +318,7 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
             use_it(a)
           end
         end
-        """,
-        @on
+        """
       )
     end
 
@@ -182,8 +334,7 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
             combine(a, b)
           end
         end
-        """,
-        @on
+        """
       )
     end
 
@@ -198,8 +349,7 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
             combine(a, b)
           end
         end
-        """,
-        @on
+        """
       )
     end
 
@@ -214,8 +364,7 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
             unrelated(x)
           end
         end
-        """,
-        @on
+        """
       )
     end
 
@@ -231,8 +380,7 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
             render(a, b)
           end
         end
-        """,
-        @on
+        """
       )
     end
 
@@ -243,8 +391,7 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
         defmodule M do
           def f(x), do: compute(x)
         end
-        """,
-        @on
+        """
       )
     end
 
@@ -258,8 +405,7 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
             b = derive(a)
           end
         end
-        """,
-        @on
+        """
       )
     end
   end
@@ -277,8 +423,7 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
             format(total, tax)
           end
         end
-        """,
-        @on
+        """
       )
     end
 
@@ -298,7 +443,7 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
       end
       """
 
-      assert_compiles(apply_refactor(@subject, source, @on))
+      assert_compiles(apply_refactor(@subject, source))
     end
   end
 end

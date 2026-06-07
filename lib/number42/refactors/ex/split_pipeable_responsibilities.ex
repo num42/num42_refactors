@@ -67,23 +67,28 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilities do
 
   ## Pass scope & idempotence
 
-  Every eligible function in the module is split in a single pass. After
-  a split the host body is a pipe/binding chain of `phase_n` calls — no
-  longer a multi-binding run — so a second pass finds nothing to split.
-  The generated `phase_n` helpers each end in a value return, which is
-  itself not re-splittable under the constraints.
+  Every eligible function in the module is split in a single pass, into
+  its *maximally fine* partition: `group_phases/2` cuts at every clean
+  data-flow boundary at once, so a six-statement body with three
+  single-carrier phases becomes `fn_phase_1 |> fn_phase_2 |> fn_phase_3`
+  immediately — never `fn_phase_1, fn_phase_2` with `fn_phase_2` left long
+  enough to re-split into `fn_phase_2_phase_1` on a later pass.
 
-  ## Default-OFF (opt-in only)
+  This makes the refactor single-pass idempotent two ways over: the host
+  body is now a pipe/binding chain of `phase_n` calls (no longer a
+  multi-binding run), and each generated `phase_n` helper is already as
+  short as the `min_statements_per_phase` floor allows.
 
-  Disabled by default — `transform/2` is a no-op unless its own opts carry
-  `enabled: true`. A dogfood run surfaced rewrites that drop a function's
-  tail expression (producing an unterminated string literal and empty
-  statement stubs). Enable per project once the phase split preserves the
-  host's return:
-
-      configured_modules: [
-        {Number42.Refactors.Ex.SplitPipeableResponsibilities, enabled: true}
-      ]
+  One residual case needs a guard. A *fan-in* body — many independent
+  bindings all feeding one tail expression — has a monotonically growing
+  carrier count, so under `max_carriers` only its first boundary is a
+  clean cut: the maximal partition is just two phases, leaving a long
+  tail helper. That helper, with its carriers now passed as parameters,
+  has a narrower cut profile than the same statements had in the host, so
+  a naive second pass would re-split it into `_phase_2_phase_1`. To keep
+  the fixpoint at one pass, any `defp` already named `<host>_phase_<int>`
+  is recognised as this refactor's own output and never re-split. A
+  re-run is a no-op.
   """
 
   use Number42.Refactors.Refactor
@@ -116,11 +121,7 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilities do
 
   @impl Number42.Refactors.Refactor
   def transform(source, opts) do
-    if Keyword.get(opts, :enabled, false) do
-      Sourceror.parse_string(source) |> apply_to_parse_result(source, opts)
-    else
-      source
-    end
+    Sourceror.parse_string(source) |> apply_to_parse_result(source, opts)
   end
 
   defp apply_to_parse_result({:ok, ast}, source, opts), do: apply_to_ast(ast, source, opts)
@@ -157,12 +158,15 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilities do
   defp split_for_def(
          {kind, _, [head, body_kw]} = def_node,
          existing_names,
-         _mod_ast,
-         source,
+         mod_ast,
+         _source,
          opts
        )
        when kind in [:def, :defp] and is_list(body_kw) do
     with {fn_name, params} <- extract_fn_signature(strip_when(head)),
+         false <- split_output?(fn_name),
+         true <- suffixable_name?(fn_name),
+         true <- single_clause?(def_node, mod_ast),
          {:ok, param_names} <- bare_param_names(params),
          {:ok, body} <- do_body(body_kw),
          exprs = body_to_exprs(body),
@@ -172,13 +176,49 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilities do
          true <- length(phases) >= Keyword.get(group_opts(opts), :min_phases, 2),
          param_set = MapSet.new(param_names),
          {:ok, plan} <- plan_phases(phases, param_set, fn_name, existing_names) do
-      build_split(def_node, plan, source)
+      build_split(def_node, plan, def_node)
     else
       _ -> []
     end
   end
 
   defp split_for_def(_, _existing, _mod, _source, _opts), do: []
+
+  # A helper this refactor itself emitted (`<host>_phase_<int>`). The
+  # maximal partition keeps most hosts single-pass, but a fan-in body
+  # (many independent bindings feeding one tail) can only cut once under
+  # `max_carriers` — its generated tail helper, with carriers now passed
+  # as params, has a narrower cut profile and would otherwise re-split
+  # into `_phase_2_phase_1`. Skipping anything already named `_phase_<n>`
+  # is the safety net that makes the refactor single-pass idempotent.
+  @phase_suffix ~r/_phase_\d+$/
+  defp split_output?(fn_name), do: fn_name |> Atom.to_string() |> String.match?(@phase_suffix)
+
+  # Helper names are formed as `<fn_name>_phase_<n>`. A `!`/`?` host name
+  # can't carry that suffix — `foo!_phase_1` parses as `foo!(_phase_1)`.
+  defp suffixable_name?(fn_name), do: not String.ends_with?(Atom.to_string(fn_name), ["!", "?"])
+
+  # A function defined by more than one clause of the same name+arity.
+  # Splitting one clause would insert the `phase_n` helpers between the
+  # group's clauses (and a `do:`-shorthand clause has no `end` token to
+  # anchor the insert on at all). Conservative skip for the whole group.
+  defp single_clause?({kind, _, [head, _]}, mod_ast) do
+    sig = clause_sig(kind, head)
+
+    mod_ast
+    |> module_body_exprs()
+    |> Enum.count(fn
+      {k, _, [h, _]} when k in [:def, :defp] -> clause_sig(k, h) == sig
+      _ -> false
+    end) <= 1
+  end
+
+  defp clause_sig(kind, head) do
+    case extract_fn_signature(strip_when(head)) do
+      {name, params} -> {kind, name, length(params)}
+      _ -> :unknown
+    end
+  end
 
   defp group_opts(opts) do
     [
@@ -307,15 +347,15 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilities do
 
   # --- patch construction ---
 
-  defp build_split(def_node, plan, _source) do
+  defp build_split(def_node, plan, insert_anchor) do
     host_body = render_host_body(plan)
     helper_texts = Enum.map(plan, &render_helper/1)
 
-    case body_ranges(def_node) do
-      {first_range, delete_patches} ->
-        body_patch = %{change: host_body, range: first_range}
-        insert_patches = helper_insert_patches(def_node, helper_texts)
-        [body_patch | delete_patches] ++ insert_patches
+    case body_interior_range(def_node) do
+      %{} = range ->
+        body_patch = %{change: "\n#{indent(host_body)}\n  ", range: range}
+        insert_patches = helper_insert_patches(insert_anchor, helper_texts)
+        [body_patch | insert_patches]
 
       :error ->
         []
@@ -380,33 +420,35 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilities do
   defp return_value([single]), do: Atom.to_string(single)
   defp return_value(many), do: "{" <> Enum.map_join(many, ", ", &Atom.to_string/1) <> "}"
 
-  defp helper_insert_patches(def_node, helper_texts) do
-    case Sourceror.get_range(def_node) do
-      %{end: end_pos} ->
+  # Insert helpers right after the anchor clause's `end` token. Anchored
+  # on `meta[:end]` (token-exact) rather than `Sourceror.get_range/1`,
+  # which undercounts a def ending in an interpolated/escaped-quote string
+  # and would splice the helpers inside that string literal.
+  defp helper_insert_patches({_kind, meta, _}, helper_texts) do
+    case Keyword.get(meta, :end) do
+      [line: end_line, column: end_col] ->
+        pos = [line: end_line, column: end_col + 3]
         joined = Enum.map_join(helper_texts, "", fn t -> "\n\n" <> t end)
-        [%{change: joined, range: %{start: end_pos, end: end_pos}}]
+        [%{change: joined, range: %{start: pos, end: pos}}]
 
       _ ->
         []
     end
   end
 
-  # The range of the first body statement, plus delete-patches covering
-  # the remaining statements (their ranges replaced with "").
-  defp body_ranges(def_node) do
-    with {:ok, body} <- def_body(def_node),
-         [first | rest] <- body_to_exprs(body),
-         %{} = first_range <- Sourceror.get_range(first) do
-      delete = Enum.map(rest, fn s -> %{change: "", range: Sourceror.get_range(s)} end)
-      {first_range, delete}
+  # The span between the `do` and `end` tokens of the function head,
+  # replaced in one patch. Per-statement `Sourceror.get_range/1` undercounts
+  # the end column of an interpolated/escaped-quote string tail, which left
+  # the closing `"` behind as a stub; token positions from the def meta are
+  # exact regardless of literal shape.
+  defp body_interior_range({_kind, meta, _}) do
+    with [line: do_line, column: do_col] <- Keyword.get(meta, :do),
+         [line: end_line, column: end_col] <- Keyword.get(meta, :end) do
+      %{start: [line: do_line, column: do_col + 2], end: [line: end_line, column: end_col]}
     else
       _ -> :error
     end
   end
-
-  # build_split needs the delete-patches too; recompute and prepend.
-  defp def_body({_kind, _, [_head, body_kw]}) when is_list(body_kw), do: do_body(body_kw)
-  defp def_body(_), do: :skip
 
   # --- shared helpers ---
 

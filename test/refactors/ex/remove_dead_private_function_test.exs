@@ -5,25 +5,6 @@ defmodule Number42.Refactors.Ex.RemoveDeadPrivateFunctionTest do
 
   @subject RemoveDeadPrivateFunction
 
-  # RemoveDeadPrivateFunction is opt-in / default-off. Every test that
-  # exercises the rewrite passes `enabled: true`; a dedicated test asserts
-  # the default-off behaviour.
-  @on [enabled: true]
-
-  describe "default-off" do
-    test "without opt-in config the source is left untouched" do
-      source = """
-      defmodule M do
-        def used, do: helper_a()
-        defp helper_a, do: :ok
-        defp helper_b, do: :never_called
-      end
-      """
-
-      assert_unchanged(@subject, source)
-    end
-  end
-
   describe "rewrites — canonical dead-code elimination" do
     test "deletes a private function with no call site" do
       before_source = """
@@ -41,7 +22,7 @@ defmodule Number42.Refactors.Ex.RemoveDeadPrivateFunctionTest do
       end
       """
 
-      assert_rewrites(@subject, before_source, after_source, @on)
+      assert_rewrites(@subject, before_source, after_source)
     end
 
     test "deletes the dead defp's attached @doc and @spec" do
@@ -61,7 +42,7 @@ defmodule Number42.Refactors.Ex.RemoveDeadPrivateFunctionTest do
       end
       """
 
-      assert_rewrites(@subject, before_source, after_source, @on)
+      assert_rewrites(@subject, before_source, after_source)
     end
 
     test "deletes a whole transitive-dead cluster in one pass" do
@@ -79,7 +60,7 @@ defmodule Number42.Refactors.Ex.RemoveDeadPrivateFunctionTest do
       end
       """
 
-      assert_rewrites(@subject, before_source, after_source, @on)
+      assert_rewrites(@subject, before_source, after_source)
     end
 
     test "deletes all clauses of a multi-clause dead defp" do
@@ -97,7 +78,7 @@ defmodule Number42.Refactors.Ex.RemoveDeadPrivateFunctionTest do
       end
       """
 
-      assert_rewrites(@subject, before_source, after_source, @on)
+      assert_rewrites(@subject, before_source, after_source)
     end
   end
 
@@ -110,8 +91,7 @@ defmodule Number42.Refactors.Ex.RemoveDeadPrivateFunctionTest do
           def used, do: helper()
           defp helper, do: :ok
         end
-        """,
-        @on
+        """
       )
     end
 
@@ -123,8 +103,7 @@ defmodule Number42.Refactors.Ex.RemoveDeadPrivateFunctionTest do
           def used, do: Enum.map([1, 2], &double/1)
           defp double(x), do: x * 2
         end
-        """,
-        @on
+        """
       )
     end
 
@@ -137,8 +116,7 @@ defmodule Number42.Refactors.Ex.RemoveDeadPrivateFunctionTest do
           defp mid, do: leaf()
           defp leaf, do: :ok
         end
-        """,
-        @on
+        """
       )
     end
 
@@ -164,8 +142,110 @@ defmodule Number42.Refactors.Ex.RemoveDeadPrivateFunctionTest do
           defp recurse_or_done(pid, acc, parent_map),
             do: build_ancestry(pid, parent_map, [pid | acc])
         end
-        """,
-        @on
+        """
+      )
+    end
+
+    # Two definition groups of the same name answer the same callable
+    # arity: `slug_url/2` (its own body calls private helpers) and a
+    # `slug_url(slug, w \\\\ nil, ...)` default-arg clause. Indexing the
+    # call graph by `{name, arity}` once collided — the second group
+    # overwrote the first — so the helpers reached only from the `/2`
+    # body looked dead and were deleted, breaking compilation. Both
+    # groups' call edges must survive. Regression: position-db MediaUrl
+    # after SplitPipeableResponsibilities split slug_url/2.
+    test "keeps helpers reached from one of two same-name groups sharing an arity" do
+      assert_unchanged(
+        @subject,
+        """
+        defmodule M do
+          def slug_url(slug, opts) when is_list(opts) do
+            {h, w} = slug_url_phase_1(opts)
+            slug_url_phase_2(h, w, slug)
+          end
+
+          def slug_url(slug, width \\\\ nil, height \\\\ nil),
+            do: gen_url(slug, width, height)
+
+          defp slug_url_phase_1(opts), do: {opts[:h], opts[:w]}
+          defp slug_url_phase_2(h, w, slug), do: gen_url(slug, w, h)
+          defp gen_url(_s, _w, _h), do: :ok
+        end
+        """
+      )
+    end
+
+    # A defp called from the compile-time body of a `defmacro` — before
+    # the `quote do` — runs at macro-expansion time. The reachability
+    # scan must register that call, or the live helper is deleted and the
+    # macro no longer compiles (`undefined function build_embedding_text/2`).
+    # Regression: position-db PositionDb.Search.Embeddable.
+    test "keeps a defp called from a defmacro body before the quote" do
+      assert_unchanged(
+        @subject,
+        """
+        defmodule M do
+          def used, do: :ok
+
+          defmacro __using__(opts) do
+            fields = Keyword.fetch!(opts, :fields)
+            text_ast = build_embedding_text(fields, " — ")
+
+            quote do
+              unquote(text_ast)
+            end
+          end
+
+          defp build_embedding_text(fields, joiner) when is_list(fields) and is_binary(joiner) do
+            quote do
+              Enum.join(unquote(Macro.escape(fields)), unquote(Macro.escape(joiner)))
+            end
+          end
+        end
+        """
+      )
+    end
+
+    test "keeps a defp called only from a defmacrop body" do
+      assert_unchanged(
+        @subject,
+        """
+        defmodule M do
+          def used, do: :ok
+
+          defmacrop gen do
+            ast = builder()
+
+            quote do
+              unquote(ast)
+            end
+          end
+
+          defp builder, do: quote(do: :ok)
+        end
+        """
+      )
+    end
+
+    # A defp referenced only from inside a HEEx `~H` sigil. Sourceror
+    # keeps the sigil content as an unparsed string literal, so the call
+    # graph never sees the call. Deleting the helper breaks compilation
+    # (`undefined function format_datetime/1`).
+    # Regression: position-db PositionDbWeb.Components.RelativeTime.
+    test "keeps a defp referenced only inside a ~H sigil" do
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          def render(assigns) do
+            ~H"""
+            <span>{format_datetime(@datetime)}</span>
+            """
+          end
+
+          defp format_datetime(d), do: d
+        end
+        '''
       )
     end
 
@@ -184,8 +264,7 @@ defmodule Number42.Refactors.Ex.RemoveDeadPrivateFunctionTest do
 
           defp runtime_helper, do: :ok
         end
-        """,
-        @on
+        """
       )
     end
 
@@ -198,8 +277,7 @@ defmodule Number42.Refactors.Ex.RemoveDeadPrivateFunctionTest do
           def trampoline, do: M.target()
           defp target, do: :ok
         end
-        """,
-        @on
+        """
       )
     end
 
@@ -218,8 +296,7 @@ defmodule Number42.Refactors.Ex.RemoveDeadPrivateFunctionTest do
 
           defp maybe_target, do: :ok
         end
-        """,
-        @on
+        """
       )
     end
 
@@ -231,8 +308,7 @@ defmodule Number42.Refactors.Ex.RemoveDeadPrivateFunctionTest do
           def used(name), do: apply(__MODULE__, name, [])
           defp maybe_target, do: :ok
         end
-        """,
-        @on
+        """
       )
     end
 
@@ -243,8 +319,7 @@ defmodule Number42.Refactors.Ex.RemoveDeadPrivateFunctionTest do
         defmodule M do
           def public_api, do: :ok
         end
-        """,
-        @on
+        """
       )
     end
 
@@ -255,8 +330,7 @@ defmodule Number42.Refactors.Ex.RemoveDeadPrivateFunctionTest do
         defmodule M do
           defp only_private, do: :ok
         end
-        """,
-        @on
+        """
       )
     end
   end
@@ -271,8 +345,7 @@ defmodule Number42.Refactors.Ex.RemoveDeadPrivateFunctionTest do
           defp helper_a, do: :ok
           defp helper_b, do: :dead
         end
-        """,
-        @on
+        """
       )
     end
 
@@ -285,7 +358,7 @@ defmodule Number42.Refactors.Ex.RemoveDeadPrivateFunctionTest do
       end
       """
 
-      assert_compiles(apply_refactor(@subject, source, @on))
+      assert_compiles(apply_refactor(@subject, source))
     end
   end
 end
