@@ -37,6 +37,32 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunctionTest do
     sources
   end
 
+  describe "default-OFF (opt-in only)" do
+    test "without enabled: true, prepare is :no_cache and transform is a no-op", %{tmp: tmp} do
+      a = """
+      defmodule MyApp.A do
+        alias MyApp.B
+
+        def brand_label(%B{} = brand) do
+          B.name(brand) <> " (" <> B.code(brand) <> ")"
+        end
+      end
+      """
+
+      b = struct_b()
+      paths = materialize([{"lib/my_app/a.ex", a}, {"lib/my_app/b.ex", b}], tmp)
+
+      # prepare/1 must not touch disk when disabled.
+      assert RelocateMisplacedFunction.prepare(source_files: Enum.map(paths, &elem(&1, 0))) ==
+               :no_cache
+
+      # transform/2 leaves the source untouched even with a real plan,
+      # as long as enabled: true is absent.
+      plan = prepared(paths, write_root: tmp)
+      assert_unchanged(@subject, a, prepared: plan)
+    end
+  end
+
   describe "rewrites — feature-envy move" do
     test "moves an envious function into its target module and delegates", %{tmp: tmp} do
       a = """
@@ -74,11 +100,11 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunctionTest do
 
       plan = prepared(paths, write_root: tmp)
 
-      result_a = apply_refactor(@subject, a, prepared: plan)
+      result_a = apply_refactor(@subject, a, prepared: plan, enabled: true)
       # The host keeps a deprecated defdelegate to the target.
       assert result_a =~ "defdelegate brand_label(brand), to: MyApp.B"
 
-      result_caller = apply_refactor(@subject, caller, prepared: plan)
+      result_caller = apply_refactor(@subject, caller, prepared: plan, enabled: true)
       # The call site now points at the target module.
       assert result_caller =~ "MyApp.B.brand_label(brand)"
       refute result_caller =~ "A.brand_label"
@@ -116,7 +142,7 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunctionTest do
       paths = materialize([{"lib/my_app/a.ex", a}, {"lib/my_app/b.ex", b}], tmp)
       plan = prepared(paths, write_root: tmp)
 
-      result_a = apply_refactor(@subject, a, prepared: plan)
+      result_a = apply_refactor(@subject, a, prepared: plan, enabled: true)
       assert result_a =~ "defdelegate describe(b), to: MyApp.B"
       refute result_a =~ "B.name(b)"
 
@@ -165,9 +191,9 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunctionTest do
 
       plan = prepared(paths, write_root: tmp)
 
-      assert_unchanged(@subject, a_after, prepared: plan)
-      assert_unchanged(@subject, b_after, prepared: plan)
-      assert_unchanged(@subject, caller_after, prepared: plan)
+      assert_unchanged(@subject, a_after, prepared: plan, enabled: true)
+      assert_unchanged(@subject, b_after, prepared: plan, enabled: true)
+      assert_unchanged(@subject, caller_after, prepared: plan, enabled: true)
     end
   end
 
@@ -188,7 +214,7 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunctionTest do
       b = struct_b()
       plan = prepared([{"lib/my_app/a.ex", a}, {"lib/my_app/b.ex", b}], write_root: tmp)
 
-      assert_unchanged(@subject, a, prepared: plan)
+      assert_unchanged(@subject, a, prepared: plan, enabled: true)
       refute File.exists?(Path.join(tmp, "lib/my_app/b.ex"))
     end
 
@@ -206,7 +232,7 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunctionTest do
       b = struct_b()
       plan = prepared([{"lib/my_app/a.ex", a}, {"lib/my_app/b.ex", b}], write_root: tmp)
 
-      assert_unchanged(@subject, a, prepared: plan)
+      assert_unchanged(@subject, a, prepared: plan, enabled: true)
     end
 
     test "function referencing a host module attribute is left alone", %{tmp: tmp} do
@@ -225,7 +251,7 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunctionTest do
       b = struct_b()
       plan = prepared([{"lib/my_app/a.ex", a}, {"lib/my_app/b.ex", b}], write_root: tmp)
 
-      assert_unchanged(@subject, a, prepared: plan)
+      assert_unchanged(@subject, a, prepared: plan, enabled: true)
     end
 
     test "name clash of same arity in target is left alone", %{tmp: tmp} do
@@ -243,7 +269,7 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunctionTest do
       b = struct_b()
       plan = prepared([{"lib/my_app/a.ex", a}, {"lib/my_app/b.ex", b}], write_root: tmp)
 
-      assert_unchanged(@subject, a, prepared: plan)
+      assert_unchanged(@subject, a, prepared: plan, enabled: true)
     end
 
     test "would-be cycle (target already references host) is left alone", %{tmp: tmp} do
@@ -272,7 +298,7 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunctionTest do
 
       plan = prepared([{"lib/my_app/a.ex", a}, {"lib/my_app/b.ex", b}], write_root: tmp)
 
-      assert_unchanged(@subject, a, prepared: plan)
+      assert_unchanged(@subject, a, prepared: plan, enabled: true)
     end
 
     test "dynamic apply of the function makes the move unsafe", %{tmp: tmp} do
@@ -304,7 +330,7 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunctionTest do
           write_root: tmp
         )
 
-      assert_unchanged(@subject, a, prepared: plan)
+      assert_unchanged(@subject, a, prepared: plan, enabled: true)
     end
 
     test "function with no envied module reference is left alone", %{tmp: tmp} do
@@ -317,7 +343,7 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunctionTest do
       """
 
       plan = prepared([{"lib/my_app/a.ex", a}], write_root: tmp)
-      assert_unchanged(@subject, a, prepared: plan)
+      assert_unchanged(@subject, a, prepared: plan, enabled: true)
     end
 
     test "function envying two different modules equally is left alone", %{tmp: tmp} do
@@ -347,7 +373,7 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunctionTest do
           write_root: tmp
         )
 
-      assert_unchanged(@subject, a, prepared: plan)
+      assert_unchanged(@subject, a, prepared: plan, enabled: true)
     end
 
     test "target module not present in corpus is left alone", %{tmp: tmp} do
@@ -364,7 +390,7 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunctionTest do
       # No file defines MyApp.B — we cannot append into a module we
       # cannot see.
       plan = prepared([{"lib/my_app/a.ex", a}], write_root: tmp)
-      assert_unchanged(@subject, a, prepared: plan)
+      assert_unchanged(@subject, a, prepared: plan, enabled: true)
     end
   end
 

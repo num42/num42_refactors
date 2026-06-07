@@ -5,6 +5,25 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
 
   @subject ExtractMagicNumber
 
+  # ExtractMagicNumber is default-OFF: transform/2 is a no-op unless its
+  # own opts carry `enabled: true`. Every behaviour test below passes
+  # `enabled: true` as the trailing opts so it exercises the enabled
+  # refactor; the default-OFF gate has its own dedicated test.
+  @on [enabled: true]
+
+  describe "default-OFF (opt-in only)" do
+    test "without enabled: true, transform is a no-op" do
+      source = ~S'''
+      defmodule M do
+        def a, do: 3600
+        def b, do: 3600
+      end
+      '''
+
+      assert apply_refactor(@subject, source) == source
+    end
+  end
+
   describe "rewrites" do
     test "hoists a repeated integer literal into a module attribute" do
       assert_rewrites(
@@ -21,7 +40,8 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
           def a, do: @seconds_per_hour
           def b, do: @seconds_per_hour
         end
-        '''
+        ''',
+        @on
       )
     end
 
@@ -40,7 +60,8 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
           def a, do: connect(timeout: @timeout)
           def b, do: reconnect(timeout: @timeout)
         end
-        '''
+        ''',
+        @on
       )
     end
 
@@ -59,7 +80,8 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
           def a, do: @default_float
           def b, do: @default_float
         end
-        '''
+        ''',
+        @on
       )
     end
 
@@ -79,7 +101,8 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
           def a, do: {@seconds_per_hour, @int_7200}
           def b, do: {@seconds_per_hour, @int_7200}
         end
-        '''
+        ''',
+        @on
       )
     end
   end
@@ -92,7 +115,8 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
         defmodule M do
           def a, do: 3600
         end
-        '''
+        ''',
+        @on
       )
     end
 
@@ -105,7 +129,7 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
           def b, do: 3600
         end
         ''',
-        min_occurrences: 3
+        [min_occurrences: 3] ++ @on
       )
     end
 
@@ -127,7 +151,7 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
           def c, do: @seconds_per_hour
         end
         ''',
-        min_occurrences: 3
+        [min_occurrences: 3] ++ @on
       )
     end
   end
@@ -141,7 +165,8 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
           def a, do: {0, 1, 2, 0.0, 1.0, 0.5}
           def b, do: {0, 1, 2, 0.0, 1.0, 0.5}
         end
-        '''
+        ''',
+        @on
       )
     end
 
@@ -154,12 +179,13 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
           def a, do: @timeout
           def b, do: @timeout
         end
-        '''
+        ''',
+        @on
       )
     end
 
     test "no defmodule wrapper — nothing to do" do
-      assert_unchanged(@subject, "def a, do: 3600\ndef b, do: 3600")
+      assert_unchanged(@subject, "def a, do: 3600\ndef b, do: 3600", @on)
     end
 
     test "literals in pattern positions are never hoisted (module attr is illegal in a pattern)" do
@@ -174,7 +200,8 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
           def f(404), do: :a
           def f(_), do: :b
         end
-        '''
+        ''',
+        @on
       )
     end
 
@@ -195,7 +222,8 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
           def g, do: @int_404
           def h, do: @int_404
         end
-        '''
+        ''',
+        @on
       )
     end
   end
@@ -212,7 +240,8 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
         defmodule M do
           def s, do: [{:items, &do_search_items/3}, {:assets, &do_search_assets/3}]
         end
-        '''
+        ''',
+        @on
       )
     end
 
@@ -227,7 +256,8 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
           def s, do: {&a/3, &b/3}
           def t, do: 3
         end
-        '''
+        ''',
+        @on
       )
     end
   end
@@ -249,7 +279,8 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
             end
           end
         end
-        '''
+        ''',
+        @on
       )
     end
   end
@@ -270,7 +301,8 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
           def a(x), do: String.slice(x, 0, @max_slice)
           def b(x), do: String.slice(x, 0, @max_slice)
         end
-        '''
+        ''',
+        @on
       )
     end
   end
@@ -285,7 +317,7 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
             def b, do: 3600
           end
           ''',
-          []
+          @on
         )
 
       assert actual =~ "@seconds_per_hour 3600\n\n  def a"
@@ -301,7 +333,8 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
           def a, do: 3600
           def b, do: 3600
         end
-        '''
+        ''',
+        @on
       )
     end
 
@@ -313,7 +346,8 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
           def a, do: connect(timeout: 5000)
           def b, do: reconnect(timeout: 5000)
         end
-        '''
+        ''',
+        @on
       )
     end
   end

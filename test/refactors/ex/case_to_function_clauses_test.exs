@@ -5,6 +5,29 @@ defmodule Number42.Refactors.Ex.CaseToFunctionClausesTest do
 
   @subject CaseToFunctionClauses
 
+  # CaseToFunctionClauses is default-OFF: transform/2 is a no-op unless
+  # its own opts carry `enabled: true`. Every behaviour test passes `@on`
+  # as the trailing opts so it exercises the enabled refactor; the
+  # default-OFF gate has its own dedicated test.
+  @on [enabled: true]
+
+  describe "default-OFF (opt-in only)" do
+    test "without enabled: true, transform is a no-op" do
+      source = """
+      defmodule M do
+        def handle(msg) do
+          case msg do
+            {:ok, v} -> log(v)
+            {:error, e} -> warn(e)
+          end
+        end
+      end
+      """
+
+      assert apply_refactor(@subject, source) == source
+    end
+  end
+
   describe "lifts" do
     test "canonical case-on-param → one clause per branch" do
       before_source = """
@@ -25,7 +48,7 @@ defmodule Number42.Refactors.Ex.CaseToFunctionClausesTest do
       end
       """
 
-      assert_rewrites(@subject, before_source, expected)
+      assert_rewrites(@subject, before_source, expected, @on)
     end
 
     test "extra params repeated verbatim on each clause" do
@@ -47,7 +70,7 @@ defmodule Number42.Refactors.Ex.CaseToFunctionClausesTest do
       end
       """
 
-      assert_rewrites(@subject, before_source, expected)
+      assert_rewrites(@subject, before_source, expected, @on)
     end
 
     test "scrutinee is a later param, not the first" do
@@ -69,7 +92,7 @@ defmodule Number42.Refactors.Ex.CaseToFunctionClausesTest do
       end
       """
 
-      assert_rewrites(@subject, before_source, expected)
+      assert_rewrites(@subject, before_source, expected, @on)
     end
 
     test "branch guard carries over to the clause when-guard" do
@@ -91,7 +114,7 @@ defmodule Number42.Refactors.Ex.CaseToFunctionClausesTest do
       end
       """
 
-      assert_rewrites(@subject, before_source, expected)
+      assert_rewrites(@subject, before_source, expected, @on)
     end
 
     test "multi-expression branch body becomes a do/end clause" do
@@ -121,7 +144,7 @@ defmodule Number42.Refactors.Ex.CaseToFunctionClausesTest do
       end
       """
 
-      assert_rewrites(@subject, before_source, expected)
+      assert_rewrites(@subject, before_source, expected, @on)
     end
 
     test "defp is lifted too" do
@@ -143,7 +166,7 @@ defmodule Number42.Refactors.Ex.CaseToFunctionClausesTest do
       end
       """
 
-      assert_rewrites(@subject, before_source, expected)
+      assert_rewrites(@subject, before_source, expected, @on)
     end
   end
 
@@ -160,7 +183,7 @@ defmodule Number42.Refactors.Ex.CaseToFunctionClausesTest do
       end
       """
 
-      assert_unchanged(@subject, source)
+      assert_unchanged(@subject, source, @on)
     end
 
     test "prefix before the case (closure loss risk)" do
@@ -177,7 +200,7 @@ defmodule Number42.Refactors.Ex.CaseToFunctionClausesTest do
       end
       """
 
-      assert_unchanged(@subject, source)
+      assert_unchanged(@subject, source, @on)
     end
 
     test "sibling clauses at the same name/arity" do
@@ -194,7 +217,7 @@ defmodule Number42.Refactors.Ex.CaseToFunctionClausesTest do
       end
       """
 
-      assert_unchanged(@subject, source)
+      assert_unchanged(@subject, source, @on)
     end
 
     test "defmacro is out of scope" do
@@ -209,7 +232,7 @@ defmodule Number42.Refactors.Ex.CaseToFunctionClausesTest do
       end
       """
 
-      assert_unchanged(@subject, source)
+      assert_unchanged(@subject, source, @on)
     end
 
     test "head has a when-guard" do
@@ -224,7 +247,7 @@ defmodule Number42.Refactors.Ex.CaseToFunctionClausesTest do
       end
       """
 
-      assert_unchanged(@subject, source)
+      assert_unchanged(@subject, source, @on)
     end
 
     test "branch pattern contains a pin" do
@@ -241,7 +264,7 @@ defmodule Number42.Refactors.Ex.CaseToFunctionClausesTest do
       end
       """
 
-      assert_unchanged(@subject, source)
+      assert_unchanged(@subject, source, @on)
     end
 
     test "branch pattern contains a pin (case is sole body)" do
@@ -256,7 +279,7 @@ defmodule Number42.Refactors.Ex.CaseToFunctionClausesTest do
       end
       """
 
-      assert_unchanged(@subject, source)
+      assert_unchanged(@subject, source, @on)
     end
 
     test "head param is a pattern, not a bare variable" do
@@ -271,7 +294,7 @@ defmodule Number42.Refactors.Ex.CaseToFunctionClausesTest do
       end
       """
 
-      assert_unchanged(@subject, source)
+      assert_unchanged(@subject, source, @on)
     end
 
     test "statement after the case" do
@@ -288,7 +311,7 @@ defmodule Number42.Refactors.Ex.CaseToFunctionClausesTest do
       end
       """
 
-      assert_unchanged(@subject, source)
+      assert_unchanged(@subject, source, @on)
     end
   end
 
@@ -305,7 +328,7 @@ defmodule Number42.Refactors.Ex.CaseToFunctionClausesTest do
       end
       """
 
-      assert_idempotent(@subject, source)
+      assert_idempotent(@subject, source, @on)
     end
 
     test "already-lifted code passes through unchanged" do
@@ -316,7 +339,7 @@ defmodule Number42.Refactors.Ex.CaseToFunctionClausesTest do
       end
       """
 
-      assert_idempotent(@subject, source)
+      assert_idempotent(@subject, source, @on)
     end
   end
 
@@ -334,7 +357,7 @@ defmodule Number42.Refactors.Ex.CaseToFunctionClausesTest do
       end
       """
 
-      out = apply_refactor(@subject, before_source)
+      out = apply_refactor(@subject, before_source, @on)
 
       assert_compiles(out)
     end
