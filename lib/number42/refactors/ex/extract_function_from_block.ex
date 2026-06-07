@@ -67,21 +67,15 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlock do
 
   ## Helper naming
 
-  The block's live-out names describe what it *produces*, so they make
-  the best helper name. Two meaningful live-outs become
-  `<a>_and_<b>` (`{source, formula}` → `source_and_formula`). Everything
-  else falls back to the host-derived `<fn>_block`:
-
-  - a **single** live-out — its only name *is* the bound variable, so a
-    same-named helper would shadow it at the call site
-    (`total = total(…)`);
-  - **three or more** — `a_and_b_and_c` reads worse than `<fn>_block`;
-  - **terse** names (`x`, `cs`, `_acc`) — they name nothing.
-
-  A candidate equal to any live-out or parameter name is rejected (the
-  call must not shadow a variable in scope); if even `<fn>_block`
-  collides with an existing definition, the extraction is skipped rather
-  than emit a confusing name.
+  The helper is named after what it *does* and *produces*, via
+  `Number42.Refactors.HelperNaming`: a verb inferred from the block's
+  dominant call joined to the live-out object — `fetch_brands`,
+  `compute_masses_and_options`, `validate_unit`. When no verb is
+  inferable the object alone is used (`source_and_formula`), then the
+  host name without its suffix (`load_brands`), and finally the honest
+  `<fn>_block` fallback. The result never shadows a live-out or parameter
+  name; if even `<fn>_block` collides with an existing definition the
+  extraction is skipped rather than emit a confusing name.
 
   ## Idempotence & determinism
 
@@ -100,6 +94,8 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlock do
   """
 
   use Number42.Refactors.Refactor
+
+  alias Number42.Refactors.HelperNaming
 
   @control_flow_forms ~w(raise throw exit with case cond if unless try for fn receive)a
 
@@ -176,7 +172,8 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlock do
          true <- meaningful_tail?(tail),
          args = prefix_free_vars(prefix, param_names),
          live_out = live_out_bindings(prefix, tail),
-         {:ok, helper_name} <- helper_name(fn_name, live_out, args, existing_names) do
+         {:ok, helper_name} <-
+           HelperNaming.name(fn_name, live_out, prefix, args, existing_names) do
       build_extraction(prefix, live_out, args, helper_name, def_node, source)
     else
       _ -> nil
@@ -307,66 +304,6 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlock do
   end
 
   defp binding_name({:=, _, [{name, _, ctx}, _]}) when is_atom(name) and is_atom(ctx), do: name
-
-  # --- helper naming ---
-
-  # The block's live-out names say what it *produces* — a far better
-  # purpose hint than the host name. Two meaningful live-outs (`source`,
-  # `formula`) read naturally as `source_and_formula/…`. The host-derived
-  # `<fn>_block` is the fallback for everything else: a single live-out
-  # (whose only name *is* the bound variable — naming the helper after it
-  # would shadow that variable at the call site, `total = total(…)`),
-  # three or more (a `a_and_b_and_c` monster), or terse names that carry
-  # no meaning. A candidate that collides with a live-out or a parameter
-  # name is rejected — the helper call must not shadow a variable in
-  # scope. The first surviving candidate wins; if even the fallback
-  # collides we skip rather than emit a confusing name.
-  defp helper_name(fn_name, live_out, params, existing_names) do
-    in_scope = MapSet.new(live_out ++ params)
-
-    [result_name(live_out), suffixed_name(fn_name, "_block")]
-    |> Enum.reject(&(is_nil(&1) or MapSet.member?(in_scope, &1)))
-    |> first_free_name(existing_names)
-  end
-
-  defp result_name([a, b]),
-    do: if(meaningful_name?(a) and meaningful_name?(b), do: :"#{a}_and_#{b}", else: nil)
-
-  defp result_name(_), do: nil
-
-  # One- and two-letter binding names (`x`, `n`, `cs`) and the throwaway
-  # `_`-prefixed ones describe nothing; only longer names earn the helper.
-  # A `?`/`!` name (`hash_password?`) is excluded too: the marker is only
-  # legal as an identifier's final character, so it can't sit in the
-  # middle of a joined `<a>_and_<b>` name.
-  defp meaningful_name?(name) do
-    str = Atom.to_string(name)
-
-    String.length(str) > 2 and
-      not String.starts_with?(str, "_") and
-      not String.ends_with?(str, ["?", "!"])
-  end
-
-  defp first_free_name([], _existing), do: :skip
-
-  defp first_free_name([candidate | rest], existing) do
-    if MapSet.member?(existing, candidate),
-      do: first_free_name(rest, existing),
-      else: {:ok, candidate}
-  end
-
-  # Append `_block` to the source name, but keep a trailing `!`/`?` at
-  # the very end — `verify_siblings!` must become `verify_siblings_block!`,
-  # not the illegal `verify_siblings!_block` (a bang is only valid as the
-  # final character of an identifier).
-  defp suffixed_name(fn_name, suffix) do
-    name = Atom.to_string(fn_name)
-
-    case String.split_at(name, -1) do
-      {stem, marker} when marker in ["!", "?"] -> :"#{stem}#{suffix}#{marker}"
-      {_, _} -> :"#{name}#{suffix}"
-    end
-  end
 
   defp def_names(body_exprs) do
     body_exprs

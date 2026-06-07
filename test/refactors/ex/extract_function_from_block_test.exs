@@ -106,7 +106,9 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
   end
 
   describe "helper naming — result-based" do
-    test "two meaningful live-outs name the helper after what it produces" do
+    # `get_field` is a fetch verb; the two meaningful live-outs are the
+    # object → `fetch_source_and_formula`.
+    test "verb (fetch) + object names the helper after what it does and produces" do
       before_source = """
       defmodule M do
         defp validate(changeset) do
@@ -120,11 +122,11 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
       after_source = """
       defmodule M do
         defp validate(changeset) do
-          {source, formula} = source_and_formula(changeset)
+          {source, formula} = fetch_source_and_formula(changeset)
           check(source, formula)
         end
 
-        defp source_and_formula(changeset) do
+        defp fetch_source_and_formula(changeset) do
           source = get_field(changeset, :source)
           formula = get_field(changeset, :formula)
           {source, formula}
@@ -167,10 +169,11 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
       assert_rewrites(@subject, before_source, after_source)
     end
 
-    # A `?`/`!` is only legal as an identifier's final character, so a
-    # boolean live-out (`enabled?`) can't sit in the middle of a joined
-    # `<a>_and_<b>` name — fall back to `<fn>_block`.
-    test "a boolean (?) live-out name falls back to <fn>_block" do
+    # A boolean live-out (`enabled?`) is dropped from the object — a
+    # `?`/`!` is only legal as an identifier's final character. Here only
+    # `timeout` survives as the object, and `Keyword.get` is a fetch verb
+    # → `fetch_timeout`.
+    test "a boolean (?) live-out is dropped, the remaining name carries the object" do
       before_source = """
       defmodule M do
         defp configure(opts) do
@@ -184,14 +187,45 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
       after_source = """
       defmodule M do
         defp configure(opts) do
-          {enabled?, timeout} = configure_block(opts)
+          {enabled?, timeout} = fetch_timeout(opts)
           apply_config(enabled?, timeout)
         end
 
-        defp configure_block(opts) do
+        defp fetch_timeout(opts) do
           enabled? = Keyword.get(opts, :enabled, true)
           timeout = Keyword.get(opts, :timeout, 5000)
           {enabled?, timeout}
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, after_source)
+    end
+
+    # When *every* live-out is dropped (both boolean) and no verb-object
+    # name is possible, fall back to the host-derived `<fn>_block`.
+    test "all-boolean live-outs with no object fall back to <fn>_block" do
+      before_source = """
+      defmodule M do
+        defp gate(state) do
+          ready? = check_ready(state)
+          stale? = check_stale(state)
+          decide(ready?, stale?)
+        end
+      end
+      """
+
+      after_source = """
+      defmodule M do
+        defp gate(state) do
+          {ready?, stale?} = gate_block(state)
+          decide(ready?, stale?)
+        end
+
+        defp gate_block(state) do
+          ready? = check_ready(state)
+          stale? = check_stale(state)
+          {ready?, stale?}
         end
       end
       """
