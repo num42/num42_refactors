@@ -111,6 +111,29 @@ defmodule Number42.Refactors.Ex.RemoveDeadPrivateFunctionTest do
       """)
     end
 
+    # A defp with a default arg is callable at every arity from its
+    # required count to its declared count. `build/2` calls it at /2;
+    # the definition is /3. Reachability must register both arities, or
+    # the live function is wrongly deleted (taking its recursive helper
+    # with it) and the caller no longer compiles.
+    test "keeps a defp called at a lower arity than declared (default arg)" do
+      assert_unchanged(@subject, """
+      defmodule M do
+        def build(id, parent_map) do
+          ancestry = build_ancestry(id, parent_map)
+          ancestry ++ [id]
+        end
+
+        defp build_ancestry(id, parent_map, acc \\\\ []),
+          do: parent_map |> Map.get(id) |> recurse_or_done(acc, parent_map)
+
+        defp recurse_or_done(nil, acc, _parent_map), do: acc
+        defp recurse_or_done(pid, acc, parent_map),
+          do: build_ancestry(pid, parent_map, [pid | acc])
+      end
+      """)
+    end
+
     test "keeps a defp reached via __MODULE__.fn() inside a quote block" do
       assert_unchanged(@subject, """
       defmodule M do

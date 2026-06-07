@@ -1627,6 +1627,7 @@ defmodule Number42.Refactors.AstHelpers do
             kind: :def | :defp,
             name: atom(),
             arity: non_neg_integer(),
+            min_arity: non_neg_integer(),
             clauses: [term()],
             calls: MapSet.t({atom(), non_neg_integer()})
           }
@@ -1648,6 +1649,7 @@ defmodule Number42.Refactors.AstHelpers do
     |> Enum.map(fn {{kind, name, arity}, clauses} ->
       %{
         arity: arity,
+        min_arity: arity - max_default_args(clauses),
         calls: collect_calls_in_clauses(clauses),
         clauses: clauses,
         kind: kind,
@@ -1655,6 +1657,26 @@ defmodule Number42.Refactors.AstHelpers do
       }
     end)
   end
+
+  # A `def f(a, b \\ x)` is callable at every arity from its required
+  # count up to its declared arity. Count the `\\` defaults so callers
+  # (e.g. reachability) can register all callable arities, not just the
+  # declared one. Defaults live on the bodyless/first head; take the max
+  # across clauses to be safe.
+  defp max_default_args(clauses) do
+    clauses
+    |> Enum.map(fn {_kind, _, [head | _]} -> count_default_args(strip_when_head(head)) end)
+    |> Enum.max(fn -> 0 end)
+  end
+
+  defp count_default_args({name, _, args}) when is_atom(name) and is_list(args) do
+    Enum.count(args, fn
+      {:\\, _, _} -> true
+      _ -> false
+    end)
+  end
+
+  defp count_default_args(_), do: 0
 
   @doc """
   Compute the transitive closure of `roots` over a call-`graph`.
@@ -1685,17 +1707,39 @@ defmodule Number42.Refactors.AstHelpers do
   """
   @spec reachable_defs([map()], MapSet.t()) :: MapSet.t()
   def reachable_defs(definitions, roots) do
+    # A definition with default args is callable at every arity from
+    # `min_arity` to `arity`; register all of them so a `/2` call resolves
+    # a `/3` definition with one default (issue: dead-code removal deleting
+    # live default-arg functions). The returned reachable set is keyed by
+    # the *declared* arity so callers can match it against `&1.arity`.
     graph =
-      Map.new(definitions, fn %{name: name, arity: arity, calls: calls} ->
-        {{name, arity}, calls}
+      definitions
+      |> Enum.flat_map(fn %{name: name, arity: arity, min_arity: min, calls: calls} ->
+        for a <- min..arity, do: {{name, a}, {arity, calls}}
       end)
+      |> Map.new()
 
-    reachable = transitive_closure(roots, graph)
+    arity_graph = Map.new(graph, fn {key, {_declared, calls}} -> {key, calls} end)
+    reachable_callable = transitive_closure(roots, arity_graph)
+
+    # Map any reached callable arity back to the declared arity, so the
+    # result matches definitions keyed by `&1.arity`.
+    reachable =
+      reachable_callable
+      |> Enum.flat_map(&declared_key(&1, graph))
+      |> MapSet.new()
 
     if dynamic_dispatch_reachable?(definitions, reachable) do
       definitions |> Enum.map(&{&1.name, &1.arity}) |> MapSet.new()
     else
       reachable
+    end
+  end
+
+  defp declared_key({name, _arity} = key, graph) do
+    case Map.get(graph, key) do
+      {declared, _calls} -> [{name, declared}]
+      nil -> []
     end
   end
 
