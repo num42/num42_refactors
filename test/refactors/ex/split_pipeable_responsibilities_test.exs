@@ -320,7 +320,10 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilitiesTest do
 
       out = SplitPipeableResponsibilities.transform(source, [])
 
-      assert out =~ "format_relationship_phase_1"
+      # Phase 1 returns {from_entity, to_entity} — both meaningful, no
+      # verb → object-only name. The final phase (the interpolated tail)
+      # has no live-out and no inferable verb → the `_phase_n` fallback.
+      assert out =~ "from_entity_and_to_entity"
       assert out =~ "format_relationship_phase_2"
       refute out =~ ~r/^\s*"\s*$/m
       assert_compiles(out)
@@ -386,6 +389,30 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilitiesTest do
 
       assert out =~ "build_phase_2(assigns,"
       assert_compiles(out)
+    end
+  end
+
+  describe "phase fallback — host already carries a _block suffix" do
+    # ExtractFunctionFromBlock may run first and leave a `<x>_block` host.
+    # Appending `_phase_n` would double the suffix (`<x>_block_phase_n`);
+    # the trailing `_block` is stripped so the fallback reads `<x>_phase_n`.
+    test "a _block host phase falls back to <x>_phase_n, not <x>_block_phase_n" do
+      source = """
+      defmodule M do
+        defp add_nodes_block(deps) do
+          a = pick(deps, :a)
+          b = pick(deps, :b)
+          c = combine(a, b)
+          d = combine(c, a)
+          assemble(a, b, c, d)
+        end
+      end
+      """
+
+      out = SplitPipeableResponsibilities.transform(source, [])
+
+      assert out =~ "add_nodes_phase_2"
+      refute out =~ "add_nodes_block_phase"
     end
   end
 end

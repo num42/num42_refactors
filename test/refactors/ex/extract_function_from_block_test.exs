@@ -19,15 +19,17 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
       """
 
       # live-out vars are returned in binding (source) order: tax is
-      # bound before total, so the tuple is {tax, total}.
+      # bound before total, so the tuple is {tax, total}. Both names are
+      # meaningful, so the helper is named after what it produces:
+      # tax_and_total.
       after_source = """
       defmodule M do
         def report(order) do
-          {tax, total} = report_block(order)
+          {tax, total} = tax_and_total(order)
           format(total, tax)
         end
 
-        defp report_block(order) do
+        defp tax_and_total(order) do
           subtotal = sum_lines(order)
           tax = subtotal * region_rate(order)
           total = subtotal + tax
@@ -40,15 +42,17 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
     end
 
     # A trailing `!`/`?` is only legal as the final character of an
-    # identifier. `verify!` + `_block` must become `verify_block!`, not
-    # the unparseable `verify!_block`.
-    test "keeps a trailing bang at the end of the generated helper name" do
+    # identifier. When the live-out names are too terse to name the
+    # helper (`a`, `b`), the fallback derives from the host name —
+    # `verify!` + `_block` must become `verify_block!`, not the
+    # unparseable `verify!_block`.
+    test "keeps a trailing bang at the end of the fallback helper name" do
       before_source = """
       defmodule M do
         defp verify!(scope, ids) do
-          loaded = load(scope)
-          expected = build(ids)
-          compare(loaded, expected)
+          a = load(scope)
+          b = build(ids)
+          compare(a, b)
         end
       end
       """
@@ -56,14 +60,14 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
       after_source = """
       defmodule M do
         defp verify!(scope, ids) do
-          {loaded, expected} = verify_block!(scope, ids)
-          compare(loaded, expected)
+          {a, b} = verify_block!(scope, ids)
+          compare(a, b)
         end
 
         defp verify_block!(scope, ids) do
-          loaded = load(scope)
-          expected = build(ids)
-          {loaded, expected}
+          a = load(scope)
+          b = build(ids)
+          {a, b}
         end
       end
       """
@@ -93,6 +97,168 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
           x = foo(a)
           y = bar(b)
           {x, y}
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, after_source)
+    end
+  end
+
+  describe "helper naming — result-based" do
+    # `get_field` is a fetch verb; the two meaningful live-outs are the
+    # object → `fetch_source_and_formula`.
+    test "verb (fetch) + object names the helper after what it does and produces" do
+      before_source = """
+      defmodule M do
+        defp validate(changeset) do
+          source = get_field(changeset, :source)
+          formula = get_field(changeset, :formula)
+          check(source, formula)
+        end
+      end
+      """
+
+      after_source = """
+      defmodule M do
+        defp validate(changeset) do
+          {source, formula} = fetch_source_and_formula(changeset)
+          check(source, formula)
+        end
+
+        defp fetch_source_and_formula(changeset) do
+          source = get_field(changeset, :source)
+          formula = get_field(changeset, :formula)
+          {source, formula}
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, after_source)
+    end
+
+    # `a_and_b` would otherwise be the name; if a parameter is literally
+    # named `a_and_b` the helper call would shadow it, so the fallback
+    # `<fn>_block` is used instead.
+    test "a result name colliding with a parameter falls back to <fn>_block" do
+      before_source = """
+      defmodule M do
+        def run(source_and_formula) do
+          source = first(source_and_formula)
+          formula = second(source_and_formula)
+          check(source, formula)
+        end
+      end
+      """
+
+      after_source = """
+      defmodule M do
+        def run(source_and_formula) do
+          {source, formula} = run_block(source_and_formula)
+          check(source, formula)
+        end
+
+        defp run_block(source_and_formula) do
+          source = first(source_and_formula)
+          formula = second(source_and_formula)
+          {source, formula}
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, after_source)
+    end
+
+    # A boolean live-out (`enabled?`) is dropped from the object — a
+    # `?`/`!` is only legal as an identifier's final character. Here only
+    # `timeout` survives as the object, and `Keyword.get` is a fetch verb
+    # → `fetch_timeout`.
+    test "a boolean (?) live-out is dropped, the remaining name carries the object" do
+      before_source = """
+      defmodule M do
+        defp configure(opts) do
+          enabled? = Keyword.get(opts, :enabled, true)
+          timeout = Keyword.get(opts, :timeout, 5000)
+          apply_config(enabled?, timeout)
+        end
+      end
+      """
+
+      after_source = """
+      defmodule M do
+        defp configure(opts) do
+          {enabled?, timeout} = fetch_timeout(opts)
+          apply_config(enabled?, timeout)
+        end
+
+        defp fetch_timeout(opts) do
+          enabled? = Keyword.get(opts, :enabled, true)
+          timeout = Keyword.get(opts, :timeout, 5000)
+          {enabled?, timeout}
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, after_source)
+    end
+
+    # When *every* live-out is dropped (both boolean) and no verb-object
+    # name is possible, fall back to the host-derived `<fn>_block`.
+    test "all-boolean live-outs with no object fall back to <fn>_block" do
+      before_source = """
+      defmodule M do
+        defp gate(state) do
+          ready? = check_ready(state)
+          stale? = check_stale(state)
+          decide(ready?, stale?)
+        end
+      end
+      """
+
+      after_source = """
+      defmodule M do
+        defp gate(state) do
+          {ready?, stale?} = gate_block(state)
+          decide(ready?, stale?)
+        end
+
+        defp gate_block(state) do
+          ready? = check_ready(state)
+          stale? = check_stale(state)
+          {ready?, stale?}
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, after_source)
+    end
+
+    # Three or more live-outs would spell an `a_and_b_and_c` monster;
+    # fall back to the host-derived name.
+    test "three live-outs fall back to <fn>_block" do
+      before_source = """
+      defmodule M do
+        defp build(order) do
+          first = one(order)
+          second = two(order)
+          third = three(order)
+          assemble(first, second, third)
+        end
+      end
+      """
+
+      after_source = """
+      defmodule M do
+        defp build(order) do
+          {first, second, third} = build_block(order)
+          assemble(first, second, third)
+        end
+
+        defp build_block(order) do
+          first = one(order)
+          second = two(order)
+          third = three(order)
+          {first, second, third}
         end
       end
       """
@@ -288,6 +454,10 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
       end
       """
 
+      # A single live-out's only name *is* the bound variable; naming the
+      # helper after it would shadow that variable at the call site
+      # (`total = total(order)`), so a single live-out falls back to the
+      # host-derived `run_block`.
       after_source = """
       defmodule M do
         def run(order) do

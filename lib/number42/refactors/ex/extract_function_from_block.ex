@@ -14,11 +14,11 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlock do
 
       # after
       def report(order) do
-        {total, tax} = report_block(order)
+        {total, tax} = total_and_tax(order)
         format(total, tax)
       end
 
-      defp report_block(order) do
+      defp total_and_tax(order) do
         subtotal = sum_lines(order)
         tax = subtotal * region_rate(order)
         total = subtotal + tax
@@ -62,8 +62,20 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlock do
     the whole signature.
   - **Return** = the prefix-bound names that are still read in the tail.
     One live-out binding returns the bare value
-    (`total = report_block(order)`); two or more return a tuple
-    (`{total, tax} = report_block(order)`). At least one is required.
+    (`total = run_block(order)`); two or more return a tuple
+    (`{total, tax} = total_and_tax(order)`). At least one is required.
+
+  ## Helper naming
+
+  The helper is named after what it *does* and *produces*, via
+  `Number42.Refactors.HelperNaming`: a verb inferred from the block's
+  dominant call joined to the live-out object — `fetch_brands`,
+  `compute_masses_and_options`, `validate_unit`. When no verb is
+  inferable the object alone is used (`source_and_formula`), then the
+  host name without its suffix (`load_brands`), and finally the honest
+  `<fn>_block` fallback. The result never shadows a live-out or parameter
+  name; if even `<fn>_block` collides with an existing definition the
+  extraction is skipped rather than emit a confusing name.
 
   ## Idempotence & determinism
 
@@ -82,6 +94,8 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlock do
   """
 
   use Number42.Refactors.Refactor
+
+  alias Number42.Refactors.HelperNaming
 
   @control_flow_forms ~w(raise throw exit with case cond if unless try for fn receive)a
 
@@ -158,7 +172,8 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlock do
          true <- meaningful_tail?(tail),
          args = prefix_free_vars(prefix, param_names),
          live_out = live_out_bindings(prefix, tail),
-         {:ok, helper_name} <- helper_name(fn_name, existing_names) do
+         {:ok, helper_name} <-
+           HelperNaming.name(fn_name, live_out, prefix, args, existing_names) do
       build_extraction(prefix, live_out, args, helper_name, def_node, source)
     else
       _ -> nil
@@ -289,26 +304,6 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlock do
   end
 
   defp binding_name({:=, _, [{name, _, ctx}, _]}) when is_atom(name) and is_atom(ctx), do: name
-
-  # --- helper naming ---
-
-  defp helper_name(fn_name, existing_names) do
-    candidate = suffixed_name(fn_name, "_block")
-    if MapSet.member?(existing_names, candidate), do: :skip, else: {:ok, candidate}
-  end
-
-  # Append `_block` to the source name, but keep a trailing `!`/`?` at
-  # the very end — `verify_siblings!` must become `verify_siblings_block!`,
-  # not the illegal `verify_siblings!_block` (a bang is only valid as the
-  # final character of an identifier).
-  defp suffixed_name(fn_name, suffix) do
-    name = Atom.to_string(fn_name)
-
-    case String.split_at(name, -1) do
-      {stem, marker} when marker in ["!", "?"] -> :"#{stem}#{suffix}#{marker}"
-      {_, _} -> :"#{name}#{suffix}"
-    end
-  end
 
   defp def_names(body_exprs) do
     body_exprs

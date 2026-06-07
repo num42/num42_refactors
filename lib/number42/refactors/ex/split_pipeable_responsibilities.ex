@@ -94,6 +94,7 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilities do
   use Number42.Refactors.Refactor
 
   alias Number42.Refactors.BlockSegmentation
+  alias Number42.Refactors.HelperNaming
 
   @control_flow_forms ~w(raise throw exit with case cond if unless try for fn receive)a
   @effect_modules ~w(Repo Logger GenServer File IO Agent Task Process)a
@@ -287,21 +288,50 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilities do
   # by an earlier phase or a function param), return = live-out vars
   # (written here, read by a later phase) — or, for the final phase, its
   # natural tail value (no synthetic return appended).
+  #
+  # Each phase is named after what it does and produces (via
+  # HelperNaming) — `fetch_brands`, `compute_totals` — not the
+  # positional `<fn>_phase_n`. Names are reserved as they are assigned so
+  # two phases never collide; a phase HelperNaming can't name (no verb,
+  # no meaningful live-out — typical of the final tail phase) falls back
+  # to `<fn>_phase_n`.
   defp plan_phases(phases, param_set, fn_name, existing_names) do
     indexed = Enum.with_index(phases, 1)
     written_before = writes_before(phases)
 
-    plan =
-      Enum.map(indexed, fn {phase, n} ->
-        helper = :"#{fn_name}_phase_#{n}"
+    {plan, _taken} =
+      Enum.map_reduce(indexed, existing_names, fn {phase, n}, taken ->
         params = phase_params(phase, n, param_set, written_before)
         live_out = phase_live_out(phase, phases, n)
-        %{helper: helper, params: params, live_out: live_out, stmts: Enum.map(phase, & &1.ast)}
+        stmts = Enum.map(phase, & &1.ast)
+        helper = phase_helper_name(fn_name, n, live_out, stmts, params, taken)
+
+        {%{helper: helper, params: params, live_out: live_out, stmts: stmts},
+         MapSet.put(taken, helper)}
       end)
 
-    if Enum.any?(plan, &MapSet.member?(existing_names, &1.helper)),
-      do: :skip,
-      else: {:ok, plan}
+    {:ok, plan}
+  end
+
+  defp phase_helper_name(fn_name, n, live_out, stmts, params, taken) do
+    # When ExtractFunctionFromBlock ran first the host is already
+    # `<x>_block`; appending `_phase_n` would double the suffix into
+    # `<x>_block_phase_n`. Strip a trailing `_block` so the fallback reads
+    # `<x>_phase_n`.
+    fallback = HelperNaming.suffixed(strip_block_suffix(fn_name), "_phase_#{n}")
+
+    case HelperNaming.name(fn_name, live_out, stmts, params, taken, fallback: fallback) do
+      {:ok, name} -> name
+      :skip -> fallback
+    end
+  end
+
+  # `add_nodes_block` → `add_nodes`, `verify_block!` → `verify!`. Only a
+  # `_block` token immediately before an optional `!`/`?` marker is
+  # stripped; an unrelated `_block` elsewhere in the name is left alone.
+  @block_suffix ~r/_block([!?]?)$/
+  defp strip_block_suffix(fn_name) do
+    fn_name |> Atom.to_string() |> String.replace(@block_suffix, "\\1") |> String.to_atom()
   end
 
   # Names available to phase n as inputs: original params + everything
