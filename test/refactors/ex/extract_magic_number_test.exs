@@ -5,6 +5,24 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
 
   @subject ExtractMagicNumber
 
+  # ExtractMagicNumber is opt-in / default-off. Every test that exercises
+  # the rewrite passes `enabled: true`; a dedicated test asserts the
+  # default-off behaviour.
+  @on [enabled: true]
+
+  describe "default-off" do
+    test "without opt-in config the source is left untouched" do
+      source = ~S'''
+      defmodule M do
+        def a, do: 3600
+        def b, do: 3600
+      end
+      '''
+
+      assert_unchanged(@subject, source)
+    end
+  end
+
   describe "rewrites" do
     test "hoists a repeated integer literal into a module attribute" do
       assert_rewrites(
@@ -21,7 +39,8 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
           def a, do: @magic_number
           def b, do: @magic_number
         end
-        '''
+        ''',
+        @on
       )
     end
 
@@ -40,7 +59,8 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
           def a, do: connect(timeout: @timeout)
           def b, do: reconnect(timeout: @timeout)
         end
-        '''
+        ''',
+        @on
       )
     end
 
@@ -59,7 +79,8 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
           def a, do: @default_float
           def b, do: @default_float
         end
-        '''
+        ''',
+        @on
       )
     end
 
@@ -79,18 +100,23 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
           def a, do: {@magic_number, @magic_number_2}
           def b, do: {@magic_number, @magic_number_2}
         end
-        '''
+        ''',
+        @on
       )
     end
   end
 
   describe "min_occurrences" do
     test "default >= 2: a value occurring once is left alone" do
-      assert_unchanged(@subject, ~S'''
-      defmodule M do
-        def a, do: 3600
-      end
-      ''')
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          def a, do: 3600
+        end
+        ''',
+        @on
+      )
     end
 
     test "configurable: min_occurrences 3 leaves a twice-used value alone" do
@@ -102,7 +128,7 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
           def b, do: 3600
         end
         ''',
-        min_occurrences: 3
+        @on ++ [min_occurrences: 3]
       )
     end
 
@@ -124,33 +150,41 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
           def c, do: @magic_number
         end
         ''',
-        min_occurrences: 3
+        @on ++ [min_occurrences: 3]
       )
     end
   end
 
   describe "skip conditions" do
     test "idiomatic numbers are never hoisted" do
-      assert_unchanged(@subject, ~S'''
-      defmodule M do
-        def a, do: {0, 1, 2, 0.0, 1.0, 0.5}
-        def b, do: {0, 1, 2, 0.0, 1.0, 0.5}
-      end
-      ''')
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          def a, do: {0, 1, 2, 0.0, 1.0, 0.5}
+          def b, do: {0, 1, 2, 0.0, 1.0, 0.5}
+        end
+        ''',
+        @on
+      )
     end
 
     test "literals already living in a module attribute are not re-hoisted" do
-      assert_unchanged(@subject, ~S'''
-      defmodule M do
-        @timeout 5000
-        def a, do: @timeout
-        def b, do: @timeout
-      end
-      ''')
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          @timeout 5000
+          def a, do: @timeout
+          def b, do: @timeout
+        end
+        ''',
+        @on
+      )
     end
 
     test "no defmodule wrapper — nothing to do" do
-      assert_unchanged(@subject, "def a, do: 3600\ndef b, do: 3600")
+      assert_unchanged(@subject, "def a, do: 3600\ndef b, do: 3600", @on)
     end
 
     test "literals in pattern positions are never hoisted (module attr is illegal in a pattern)" do
@@ -158,12 +192,16 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
       # cannot appear there. Pattern literals are excluded from both the
       # candidate set and the occurrence count, so only the body
       # occurrences below the threshold remain → nothing hoisted.
-      assert_unchanged(@subject, ~S'''
-      defmodule M do
-        def f(404), do: :a
-        def f(_), do: :b
-      end
-      ''')
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          def f(404), do: :a
+          def f(_), do: :b
+        end
+        ''',
+        @on
+      )
     end
 
     test "body occurrences hoist while a same-valued pattern literal stays inline" do
@@ -183,28 +221,37 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
           def g, do: @magic_number
           def h, do: @magic_number
         end
-        '''
+        ''',
+        @on
       )
     end
   end
 
   describe "idempotent" do
     test "running twice equals running once" do
-      assert_idempotent(@subject, ~S'''
-      defmodule M do
-        def a, do: 3600
-        def b, do: 3600
-      end
-      ''')
+      assert_idempotent(
+        @subject,
+        ~S'''
+        defmodule M do
+          def a, do: 3600
+          def b, do: 3600
+        end
+        ''',
+        @on
+      )
     end
 
     test "key-named hoist is idempotent" do
-      assert_idempotent(@subject, ~S'''
-      defmodule M do
-        def a, do: connect(timeout: 5000)
-        def b, do: reconnect(timeout: 5000)
-      end
-      ''')
+      assert_idempotent(
+        @subject,
+        ~S'''
+        defmodule M do
+          def a, do: connect(timeout: 5000)
+          def b, do: reconnect(timeout: 5000)
+        end
+        ''',
+        @on
+      )
     end
   end
 end

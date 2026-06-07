@@ -50,6 +50,18 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
 
   After the rewrite each occurrence is `@name`, no longer a bare
   literal, so the second pass counts zero occurrences and stops.
+
+  ## Default-OFF (opt-in only)
+
+  Disabled by default — `transform/2` is a no-op unless its own opts carry
+  `enabled: true`. A dogfood run surfaced rewrites that name every hoisted
+  literal `@magic_number` (colliding when a module has several distinct
+  numbers) and place the attribute without a separating blank line. Enable
+  per project once naming is per-value and placement is format-clean:
+
+      configured_modules: [
+        {Number42.Refactors.Ex.ExtractMagicNumber, enabled: true}
+      ]
   """
 
   use Number42.Refactors.Refactor
@@ -79,9 +91,12 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
 
   @impl Number42.Refactors.Refactor
   def transform(source, opts) do
-    min = Keyword.get(opts, :min_occurrences, @default_min_occurrences)
-
-    Sourceror.parse_string(source) |> apply_patches(source, min)
+    if Keyword.get(opts, :enabled, false) do
+      min = Keyword.get(opts, :min_occurrences, @default_min_occurrences)
+      Sourceror.parse_string(source) |> apply_patches(source, min)
+    else
+      source
+    end
   end
 
   defp apply_patches({:ok, ast}, source, min),

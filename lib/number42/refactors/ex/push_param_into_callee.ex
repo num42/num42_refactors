@@ -81,6 +81,18 @@ defmodule Number42.Refactors.Ex.PushParamIntoCallee do
 
   `reformat_after?/0 == true` so the engine runs `mix format` to
   normalize whitespace produced by the patches.
+
+  ## Default-OFF (opt-in only)
+
+  Disabled by default — `transform/2` is a no-op unless its own opts carry
+  `enabled: true`. A dogfood run surfaced rewrites that corrupt the callee
+  body when the pushed param is re-bound or transformed inside it (e.g.
+  `s = s / 100` collapsing to `55 = 55 / 100`). Enable per project once the
+  body-substitution is value-aware:
+
+      configured_modules: [
+        {Number42.Refactors.Ex.PushParamIntoCallee, enabled: true}
+      ]
   """
 
   use Number42.Refactors.Refactor
@@ -134,8 +146,13 @@ defmodule Number42.Refactors.Ex.PushParamIntoCallee do
   @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
   @impl Number42.Refactors.Refactor
-  def transform(source, opts),
-    do: Keyword.get(opts, :prepared) |> rewrite_with_plan_or_passthrough(source)
+  def transform(source, opts) do
+    if Keyword.get(opts, :enabled, false) do
+      Keyword.get(opts, :prepared) |> rewrite_with_plan_or_passthrough(source)
+    else
+      source
+    end
+  end
 
   # ── prepare/1 plumbing ────────────────────────────────────────────
 

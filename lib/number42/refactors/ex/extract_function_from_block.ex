@@ -64,6 +64,17 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlock do
   `… = helper(…)` call, so the maximal-binding-prefix scan no longer
   finds an extractable run there; the engine's fixpoint loop handles
   other functions on later passes.
+
+  ## Default-OFF (opt-in only)
+
+  Disabled by default — `transform/2` is a no-op unless its own opts carry
+  `enabled: true`. A dogfood run surfaced rewrites that leave empty
+  statement stubs in the host body and emit mis-indented extracted defps.
+  Enable per project once the host-body rewrite is clean:
+
+      configured_modules: [
+        {Number42.Refactors.Ex.ExtractFunctionFromBlock, enabled: true}
+      ]
   """
 
   use Number42.Refactors.Refactor
@@ -93,8 +104,13 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlock do
   def reformat_after?, do: true
 
   @impl Number42.Refactors.Refactor
-  def transform(source, _opts),
-    do: Sourceror.parse_string(source) |> apply_to_parse_result(source)
+  def transform(source, opts) do
+    if Keyword.get(opts, :enabled, false) do
+      Sourceror.parse_string(source) |> apply_to_parse_result(source)
+    else
+      source
+    end
+  end
 
   defp apply_to_parse_result({:ok, ast}, source), do: apply_to_ast(ast, source)
   defp apply_to_parse_result({:error, _}, source), do: source
