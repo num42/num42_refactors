@@ -1700,7 +1700,7 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
 
   defp parse_inputs_from_config({:ok, contents}) do
     {config, _} = Code.eval_string(contents)
-    inputs = Keyword.get(config, :inputs, [])
+    inputs = Map.get(config, :inputs, [])
 
     inputs
     |> Enum.flat_map(&Path.wildcard/1)
