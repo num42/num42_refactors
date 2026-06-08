@@ -5,6 +5,31 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilitiesTest do
 
   @subject SplitPipeableResponsibilities
 
+  # SplitPipeableResponsibilities is default-OFF: transform/2 is a no-op
+  # unless its own opts carry `enabled: true`. Every behaviour test passes
+  # `@on` so it exercises the enabled refactor; the default-OFF gate has
+  # its own dedicated test.
+  @on [enabled: true]
+
+  describe "default-OFF (opt-in only)" do
+    test "without enabled: true, transform is a no-op" do
+      source = """
+      defmodule M do
+        def report(order) do
+          subtotal = sum_lines(order)
+          discount = lookup_discount(order)
+          net = subtotal - discount
+          doubled = net * 2
+          adjusted = doubled + 1
+          format(adjusted)
+        end
+      end
+      """
+
+      assert apply_refactor(@subject, source) == source
+    end
+  end
+
   describe "rewrites — single carrier becomes a pipe" do
     test "splits a clean two-phase body where one value flows across into a pipe" do
       before_source = """
@@ -47,7 +72,7 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilitiesTest do
       end
       """
 
-      assert_rewrites(@subject, before_source, after_source)
+      assert_rewrites(@subject, before_source, after_source, @on)
     end
   end
 
@@ -64,7 +89,7 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilitiesTest do
       end
       """
 
-      assert_unchanged(@subject, source)
+      assert_unchanged(@subject, source, @on)
     end
 
     test "leaves a body containing a Logger. call untouched" do
@@ -79,7 +104,7 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilitiesTest do
       end
       """
 
-      assert_unchanged(@subject, source)
+      assert_unchanged(@subject, source, @on)
     end
 
     test "leaves a body containing a send/2 call untouched" do
@@ -94,7 +119,7 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilitiesTest do
       end
       """
 
-      assert_unchanged(@subject, source)
+      assert_unchanged(@subject, source, @on)
     end
 
     test "leaves a body containing a bang function untouched" do
@@ -109,7 +134,7 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilitiesTest do
       end
       """
 
-      assert_unchanged(@subject, source)
+      assert_unchanged(@subject, source, @on)
     end
   end
 
@@ -124,7 +149,7 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilitiesTest do
       end
       """
 
-      assert_unchanged(@subject, source)
+      assert_unchanged(@subject, source, @on)
     end
 
     test "leaves a body with no clean low-carrier cut untouched" do
@@ -144,7 +169,7 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilitiesTest do
       end
       """
 
-      assert_unchanged(@subject, source)
+      assert_unchanged(@subject, source, @on)
     end
 
     test "leaves a body with control flow untouched" do
@@ -166,7 +191,7 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilitiesTest do
       end
       """
 
-      assert_unchanged(@subject, source)
+      assert_unchanged(@subject, source, @on)
     end
   end
 
@@ -215,7 +240,7 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilitiesTest do
       end
       """
 
-      assert_rewrites(@subject, before_source, after_source)
+      assert_rewrites(@subject, before_source, after_source, @on)
     end
 
     test "applying transform twice equals applying it once (fixpoint after one pass)" do
@@ -232,9 +257,9 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilitiesTest do
       end
       """
 
-      once = SplitPipeableResponsibilities.transform(source, [])
+      once = SplitPipeableResponsibilities.transform(source, @on)
 
-      assert_idempotent(@subject, source)
+      assert_idempotent(@subject, source, @on)
       refute once =~ ~r/_phase_\d+_phase_\d+/
     end
   end
@@ -260,11 +285,11 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilitiesTest do
       end
       """
 
-      once = SplitPipeableResponsibilities.transform(source, [])
+      once = SplitPipeableResponsibilities.transform(source, @on)
 
       assert once =~ "build_phase_1"
       refute once =~ ~r/_phase_\d+_phase_\d+/
-      assert_idempotent(@subject, source)
+      assert_idempotent(@subject, source, @on)
     end
   end
 
@@ -292,7 +317,7 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilitiesTest do
       end
       """
 
-      assert_unchanged(@subject, already_split)
+      assert_unchanged(@subject, already_split, @on)
     end
   end
 
@@ -318,7 +343,7 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilitiesTest do
       end
       """
 
-      out = SplitPipeableResponsibilities.transform(source, [])
+      out = SplitPipeableResponsibilities.transform(source, @on)
 
       # Phase 1 returns {from_entity, to_entity} — both meaningful, no
       # verb → object-only name. The final phase (the interpolated tail)
@@ -345,7 +370,7 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilitiesTest do
       end
       """
 
-      assert_unchanged(@subject, source)
+      assert_unchanged(@subject, source, @on)
     end
 
     test "leaves a predicate-named function untouched" do
@@ -360,7 +385,7 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilitiesTest do
       end
       """
 
-      assert_unchanged(@subject, source)
+      assert_unchanged(@subject, source, @on)
     end
   end
 
@@ -385,7 +410,7 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilitiesTest do
       end
       """
 
-      out = SplitPipeableResponsibilities.transform(source, [])
+      out = SplitPipeableResponsibilities.transform(source, @on)
 
       assert out =~ "build_phase_2(assigns,"
       assert_compiles(out)
@@ -409,7 +434,7 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilitiesTest do
       end
       """
 
-      out = SplitPipeableResponsibilities.transform(source, [])
+      out = SplitPipeableResponsibilities.transform(source, @on)
 
       assert out =~ "add_nodes_phase_2"
       refute out =~ "add_nodes_block_phase"
