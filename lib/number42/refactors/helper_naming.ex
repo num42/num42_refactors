@@ -54,11 +54,19 @@ defmodule Number42.Refactors.HelperNaming do
   # the most specific signals (errors, string ops) precede the generic
   # "touches a collection → compute" catch-all.
   @verb_rules [
-    {:validate, ~w(add_error validate validate_change validate_required put_error)},
-    {:format, ~w(to_string humanize topic render_to_string)},
-    {:normalize, ~w(downcase upcase trim capitalize normalize)},
-    {:build, ~w(build new create changeset struct cast)},
-    {:fetch, ~w(get fetch list all one get_field get_change get_assoc preload load find)}
+    {:validate,
+     ~w(add_error validate validate_change validate_required put_error verify ensure confirm)},
+    {:format, ~w(to_string humanize topic render_to_string render format)},
+    {:normalize, ~w(downcase upcase trim capitalize normalize sanitize finalize tokenize clean)},
+    {:build, ~w(build new create changeset struct cast assemble generate prepare)},
+    {:fetch,
+     ~w(get fetch list all one get_field get_change get_assoc preload load find collect reload resolve)},
+    {:compute,
+     ~w(compute calculate sum count aggregate accumulate consolidate reduce total tally)},
+    {:filter, ~w(filter reject exclude prune select)},
+    {:group, ~w(group partition bucket cluster chunk split batch)},
+    {:extract, ~w(extract parse decode walk traverse capture pluck)},
+    {:update, ~w(update merge put replace insert delete drop assign wrap expand attach)}
   ]
 
   @doc """
@@ -84,7 +92,7 @@ defmodule Number42.Refactors.HelperNaming do
           {:ok, atom()} | :skip
   def name(host, live_out, stmts, params, existing, opts \\ []) do
     in_scope = MapSet.new(live_out ++ params)
-    verb = infer_verb(stmts)
+    verb = infer_verb(stmts, live_out)
     object = object_part(live_out)
     fallback = Keyword.get(opts, :fallback, suffixed(host, "_block"))
 
@@ -110,24 +118,45 @@ defmodule Number42.Refactors.HelperNaming do
 
   # --- verb inference ---
 
-  # The producing call is the RHS of the last binding, or the bare tail
-  # expression — that is what the block's result flows out of.
-  defp infer_verb(stmts) do
-    stmts
-    |> dominant_call_name()
-    |> verb_for_call()
-  end
-
-  defp dominant_call_name([]), do: nil
-
-  defp dominant_call_name(stmts) do
-    last = List.last(stmts)
-
-    case last do
-      {:=, _, [_lhs, rhs]} -> call_name(rhs)
-      other -> call_name(other)
+  # The verb comes from the call that *produces a live-out* — the value that
+  # flows out of the block. A binding whose RHS is a call (`total = sum(...)`)
+  # names the verb; one built from a tuple/literal/arithmetic (`total = a + b`,
+  # `{tax, total}`) does not, and the object-only name (`tax_and_total`) is
+  # right there — ~31% of real blocks end that way. Tail calls that bind no
+  # live-out (`format(total, tax)` as a side-effecting last line) are ignored.
+  #
+  # Producing calls are checked latest-first against the stem table (cheap,
+  # exact); the verb-bearing live-out is not always the last one bound. Only if
+  # none hit the table does the embedding classifier get a shot, at the
+  # dominant (latest) producing call — table always wins, model runs at most once.
+  defp infer_verb(stmts, live_out) do
+    case producing_calls(stmts, MapSet.new(live_out)) do
+      [] -> nil
+      [dominant | _] = calls -> Enum.find_value(calls, &table_verb/1) || semantic_verb(dominant)
     end
   end
+
+  # Call names of the bindings that produce a live-out, latest-first.
+  defp producing_calls(stmts, live_outs) do
+    stmts
+    |> Enum.reverse()
+    |> Enum.flat_map(&live_out_call(&1, live_outs))
+  end
+
+  # A binding `var = call(...)` where `var` is a live-out yields that call name.
+  # Anything else (non-call RHS, non-live-out target, bare expression) yields
+  # nothing.
+  defp live_out_call({:=, _, [lhs, rhs]}, live_outs) do
+    with {var, _, ctx} when is_atom(var) and is_atom(ctx) <- lhs,
+         true <- MapSet.member?(live_outs, var),
+         fun when is_atom(fun) <- call_name(rhs) do
+      [fun]
+    else
+      _ -> []
+    end
+  end
+
+  defp live_out_call(_stmt, _live_outs), do: []
 
   # Unwrap a pipe to its final call; pull the function name out of a
   # remote (`Mod.fun`) or local (`fun`) call.
@@ -136,14 +165,30 @@ defmodule Number42.Refactors.HelperNaming do
   defp call_name({fun, _, args}) when is_atom(fun) and is_list(args), do: fun
   defp call_name(_), do: nil
 
-  defp verb_for_call(nil), do: nil
+  # Stem-table lookup for one call name. The table is exhaustive for the verbs
+  # we name by hand; first matching rule wins.
+  defp table_verb(nil), do: nil
 
-  defp verb_for_call(fun) do
+  defp table_verb(fun) do
     name = Atom.to_string(fun)
 
     Enum.find_value(@verb_rules, fn {verb, stems} ->
       if Enum.any?(stems, &stem_match?(name, &1)), do: verb
     end)
+  end
+
+  # The static-embedding fallback, only reached when no call hit the table. It
+  # maps synonyms the table doesn't enumerate (`accumulate`/`consolidate` →
+  # compute, `finalize`/`tokenize` → normalize) to a bucket, or returns
+  # `:unknown` for a semantically empty name (`do_thing`, `process`) — in which
+  # case the verb stays nil and the caller keeps its `_block` fallback.
+  defp semantic_verb(nil), do: nil
+
+  defp semantic_verb(fun) do
+    case Number42.Refactors.Semantic.classify(Atom.to_string(fun)) do
+      {:ok, verb, _score} -> verb
+      :unknown -> nil
+    end
   end
 
   # A stem matches when it is a whole `_`-delimited token of the call
