@@ -66,7 +66,8 @@ defmodule Number42.Refactors.HelperNaming do
     {:filter, ~w(filter reject exclude prune select)},
     {:group, ~w(group partition bucket cluster chunk split batch)},
     {:extract, ~w(extract parse decode walk traverse capture pluck)},
-    {:update, ~w(update merge put replace insert delete drop assign wrap expand attach)}
+    {:update, ~w(update merge put replace insert delete drop assign wrap expand attach)},
+    {:notify, ~w(notify send broadcast publish emit dispatch deliver announce inform)}
   ]
 
   @doc """

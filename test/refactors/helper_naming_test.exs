@@ -104,6 +104,14 @@ defmodule Number42.Refactors.HelperNamingTest do
                totals = consolidate(rows)
                """)
     end
+
+    test "the notify bucket names side-effecting message calls" do
+      # `broadcast` produces the live-out → :notify, not a generic fallback.
+      assert {:ok, :notify_subscribers} =
+               name(:announce, [:subscribers], """
+               subscribers = broadcast(event)
+               """)
+    end
   end
 
   describe "shadow safety" do

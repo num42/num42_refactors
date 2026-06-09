@@ -14,7 +14,8 @@ defmodule Number42.Refactors.SemanticTest do
       "consolidate_totals" => :compute,
       "reload_brands" => :fetch,
       "finalize_draft" => :normalize,
-      "analyze_spread" => :compute
+      "analyze_spread" => :compute,
+      "announce_winner" => :notify
     }
 
     for {call, expected} <- @model_cases do
@@ -46,7 +47,8 @@ defmodule Number42.Refactors.SemanticTest do
       labels = Semantic.labels()
       assert :compute in labels
       assert :fetch in labels
-      assert length(labels) == 10
+      assert :notify in labels
+      assert length(labels) == 11
     end
   end
 end
