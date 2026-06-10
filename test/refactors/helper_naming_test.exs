@@ -87,23 +87,77 @@ defmodule Number42.Refactors.HelperNamingTest do
     end
 
     test "no verb and a single surviving object → host fallback (no shadow)" do
-      # `parse` is not a verb; standalone `filters` would shadow → fallback.
+      # `frobnicate` matches no stem and the classifier rejects it (semantically
+      # empty); standalone `filters` would shadow → host fallback.
       assert {:ok, :browse_block} =
                name(:browse, [:scope, :filters], """
                scope = cs.scope
-               filters = parse(params)
+               filters = frobnicate(params)
+               """)
+    end
+
+    test "a synonym the stem table misses is rescued by the classifier" do
+      # `consolidate` is in no @verb_rules stem; the static-embedding fallback
+      # maps it to :compute → a real name instead of `summarize_block`.
+      assert {:ok, :compute_totals} =
+               name(:summarize, [:totals], """
+               totals = consolidate(rows)
+               """)
+    end
+
+    test "the notify bucket names side-effecting message calls" do
+      # `broadcast` produces the live-out → :notify, not a generic fallback.
+      assert {:ok, :notify_subscribers} =
+               name(:announce, [:subscribers], """
+               subscribers = broadcast(event)
+               """)
+    end
+  end
+
+  describe "optional attribute (filter predicate adjective)" do
+    test "a boolean predicate field slots an adjective between verb and object" do
+      # `reject(& &1.archived)` → verb filter (reject), attribute inactive
+      # (archived), object items → filter_inactive_items.
+      assert {:ok, :filter_inactive_items} =
+               name(:scope, [:items], """
+               items = Enum.reject(rows, & &1.archived)
+               """)
+    end
+
+    test "an active predicate names the attribute directly" do
+      assert {:ok, :filter_active_items} =
+               name(:scope, [:items], """
+               items = Enum.filter(rows, & &1.active)
+               """)
+    end
+
+    test "a non-adjective predicate field adds no attribute" do
+      # `& &1.name` is not an adjective → plain verb_object, no middle word.
+      assert {:ok, :filter_items} =
+               name(:scope, [:items], """
+               items = Enum.filter(rows, & &1.name)
                """)
     end
   end
 
   describe "shadow safety" do
     test "a candidate equal to a live-out name is rejected" do
-      # Single live-out `total`; `total` would shadow at the call site,
-      # and no verb is inferable from `+`, so it falls back.
+      # Single live-out `total`; `total` would shadow at the call site, and no
+      # call in the block yields a verb (only arithmetic), so it falls back.
       assert {:ok, :run_block} =
                name(:run, [:total], """
-               base = fetch(order)
+               base = order.amount
                total = base + 1
+               """)
+    end
+
+    test "a verb-bearing call earlier in the block names the helper" do
+      # Sharpened inference: the last statement (`+`) yields no verb, but the
+      # `fetch` call earlier does → `fetch_total`, not `run_block`.
+      assert {:ok, :fetch_total} =
+               name(:run, [:total], """
+               total = fetch(order)
+               total = total + 1
                """)
     end
 
