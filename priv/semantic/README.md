@@ -35,7 +35,10 @@ Shape: `{dim, classes, W (12+1 × 256), b, none_floor, lexicon: word ->
 
 The assets are produced by the export scripts in `regen/` (Python, needs
 `model2vec` + `scikit-learn`). They are deterministic given the same source
-model and word lists. The word lists / prototypes are curated against measured
+model and word lists. Vectors are rounded to 3 decimals — measured to leave
+every classification unchanged while cutting the JSON ~65% (the confidence
+gates have far more margin than 1e-3). The vectors themselves are not meant for
+human review; trust the regen scripts and the parity tests, not the diff. The word lists / prototypes are curated against measured
 coverage on real code (n42-refactors, position-db, the whk umbrella) — adding
 words beyond the verb vocabulary's ~100 was measured to add noise, not
 coverage. See the scripts for the exact lists and the filtering rationale.

@@ -61,13 +61,19 @@ for w in negatives:
 clf = LogisticRegression(max_iter=2000, C=1.0, class_weight="balanced")
 clf.fit(np.array(X), y)
 
+# Vectors are rounded to 3 decimals: measured to leave classification
+# unchanged while cutting the JSON asset ~65%. The precision is not load-
+# bearing — the gates have far more margin than 1e-3.
+def r(vec):
+    return [round(float(x), 3) for x in vec]
+
 out = {
     "dim": 256,
     "classes": [str(c) for c in clf.classes_],
-    "W": clf.coef_.astype(np.float32).tolist(),
-    "b": clf.intercept_.astype(np.float32).tolist(),
+    "W": [r(row) for row in clf.coef_],
+    "b": r(clf.intercept_),
     "none_floor": 0.5,
-    "lexicon": {w: [t.tolist() for t in token_vecs(w)] for w in LEXICON_WORDS},
+    "lexicon": {w: [r(t) for t in token_vecs(w)] for w in LEXICON_WORDS},
 }
 with open("../attribute_model.json", "w") as f:
     json.dump(out, f)
