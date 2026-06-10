@@ -222,9 +222,16 @@ defmodule Number42.Refactors.Ex.MapNewLambdaToForComprehension do
   # leave it. A body whose tuple already spans ≥ 2 source lines has the
   # vertical room; the `for`/`|> Map.new()` shape costs nothing extra and
   # opens a natural slot for filters and local bindings.
+  # Match the range as a plain map (`%{start:, end:}`), not the
+  # `%Sourceror.Range{}` struct. A struct pattern forces a compile-time
+  # resolution of Sourceror.Range; when this library is a `runtime: false`
+  # dependency and sourceror is only transitively present, that module isn't
+  # guaranteed compiled before this one, and the consumer's build crashes
+  # (`Sourceror.Range.__struct__/1 is undefined`). Every other refactor reads
+  # the range as a map, so this falls in line.
   defp multi_line_body?(body) do
     case Sourceror.get_range(body) do
-      %Sourceror.Range{start: start_pos, end: end_pos} ->
+      %{start: start_pos, end: end_pos} ->
         Keyword.fetch!(end_pos, :line) > Keyword.fetch!(start_pos, :line)
 
       nil ->
