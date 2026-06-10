@@ -275,19 +275,28 @@ defmodule Number42.Refactors.HelperNaming do
   # *from* order — only the former names the helper after its input.
   @accessor_calls ~w(get get! fetch fetch! get_in get_lazy take)a
 
+  # A boilerplate carrier (`assigns`, `socket`, …) is too generic to name a
+  # helper after — except when it is fanned into this many or more bindings,
+  # at which point `fetch_assigns` genuinely describes a container-unpacking
+  # block better than the `<fn>_block` fallback does.
+  @boilerplate_source_floor 3
+
   # When the live-outs give no object (3+ meaningful names, or none), the
   # block is usually a `Keyword.get(opts, …)` / `Map.get(filters, …)` ladder
   # that fans one container into many bindings. The name then comes from that
   # *container*, not the outputs: `fetch_opts`, `fetch_filters`. Only fires
-  # when every producing call is an accessor reading from the *same*
-  # meaningful, non-boilerplate first argument — a single shared carrier — so
-  # it never names a transforming block (`one(order)`) after its input.
-  # Skipped when `object_part` already found one (this is a
-  # `compose(verb, source)` fallback after the live-out objects).
+  # when every *accessor* producing call reads from the *same* meaningful
+  # first argument — a single shared carrier. Non-accessor lines (a transform
+  # like `search = opts |> get(:s) |> trim()`, or `deduped = query(…)`)
+  # contribute no carrier and are simply skipped, so one transforming line
+  # among the reads doesn't block naming the rest. A boilerplate carrier
+  # counts only past `@boilerplate_source_floor` reads. Skipped when
+  # `object_part` already found one (this is a `compose(verb, source)`
+  # fallback after the live-out objects).
   defp source_object(stmts, live_out) do
     case stmts |> Enum.flat_map(&live_out_source(&1, MapSet.new(live_out))) do
       [carrier | _] = carriers ->
-        if Enum.all?(carriers, &(&1 == carrier)) and usable_source?(carrier),
+        if Enum.all?(carriers, &(&1 == carrier)) and usable_source?(carrier, length(carriers)),
           do: carrier,
           else: nil
 
@@ -296,16 +305,19 @@ defmodule Number42.Refactors.HelperNaming do
     end
   end
 
-  defp usable_source?(name), do: meaningful_name?(name) and name not in @boilerplate
+  defp usable_source?(name, count) do
+    meaningful_name?(name) and (name not in @boilerplate or count >= @boilerplate_source_floor)
+  end
 
   # The first-argument variable of a binding `var = accessor(arg, …)` whose
   # `var` is a live-out and whose RHS is an accessor call — the container the
-  # call reads from. A non-accessor RHS (`one(order)`) yields nothing, so a
-  # transforming block is never named after its input.
+  # call reads from. A non-accessor RHS (`one(order)`, a transforming pipe)
+  # yields no carrier, so a transforming line never names the block after its
+  # input and never poisons the shared-carrier check.
   defp live_out_source({:=, _, [lhs, rhs]}, live_outs) do
     with {var, _, ctx} when is_atom(var) and is_atom(ctx) <- lhs,
          true <- MapSet.member?(live_outs, var),
-         carrier when is_atom(carrier) <- accessor_source(rhs) do
+         carrier when is_atom(carrier) and not is_nil(carrier) <- accessor_source(rhs) do
       [carrier]
     else
       _ -> []
