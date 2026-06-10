@@ -1,10 +1,8 @@
 defmodule Number42.Refactors.Ex.ExtractExpressionClone do
   @moduledoc """
-  **PROTOTYP / Proof-of-Concept — NICHT production-ready.**
-
   Expression-level (sub-tree) clone detector. Where
   `ExtractIntraModuleClone` & friends hash whole `def`/`defp` bodies and
-  only fire above `@default_min_mass 20`, this prototype walks *into* the
+  only fire above `@default_min_mass 20`, this refactor walks *into* the
   bodies and treats **statement groups** (contiguous slices of a `do`
   block) as clone candidates. Structurally-equal groups that occur in two
   or more functions get lifted into one shared `defp` and replaced by a
@@ -25,7 +23,7 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
         end
       end
 
-      # after (conceptually — see "Was der PoC kann / nicht kann")
+      # after
       defmodule M do
         def a(order), do: compute_subtotal_and_taxed(order)
         def b(cart), do: compute_subtotal_and_taxed(cart)
@@ -45,7 +43,7 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
   ein frischer Helper entsteht. Die komplette Sicherheits-Analyse (freie
   Variablen → Parameter, live-out → Rückgabe, Control-Flow, Overlap) ist
   neu und würde das bestehende, single-purpose Modul aufblähen. Separat
-  bleibt der PoC reviewbar und lässt die laufenden Finder unberührt.
+  bleibt der Refactor reviewbar und lässt die laufenden Finder unberührt.
 
   ## Wie Sammeln + Fingerprinting funktioniert
 
@@ -58,6 +56,40 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
   (Anzahl/Reihenfolge) über ≥2 Funktionen bilden eine Klon-Gruppe. Die
   Masse (`node_count`) muss `>= :min_mass` (Default 8, kleiner als bei den
   Funktions-Findern) sein.
+
+  ## Nutzen-Schwelle (Slice 3 — Noise-Filter)
+
+  `:min_mass` allein trennt triviale von echten Klonen nicht: ein
+  2-Zeiler `scope = socket.assigns.current_scope; item =
+  socket.assigns.item` hat wegen der verschachtelten Map-Zugriffe schon
+  Masse ~19, mehr als ein echter 3-Zeiler-`Enum.sum`-Block. Slice 3 führt
+  daher zwei orthogonale Schwellen ein, die am rohen `mass`-Filter
+  vorbeigehende Trivialitäten aussieben:
+
+    * **`:max_live_out`** (Default 3) — eine Gruppe mit mehr als so vielen
+      live-out-Variablen wird verworfen. Ein Helper, der ein 8-Tupel
+      zurückgibt und an jeder Call-Site `{a, b, c, d, e, f, g, h} =
+      helper(…)` destrukturiert, ist *schlechter* lesbar als die inline-
+      Statements — die Extraktion wäre eine Verschlechterung. Harte
+      Grenze, analog `max_carriers` in `SplitPipeableResponsibilities`.
+
+    * **`:min_savings`** (Default 12) — der geschätzte Netto-Nutzen einer
+      Extraktion muss die Schwelle erreichen. Nutzen ≈ gesparte
+      Duplizierung minus Overhead:
+
+          savings = block_mass * (occurrences - 1)
+                    - occurrences * (1 + free_vars + live_out)
+
+      Der pro-Occurrence-Overhead bestraft breite Signaturen (jeder
+      free-var ist ein Call-Argument, jeder live-out eine
+      Destrukturierung) — genau die Lesbarkeitskosten, die einen
+      `{scope, item} = extracted_clone(socket)`-Ersatz wertlos machen. Ein
+      2-Occurrence-Trivialklon liegt unter der Schwelle und wird
+      übersprungen; echte Klone (mehr Occurrences oder mehr echte Arbeit
+      pro Statement) bleiben darüber. Default 12 ist konservativ gewählt:
+      er siebt die `{scope, x}`-2-Zeiler aus, lässt aber die im
+      position-db-Dry-Run beobachteten echten Klone (provider_runner,
+      configurator, er_diagram, sort/limit-Gruppen) durch.
 
   ## live-out (Slice 1 — Tupel-Rückgabe)
 
@@ -118,6 +150,42 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
       Gruppe je Position gewählt (greedy, längste zuerst), damit ein
       äußerer und ein in ihm enthaltener Klon nicht doppelt extrahiert
       werden.
+
+  ## Gruppen-Auswahl (Slice 3 — Nutzen statt roher Masse)
+
+  Pro Pass wird *eine* Klon-Gruppe extrahiert (re-run findet die
+  nächste). Die Auswahl rankt nicht mehr nach roher Masse
+  (`mass * occurrences`), sondern nach **Netto-Nutzen** (`group_value/1`,
+  derselbe `savings`-Term wie die `:min_savings`-Schwelle). Das löst die
+  greedy-Überlappung an `item_live`: dort gewann früher die *größte*
+  Gruppe (ein 8-Tupel-Return = Verschlechterung) und wurde dann
+  nachträglich zerlegt. Jetzt scheidet die 8-Tupel-Gruppe schon an
+  `:max_live_out` aus, und unter den verbleibenden gültigen Gruppen
+  gewinnt die nutzenstärkste — bevorzugt mehrere kleine sinnvolle Gruppen
+  (`fetch_sort_field_and_sort_dir`, `fetch_limit_and_offset`) statt einer
+  Riesen-Tupel-Gruppe.
+
+  Voll-optimales Set-Cover (mehrere disjunkte Gruppen *gleichzeitig* in
+  einem Pass, NP-hart) ist bewusst **nicht** gebaut: die
+  Nutzen-Rankings + `:max_live_out` lösen das beobachtete
+  Verschlechterungs-Problem, und Idempotenz konvergiert ohnehin über
+  re-runs (ein zweiter Pass greift die nächstbeste nicht-überlappende
+  Gruppe). Echtes simultanes Set-Cover bleibt ein dokumentierter
+  Folge-Slice.
+
+  ## Default-OFF (opt-in only)
+
+  Disabled by default — `transform/2` ist ein no-op, solange die eigenen
+  opts nicht `enabled: true` tragen. Cross-function-Extraktion ist der
+  aggressivste Eingriff der Refactor-Familie (ein frischer geteilter
+  Helper, freie Variablen → Parameter, live-out → Tupel-Rückgabe über
+  mehrere Funktionen). Auch mit Nutzen-Schwelle und semantischem Naming
+  bleibt die Frage „ist dieser Klon *konzeptionell* einer?" eine
+  Urteilssache. Pro Projekt opt-in, wo der Trade gewünscht ist:
+
+      configured_modules: [
+        {Number42.Refactors.Ex.ExtractExpressionClone, enabled: true}
+      ]
   """
 
   use Number42.Refactors.Refactor
@@ -127,6 +195,8 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
   alias Number42.Refactors.HelperNaming
 
   @default_min_mass 8
+  @default_min_savings 12
+  @default_max_live_out 3
   @min_group 2
 
   # Formen, die einen Block als unsicher-zu-extrahieren markieren.
@@ -145,18 +215,21 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
 
   @impl Number42.Refactors.Refactor
   def description,
-    do: "PROTOTYPE: expression-level clone extraction (sub-blocks across functions)"
+    do: "Expression-level clone extraction (sub-blocks across functions, default-OFF)"
 
   @impl Number42.Refactors.Refactor
   def explanation do
     """
-    PROTOTYPE. Finds structurally identical contiguous statement groups
-    that recur across two or more functions in a module and lifts them
-    into one shared defp, replacing each occurrence with a call. Live-out
-    bindings (names read after the block) are returned from the helper —
-    bare for one, a tuple for several — and destructured at each call site.
+    Finds structurally identical contiguous statement groups that recur
+    across two or more functions in a module and lifts them into one
+    shared defp, replacing each occurrence with a call. Live-out bindings
+    (names read after the block) are returned from the helper — bare for
+    one, a tuple for several — and destructured at each call site.
     Deliberately conservative: skips blocks with control-flow
-    (raise/with/pin/capture/module-attr) or mismatched free-variable shape.
+    (raise/with/pin/capture/module-attr) or mismatched free-variable shape,
+    and only extracts when the estimated net savings clear `:min_savings`
+    and the live-out width stays within `:max_live_out`. Default-OFF —
+    opt in per project with `enabled: true`.
     """
   end
 
@@ -165,24 +238,37 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
 
   @impl Number42.Refactors.Refactor
   def transform(source, opts) do
-    min_mass = Keyword.get(opts, :min_mass, @default_min_mass)
-
-    source
-    |> Sourceror.parse_string()
-    |> apply_to_parse_result(min_mass, source)
+    if Keyword.get(opts, :enabled, false) do
+      source
+      |> Sourceror.parse_string()
+      |> apply_to_parse_result(config(opts), source)
+    else
+      source
+    end
   end
 
-  defp apply_to_parse_result({:ok, ast}, min_mass, source),
-    do: ast |> apply_to_ast(min_mass, source)
+  # Thresholds gathered once: raw block mass floor, net-savings floor, and
+  # the hard live-out-width cap. Threaded through collection and selection
+  # as a single map so the safety knobs travel together.
+  defp config(opts) do
+    %{
+      min_mass: Keyword.get(opts, :min_mass, @default_min_mass),
+      min_savings: Keyword.get(opts, :min_savings, @default_min_savings),
+      max_live_out: Keyword.get(opts, :max_live_out, @default_max_live_out)
+    }
+  end
 
-  defp apply_to_parse_result({:error, _}, _min_mass, source), do: source
+  defp apply_to_parse_result({:ok, ast}, cfg, source),
+    do: ast |> apply_to_ast(cfg, source)
 
-  defp apply_to_ast(ast, min_mass, source) do
+  defp apply_to_parse_result({:error, _}, _cfg, source), do: source
+
+  defp apply_to_ast(ast, cfg, source) do
     ast
     |> Macro.prewalker()
     |> Enum.flat_map(fn
       {:defmodule, _, [_name, [{_do, body}]]} = mod_node ->
-        plan_for_module(mod_node, body, min_mass, source)
+        plan_for_module(mod_node, body, cfg, source)
 
       _ ->
         []
@@ -195,13 +281,13 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
 
   # --- candidate collection ---------------------------------------------
 
-  defp plan_for_module(mod_node, body, min_mass, source) do
+  defp plan_for_module(mod_node, body, cfg, source) do
     clauses = body |> AstHelpers.body_to_exprs() |> Enum.filter(&def_clause?/1)
     existing_names = def_names(clauses)
 
     candidates =
       clauses
-      |> Enum.flat_map(&candidates_in_clause(&1, min_mass))
+      |> Enum.flat_map(&candidates_in_clause(&1, cfg))
 
     groups =
       candidates
@@ -210,7 +296,7 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
 
     case groups do
       [] -> []
-      _ -> emit_plan(groups, mod_node, existing_names, source)
+      _ -> emit_plan(groups, mod_node, existing_names, cfg, source)
     end
   end
 
@@ -238,7 +324,7 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
   # in this clause's `do` block becomes a candidate (unless rejected by a
   # safety gate). Free variables are computed against the names in scope at
   # the group's start (clause params + everything bound by earlier stmts).
-  defp candidates_in_clause({_kind, _, [head, body_kw]} = clause, min_mass) do
+  defp candidates_in_clause({_kind, _, [head, body_kw]} = clause, cfg) do
     body_ast = body_kw |> Keyword.values() |> List.first()
     stmts = AstHelpers.body_to_exprs(body_ast)
     param_names = head_param_names(head)
@@ -252,7 +338,7 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
     contiguous_groups(stmts)
     |> Enum.flat_map(fn {i, j} ->
       group_stmts = Enum.slice(stmts, i..j)
-      candidate_for_group(group_stmts, i, j, segments, param_names, min_mass, clause)
+      candidate_for_group(group_stmts, i, j, segments, param_names, cfg, clause)
     end)
   end
 
@@ -272,7 +358,7 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
         do: {i, j}
   end
 
-  defp candidate_for_group(group_stmts, i, j, segments, param_names, min_mass, clause) do
+  defp candidate_for_group(group_stmts, i, j, segments, param_names, cfg, clause) do
     group_ast = wrap_block(group_stmts)
     scope_at_start = scope_before(segments, i, param_names)
     # Flow-sensitive: a name read before its own (re)binding inside the
@@ -287,7 +373,14 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
     live = live_out_of_group(group_ast, segments, j)
 
     cond do
-      node_mass(group_ast) < min_mass ->
+      node_mass(group_ast) < cfg.min_mass ->
+        []
+
+      # Hard live-out cap: a helper returning more than `max_live_out`
+      # values forces a wide tuple destructure (`{a, b, c, …} = helper(…)`)
+      # at every call site that reads worse than the inline statements —
+      # the extraction would be a net regression, so don't even buffer it.
+      length(live) > cfg.max_live_out ->
         []
 
       unsafe_control_flow?(group_ast) ->
@@ -479,37 +572,61 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
 
   # --- emission ----------------------------------------------------------
 
-  # PoC scope: extract ONE clone group per run (keeps the rewrite
-  # obviously-correct and idempotent — a re-run finds the next group).
-  # Pick the highest-value group (mass * occurrence count), resolve
-  # overlaps among its occurrences, then emit:
+  # Extract ONE clone group per run (keeps the rewrite obviously-correct
+  # and idempotent — a re-run finds the next non-overlapping group). Pick
+  # the highest-NET-VALUE group (gross duplication saved minus call/return
+  # overhead, see `group_savings/1`), resolve overlaps among its
+  # occurrences, drop it if savings fall below `:min_savings`, then emit:
   #   * one shared `defp helper(<free vars>) do ...; <return> end` before
   #     the module's closing `end`, where `<return>` is the first
   #     occurrence's live-out (bare var, or tuple for 2+)
   #   * one call-site replacement per surviving occurrence — a plain
   #     `helper(args)` when nothing is live-out, or
   #     `<lhs> = helper(args)` destructuring the occurrence's own live-out
-  defp emit_plan(groups, mod_node, existing_names, source) do
-    case best_group(groups) do
+  defp emit_plan(groups, mod_node, existing_names, cfg, source) do
+    case best_group(groups, cfg) do
       {:ok, occurrences} -> emit_group(occurrences, mod_node, existing_names, source)
       :none -> []
     end
   end
 
-  defp best_group(groups) do
+  # Rank by net savings, not raw mass. Raw `mass * occurrences` over-values
+  # a big block that recurs widely even when it produces a regression-shaped
+  # return; net savings discounts that overhead, so several small genuine
+  # groups outrank one bloated one. Groups below `:min_savings` (computed on
+  # the overlap-resolved occurrence count) are dropped as not worth a helper.
+  defp best_group(groups, cfg) do
     groups
     |> Enum.map(fn {_fp, occs} -> resolve_overlaps(occs) end)
     |> Enum.filter(&(length(&1) >= 2))
+    |> Enum.filter(&(group_savings(&1) >= cfg.min_savings))
     |> case do
       [] ->
         :none
 
       candidates ->
-        {:ok, Enum.max_by(candidates, &group_value/1)}
+        {:ok, Enum.max_by(candidates, &group_savings/1)}
     end
   end
 
-  defp group_value([first | _] = occs), do: node_mass(first.ast) * length(occs)
+  # Estimated net reduction in node count from extracting this group:
+  #
+  #   gross = block_mass * (occurrences - 1)   # duplicated copies removed
+  #   cost  = occurrences * (1 + free + live)  # per call site: the call
+  #                                            # node, its free-var args,
+  #                                            # and the live-out destructure
+  #
+  # One copy of the block survives as the helper body, so only
+  # `occurrences - 1` copies are saved. The per-occurrence cost penalises
+  # wide signatures (many params) and wide returns (many destructured
+  # live-outs) — exactly the readability tax a `{a, b} = helper(socket)`
+  # plumbing-clone incurs. Negative/low savings ⇒ not worth a helper.
+  defp group_savings([first | _] = occs) do
+    occurrences = length(occs)
+    gross = node_mass(first.ast) * (occurrences - 1)
+    cost = occurrences * (1 + length(first.free_vars) + length(first.live_out))
+    gross - cost
+  end
 
   defp emit_group([first | _] = occurrences, mod_node, existing_names, source) do
     case synth_name(first, existing_names) do
