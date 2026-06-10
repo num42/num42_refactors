@@ -182,10 +182,12 @@ defmodule Number42.Refactors.Ex.ExtractExpressionCloneTest do
       out = apply_refactor(@subject, source, min_mass: 6)
 
       # Tuple return + destructure, in canonical (first-appearance) order:
-      # subtotal before taxed at every site and in the helper return.
-      assert out =~ "{subtotal, taxed} = extracted_clone(order)"
-      assert out =~ "{subtotal, taxed} = extracted_clone(cart)"
-      assert out =~ "defp extracted_clone(order) do"
+      # subtotal before taxed at every site and in the helper return. The
+      # helper is named semantically (verb `compute` from `Enum.sum`, object
+      # from the two live-out vars), not the placeholder `extracted_clone`.
+      assert out =~ "{subtotal, taxed} = compute_subtotal_and_taxed(order)"
+      assert out =~ "{subtotal, taxed} = compute_subtotal_and_taxed(cart)"
+      assert out =~ "defp compute_subtotal_and_taxed(order) do"
       assert out =~ "{subtotal, taxed}\n  end"
 
       assert_compiles(out)
@@ -238,6 +240,109 @@ defmodule Number42.Refactors.Ex.ExtractExpressionCloneTest do
           subtotal = Enum.sum(cart.lines)
           taxed = subtotal * 1.19
           store_total(subtotal, taxed)
+        end
+      end
+      """
+
+      assert_unchanged(@subject, source, min_mass: 6)
+    end
+  end
+
+  describe "semantic helper naming + collision safety (slice 2)" do
+    test "the helper is named by verb+object from the block, not the placeholder" do
+      # `Enum.sum` produces a live-out → verb `compute`; the two live-out
+      # vars give the object `subtotal_and_taxed`. The helper reads as what
+      # it does, not the anonymous `extracted_clone`.
+      source = """
+      defmodule M do
+        def log_invoice(_, _), do: :ok
+        def store_total(_, _), do: :ok
+
+        def a(order) do
+          subtotal = Enum.sum(order.lines)
+          taxed = subtotal * 1.19
+          log_invoice(subtotal, taxed)
+        end
+
+        def b(cart) do
+          subtotal = Enum.sum(cart.lines)
+          taxed = subtotal * 1.19
+          store_total(subtotal, taxed)
+        end
+      end
+      """
+
+      out = apply_refactor(@subject, source, min_mass: 6)
+
+      assert out =~ "defp compute_subtotal_and_taxed(order) do"
+      assert out =~ "compute_subtotal_and_taxed(order)"
+      assert out =~ "compute_subtotal_and_taxed(cart)"
+      # The placeholder name is gone now that a real one was inferable.
+      refute out =~ "extracted_clone"
+
+      assert_compiles(out)
+      assert_idempotent(@subject, source, min_mass: 6)
+    end
+
+    test "evades a name that collides with an existing def in the module" do
+      # The block would derive `compute_subtotal_and_taxed`, but a function
+      # of that name already exists. The refactor must NOT redefine it — it
+      # falls to the next collision-free candidate (`subtotal_and_taxed`).
+      source = """
+      defmodule M do
+        def log_invoice(_, _), do: :ok
+        def store_total(_, _), do: :ok
+
+        def compute_subtotal_and_taxed(_), do: :preexisting
+
+        def a(order) do
+          subtotal = Enum.sum(order.lines)
+          taxed = subtotal * 1.19
+          log_invoice(subtotal, taxed)
+        end
+
+        def b(cart) do
+          subtotal = Enum.sum(cart.lines)
+          taxed = subtotal * 1.19
+          store_total(subtotal, taxed)
+        end
+      end
+      """
+
+      out = apply_refactor(@subject, source, min_mass: 6)
+
+      # The pre-existing function is left intact (one definition only).
+      assert out =~ "def compute_subtotal_and_taxed(_), do: :preexisting"
+      # The synthesised helper took a different, collision-free name.
+      assert out =~ "defp subtotal_and_taxed(order) do"
+      refute out =~ "defp compute_subtotal_and_taxed("
+
+      # Whatever name is chosen, the result must compile.
+      assert_compiles(out)
+      assert_idempotent(@subject, source, min_mass: 6)
+    end
+
+    test "skips extraction when every candidate name (incl. fallback) is taken" do
+      # Single arithmetic-bound live-out → no verb, a lone object can't
+      # stand alone, so the only candidate is the `:extracted_clone`
+      # fallback. Occupying it leaves HelperNaming no free name → the whole
+      # extraction is skipped rather than emit a clashing helper.
+      source = """
+      defmodule M do
+        def log_invoice(_), do: :ok
+        def store_total(_), do: :ok
+        def extracted_clone(_), do: :taken
+
+        def a(order) do
+          subtotal = Enum.sum(order.lines)
+          taxed = subtotal * 1.19
+          log_invoice(taxed)
+        end
+
+        def b(cart) do
+          subtotal = Enum.sum(cart.lines)
+          taxed = subtotal * 1.19
+          store_total(taxed)
         end
       end
       """

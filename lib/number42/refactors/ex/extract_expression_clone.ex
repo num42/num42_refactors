@@ -27,10 +27,10 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
 
       # after (conceptually — see "Was der PoC kann / nicht kann")
       defmodule M do
-        def a(order), do: extracted_clone(order)
-        def b(cart), do: extracted_clone(cart)
+        def a(order), do: compute_subtotal_and_taxed(order)
+        def b(cart), do: compute_subtotal_and_taxed(cart)
 
-        defp extracted_clone(order) do
+        defp compute_subtotal_and_taxed(order) do
           subtotal = Enum.sum(order.lines)
           taxed = subtotal * 1.19
           {subtotal, taxed}
@@ -80,6 +80,30 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
       und werden nie zusammen extrahiert (sonst würde ein bare-Return-Fall
       ein Tupel destrukturieren o.ä.).
 
+  ## Helper-Naming + Kollisions-Sicherheit (Slice 2)
+
+  Der Helper heißt nicht mehr fest `:extracted_clone`, sondern wird über
+  `Number42.Refactors.HelperNaming` aus dem Block selbst benannt: ein Verb
+  aus dem dominanten Call des Blocks (`Enum.sum` → `compute`) plus dem
+  live-out-Objekt → `compute_subtotal_and_taxed`. Da ein Klon über mehrere
+  Funktionen läuft, gibt es keinen einzelnen Host-Namen — Naming-Basis ist
+  der Block (Statements → Verb, live-out → Objekt), nicht eine Host-Funktion.
+  `host` ist daher `nil`; lässt sich kein Name ableiten, bleibt
+  `:extracted_clone` als ehrlicher Fallback.
+
+  Der Name wird **einmal pro Klon-Gruppe** abgeleitet (aus der ersten
+  Occurrence) und für **alle** Occurrences verwendet — es ist EIN
+  gemeinsamer Helper. Da alle Occurrences strukturell gleich sind, stimmen
+  Verb und Objekt über alle überein.
+
+  Kollisions-Sicherheit (via `HelperNaming`): der Name kollidiert nie mit
+  einem existierenden `def`/`defp` im Modul und schattet keinen live-out-
+  oder Parameter-Namen. Ist ein abgeleiteter Name belegt, weicht der
+  Refactor auf den nächsten freien Kandidaten aus
+  (`compute_subtotal_and_taxed` belegt → `subtotal_and_taxed`). Ist selbst
+  der Fallback belegt, wird die Extraktion **übersprungen** statt einen
+  kaputten Namen zu emittieren (analog `ExtractFunctionFromBlock`).
+
   ## SICHERHEITS-FALLEN (siehe auch Bericht)
 
   Der PoC ist bewusst konservativ. Eine Gruppe wird **übersprungen**, wenn:
@@ -100,6 +124,7 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
 
   alias Number42.Refactors.AstHelpers
   alias Number42.Refactors.BlockSegmentation
+  alias Number42.Refactors.HelperNaming
 
   @default_min_mass 8
   @min_group 2
@@ -172,6 +197,7 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
 
   defp plan_for_module(mod_node, body, min_mass, source) do
     clauses = body |> AstHelpers.body_to_exprs() |> Enum.filter(&def_clause?/1)
+    existing_names = def_names(clauses)
 
     candidates =
       clauses
@@ -184,8 +210,22 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
 
     case groups do
       [] -> []
-      _ -> emit_plan(groups, mod_node, source)
+      _ -> emit_plan(groups, mod_node, existing_names, source)
     end
+  end
+
+  # All `def`/`defp` names already defined in the module. The synthesised
+  # helper's name must avoid these (a fresh `defp` colliding with an
+  # existing definition would either redefine it or split a clause group).
+  defp def_names(clauses) do
+    clauses
+    |> Enum.flat_map(fn {_kind, _, [head | _]} ->
+      case AstHelpers.extract_fn_signature(strip_when(head)) do
+        {name, _args} -> [name]
+        _ -> []
+      end
+    end)
+    |> MapSet.new()
   end
 
   defp def_clause?({kind, _, [_head, body_kw]})
@@ -444,9 +484,9 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
   #   * one call-site replacement per surviving occurrence — a plain
   #     `helper(args)` when nothing is live-out, or
   #     `<lhs> = helper(args)` destructuring the occurrence's own live-out
-  defp emit_plan(groups, mod_node, source) do
+  defp emit_plan(groups, mod_node, existing_names, source) do
     case best_group(groups) do
-      {:ok, occurrences} -> emit_group(occurrences, mod_node, source)
+      {:ok, occurrences} -> emit_group(occurrences, mod_node, existing_names, source)
       :none -> []
     end
   end
@@ -466,8 +506,14 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
 
   defp group_value([first | _] = occs), do: node_mass(first.ast) * length(occs)
 
-  defp emit_group([first | _] = occurrences, mod_node, source) do
-    helper_name = synth_name(occurrences)
+  defp emit_group([first | _] = occurrences, mod_node, existing_names, source) do
+    case synth_name(first, existing_names) do
+      {:ok, helper_name} -> emit_named_group(occurrences, helper_name, mod_node, source)
+      :skip -> []
+    end
+  end
+
+  defp emit_named_group([first | _] = occurrences, helper_name, mod_node, source) do
     helper_args = first.free_vars
     # The helper body is the first occurrence's AST; its return shape is
     # therefore the first occurrence's live-out, rendered in that
@@ -485,7 +531,30 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
     end
   end
 
-  defp synth_name(_occurrences), do: :extracted_clone
+  # The helper is named after what the block *does* and *produces*, via
+  # `HelperNaming` — a verb inferred from the block's dominant call joined
+  # to the live-out object (`compute_subtotal_and_taxed`). A clone spans
+  # several functions, so there is no single host name to derive from: the
+  # naming basis is the block itself (its statements feed verb inference,
+  # its live-out feeds the object). `host` is therefore `nil` (the
+  # host-derived `strip_suffix` candidate is suppressed) and `:extracted_clone`
+  # is the honest last-resort fallback when nothing nameable surfaces —
+  # preserving the pre-Slice-2 name for the unnameable case.
+  #
+  # One name is derived per clone group (shared by every occurrence), not
+  # per occurrence. The first occurrence's stmts/free-vars/live-out stand
+  # in for the group — all occurrences are structurally equal, so verb and
+  # object agree across them.
+  #
+  # Collision safety: the candidate must miss every existing `def`/`defp`
+  # name and not shadow a live-out or free-var (param) name. `HelperNaming`
+  # enforces both and returns `:skip` if even the fallback collides with an
+  # existing definition — in which case the whole extraction is skipped
+  # rather than emit a confusing or clashing name (mirrors
+  # `ExtractFunctionFromBlock`).
+  defp synth_name(%{stmts: stmts, free_vars: free, live_out: live}, existing_names) do
+    HelperNaming.name(nil, live, stmts, free, existing_names, fallback: :extracted_clone)
+  end
 
   # Replace the occurrence's source range with the helper call. The free
   # vars of THIS occurrence (in fingerprint-canonical order) are the call
