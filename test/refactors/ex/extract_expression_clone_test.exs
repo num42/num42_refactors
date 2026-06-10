@@ -479,8 +479,11 @@ defmodule Number42.Refactors.Ex.ExtractExpressionCloneTest do
       # proving the gate is the threshold, not an unrelated skip.
       out = apply_refactor(@subject, @trivial, enabled: true, min_savings: 5)
 
-      assert out =~ "= extracted_clone(socket)"
-      assert out =~ "defp extracted_clone(socket) do"
+      # The block reads scope/item off socket.assigns → HelperNaming names it
+      # fetch_item (scope is boilerplate-dropped). The assertion is about the
+      # threshold firing, not the name.
+      assert out =~ "= fetch_item(socket)"
+      assert out =~ "defp fetch_item(socket) do"
       assert_compiles(out)
       assert_idempotent(@subject, @trivial, enabled: true, min_savings: 5)
     end
