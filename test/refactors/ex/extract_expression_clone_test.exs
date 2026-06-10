@@ -248,6 +248,68 @@ defmodule Number42.Refactors.Ex.ExtractExpressionCloneTest do
     end
   end
 
+  describe "self-rebound free variable (use-before-rebind)" do
+    test "a block that rebinds a param from its own value passes it as a helper parameter and compiles" do
+      # The Phoenix idiom `socket = socket |> call(arg)` reads `socket` on
+      # the RHS *before* rebinding it. Set-based `used - bound` drops that
+      # read (bound_in sees `socket` as written), so the helper would
+      # reference an undefined `socket`. Flow-sensitive free-var detection
+      # keeps the use-before-rebind read free → `socket` becomes a param.
+      source = """
+      defmodule M do
+        def put_node_at_path(s, _c), do: s
+
+        def handle_a(socket, c) do
+          socket = socket |> put_node_at_path(c)
+          {:noreply, socket}
+        end
+
+        def handle_b(socket, c) do
+          socket = socket |> put_node_at_path(c)
+          {:noreply, socket}
+        end
+      end
+      """
+
+      out = apply_refactor(@subject, source, min_mass: 4)
+
+      # `socket` is threaded as a parameter at the helper and both calls.
+      assert out =~ "defp extracted_clone(c, socket) do"
+      assert out =~ "extracted_clone(c, socket)"
+      assert out =~ "socket = socket |> put_node_at_path(c)"
+
+      # Without the fix this fails with `undefined variable "socket"`.
+      assert_compiles(out)
+      assert_idempotent(@subject, source, min_mass: 4)
+    end
+
+    test "the same idiom with `assigns` rebound via assign/2 threads `assigns` and compiles" do
+      source = """
+      defmodule M do
+        def assign(a, _k, _v), do: a
+
+        def render_a(assigns, val) do
+          assigns = assigns |> assign(:x, val)
+          assigns.x
+        end
+
+        def render_b(assigns, val) do
+          assigns = assigns |> assign(:x, val)
+          assigns.x
+        end
+      end
+      """
+
+      out = apply_refactor(@subject, source, min_mass: 4)
+
+      assert out =~ "defp extracted_clone(assigns, val) do"
+      assert out =~ "extracted_clone(assigns, val)"
+
+      assert_compiles(out)
+      assert_idempotent(@subject, source, min_mass: 4)
+    end
+  end
+
   describe "semantic helper naming + collision safety (slice 2)" do
     test "the helper is named by verb+object from the block, not the placeholder" do
       # `Enum.sum` produces a live-out → verb `compute`; the two live-out

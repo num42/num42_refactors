@@ -275,7 +275,12 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
   defp candidate_for_group(group_stmts, i, j, segments, param_names, min_mass, clause) do
     group_ast = wrap_block(group_stmts)
     scope_at_start = scope_before(segments, i, param_names)
-    free = AstHelpers.free_vars(group_ast, scope_at_start)
+    # Flow-sensitive: a name read before its own (re)binding inside the
+    # group is free. `socket = socket |> f()` reads `socket` on the RHS
+    # before rebinding it, so `socket` must become a helper parameter; the
+    # set-based `free_vars/2` would cancel it via `bound_in` and emit a
+    # helper that references an undefined `socket`.
+    free = AstHelpers.free_vars_in_order(group_stmts, scope_at_start)
     # live-out in canonical structural order (see live_out_of_group/3): the
     # names the group itself binds that some later statement still reads. An
     # empty list means the trivial tail case (nothing read after the group).
