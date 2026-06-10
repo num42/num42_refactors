@@ -324,6 +324,44 @@ defmodule Number42.Refactors.AstHelpers do
   end
 
   @doc """
+  Flow-sensitive free variables of a statement list, relative to a set of
+  `available` outer-scope names.
+
+  Unlike `free_vars/2` (set-based `used − bound ∩ available`, order-blind),
+  this scans the statements **left-to-right**, accumulating the names bound
+  so far. A name counts as free when it is read at a point where it has not
+  yet been bound *within the list* — so a self-rebind that reads its own
+  prior value (`socket = socket |> f()`, `s = g(s)`) keeps that read free,
+  even though `bound_in` would report the name as written and the set-based
+  `free_vars/2` would wrongly cancel it.
+
+  Per statement, reads are taken from the whole statement minus the names
+  bound by earlier statements; then the statement's own bindings are added
+  to the accumulator (so a later read of a name bound here is not free).
+  A name written *and* read within the same statement (the self-rebind)
+  stays free because its read is gathered before that statement's own
+  bindings join the accumulator.
+
+  Returned as a sorted atom list, matching `free_vars/2` for deterministic
+  helper signatures.
+  """
+  @spec free_vars_in_order([Macro.t()], MapSet.t()) :: [atom()]
+  def free_vars_in_order(stmts, available) when is_list(stmts) do
+    {free, _bound} =
+      Enum.reduce(stmts, {MapSet.new(), MapSet.new()}, fn stmt, {free, bound} ->
+        reads =
+          stmt
+          |> used_var_names()
+          |> MapSet.difference(bound)
+          |> MapSet.intersection(available)
+
+        {MapSet.union(free, reads), MapSet.union(bound, bound_in(stmt))}
+      end)
+
+    free |> MapSet.to_list() |> Enum.sort()
+  end
+
+  @doc """
   Recursively rewrite every `lhs |> rhs` pipe in `ast` into the
   equivalent direct call (`rhs(lhs, …)` with `lhs` injected as first
   argument). Identical to applying `Macro.pipe/3` step-by-step, except
