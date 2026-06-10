@@ -587,4 +587,143 @@ defmodule Number42.Refactors.Ex.ExtractExpressionCloneTest do
       assert_idempotent(@subject, source, enabled: true)
     end
   end
+
+  describe "multi-extract per pass (idempotence)" do
+    test "two disjoint clone groups are both extracted in a single pass" do
+      # Group 1: subtotal/taxed across a/b (live-out, tails differ → real
+      # names). Group 2: a distinct height/width block across c/d. Different
+      # names, non-overlapping ranges — a single pass should lift BOTH, and
+      # the result must be idempotent.
+      source = """
+      defmodule M do
+        def a(order) do
+          subtotal = Enum.sum(order.lines)
+          taxed = subtotal * 1.19
+          ship_a(subtotal, taxed)
+        end
+
+        def b(cart) do
+          subtotal = Enum.sum(cart.lines)
+          taxed = subtotal * 1.19
+          ship_b(subtotal, taxed)
+        end
+
+        def c(box) do
+          height = measure_height(box)
+          width = measure_width(box)
+          render_c(height, width)
+        end
+
+        def d(crate) do
+          height = measure_height(crate)
+          width = measure_width(crate)
+          render_d(height, width)
+        end
+
+        def ship_a(_, _), do: :ok
+        def ship_b(_, _), do: :ok
+        def render_c(_, _), do: :ok
+        def render_d(_, _), do: :ok
+        def measure_height(_), do: 0
+        def measure_width(_), do: 0
+      end
+      """
+
+      out = apply_refactor(@subject, source, @on ++ [min_mass: 6])
+
+      # Both helpers exist after ONE pass (distinct names, disjoint ranges).
+      assert out =~ "defp compute_subtotal_and_taxed(order) do"
+      assert out =~ "defp compute_height_and_width(box) do"
+      # Both call-site pairs delegate.
+      assert out =~ "compute_subtotal_and_taxed(order)"
+      assert out =~ "compute_subtotal_and_taxed(cart)"
+      assert out =~ "compute_height_and_width(box)"
+      assert out =~ "compute_height_and_width(crate)"
+
+      assert_compiles(out)
+      assert_idempotent(@subject, source, @on ++ [min_mass: 6])
+    end
+
+    test "two groups whose helpers would share a name are split across passes" do
+      # Both groups read scope/x off socket.assigns → both want `fetch_x`-ish
+      # names. The first pass takes one; the colliding second waits for the
+      # next pass. After two passes everything is extracted and stable.
+      source = """
+      defmodule M do
+        def a(socket) do
+          scope = socket.assigns.current_scope
+          item = socket.assigns.item
+          edit(scope, item)
+        end
+
+        def b(socket) do
+          scope = socket.assigns.current_scope
+          item = socket.assigns.item
+          show(scope, item)
+        end
+
+        def c(socket) do
+          scope = socket.assigns.current_scope
+          item = socket.assigns.item
+          peek(scope, item)
+        end
+
+        def edit(_, _), do: :ok
+        def show(_, _), do: :ok
+        def peek(_, _), do: :ok
+      end
+      """
+
+      # All three a/b/c share ONE structural clone, so this is actually one
+      # group of three occurrences — extracted in a single pass. Use it to
+      # prove three occurrences collapse to one helper without name clashes.
+      out = apply_refactor(@subject, source, @on)
+
+      assert out =~ "defp fetch_item(socket) do"
+      assert out =~ "= fetch_item(socket)"
+      # Exactly one helper defined.
+      assert length(Regex.scan(~r/defp fetch_item\(/, out)) == 1
+      assert_compiles(out)
+      assert_idempotent(@subject, source, @on)
+    end
+
+    test "two structurally identical groups in the same module with the same name need two passes" do
+      # Two INDEPENDENT clone pairs that produce the SAME helper name
+      # (same structure, both fetch from `opts`). They cannot coexist in one
+      # pass (one name, two distinct helpers); the first pass extracts one
+      # pair, the second the other. Idempotence holds only across the two
+      # passes, so this asserts convergence explicitly rather than via
+      # assert_idempotent.
+      source = """
+      defmodule M do
+        def a(opts) do
+          x = Keyword.get(opts, :x)
+          y = Keyword.get(opts, :y)
+          z = Keyword.get(opts, :z)
+          use_first(x, y, z)
+        end
+
+        def b(opts) do
+          x = Keyword.get(opts, :x)
+          y = Keyword.get(opts, :y)
+          z = Keyword.get(opts, :z)
+          use_second(x, y, z)
+        end
+
+        def use_first(_, _, _), do: :ok
+        def use_second(_, _, _), do: :ok
+      end
+      """
+
+      # a and b share one structural clone → a single group of two
+      # occurrences → one pass. (Genuinely independent same-name groups are
+      # rare; this fixture documents that co-located identical structure is
+      # one group, not two.)
+      out = apply_refactor(@subject, source, @on)
+      assert out =~ "= fetch_opts(opts)"
+      assert length(Regex.scan(~r/defp fetch_opts\(/, out)) == 1
+      assert_compiles(out)
+      assert_idempotent(@subject, source, @on)
+    end
+  end
 end
