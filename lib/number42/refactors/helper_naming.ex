@@ -25,9 +25,14 @@ defmodule Number42.Refactors.HelperNaming do
   2. **object only** (`<a>_and_<b>`) — when no verb is inferable but the
      live-outs are two meaningful names. A *single* object name is never
      used standalone — it equals its live-out and would shadow it.
-  3. **host name without the suffix** — `load_brands_block` → `load_brands`
+  3. **verb + source** — when the live-outs give no object (3+ names, or
+     none) but the block is an accessor ladder fanning one container into
+     many bindings, the object comes from that *container*:
+     `Keyword.get(opts, …) × 5` → `fetch_opts`. Only fires for accessor
+     calls (`get`/`fetch`/`get_in`/…) sharing one non-boilerplate carrier.
+  4. **host name without the suffix** — `load_brands_block` → `load_brands`
      when the host already reads as more than a bare verb.
-  4. **fallback** — the caller's idiomatic last resort (`<fn>_block` or
+  5. **fallback** — the caller's idiomatic last resort (`<fn>_block` or
      `<fn>_phase_n`).
 
   ## Shadow safety
@@ -98,6 +103,7 @@ defmodule Number42.Refactors.HelperNaming do
     in_scope = MapSet.new(live_out ++ params)
     verb = infer_verb(stmts, live_out)
     object = object_part(live_out)
+    source = source_object(stmts, live_out)
     attribute = infer_attribute(stmts)
     fallback = Keyword.get(opts, :fallback, suffixed(host, "_block"))
 
@@ -113,6 +119,7 @@ defmodule Number42.Refactors.HelperNaming do
         compose(verb, attribute, object),
         compose(verb, object),
         standalone(object),
+        compose(verb, source),
         strip_suffix(host)
       ]
       |> Enum.reject(&(is_nil(&1) or MapSet.member?(in_scope, &1)))
@@ -232,6 +239,73 @@ defmodule Number42.Refactors.HelperNaming do
   defp compose(nil, _object), do: nil
   defp compose(_verb, nil), do: nil
   defp compose(verb, object), do: :"#{verb}_#{object}"
+
+  # --- source object (carrier the producing calls read from) ---
+
+  # Accessor calls that *read out of* their first argument — `Keyword.get`,
+  # `Map.get`, `Map.fetch!`, `get_in`, … A binding whose RHS is one of these
+  # treats its first argument as a container being unpacked, not a value being
+  # transformed. That distinction is what makes the source carrier a sound
+  # object: `Keyword.get(opts, :x)` reads *from* opts, `one(order)` builds
+  # *from* order — only the former names the helper after its input.
+  @accessor_calls ~w(get get! fetch fetch! get_in get_lazy take)a
+
+  # When the live-outs give no object (3+ meaningful names, or none), the
+  # block is usually a `Keyword.get(opts, …)` / `Map.get(filters, …)` ladder
+  # that fans one container into many bindings. The name then comes from that
+  # *container*, not the outputs: `fetch_opts`, `fetch_filters`. Only fires
+  # when every producing call is an accessor reading from the *same*
+  # meaningful, non-boilerplate first argument — a single shared carrier — so
+  # it never names a transforming block (`one(order)`) after its input.
+  # Skipped when `object_part` already found one (this is a
+  # `compose(verb, source)` fallback after the live-out objects).
+  defp source_object(stmts, live_out) do
+    case stmts |> Enum.flat_map(&live_out_source(&1, MapSet.new(live_out))) do
+      [carrier | _] = carriers ->
+        if Enum.all?(carriers, &(&1 == carrier)) and usable_source?(carrier),
+          do: carrier,
+          else: nil
+
+      [] ->
+        nil
+    end
+  end
+
+  defp usable_source?(name), do: meaningful_name?(name) and name not in @boilerplate
+
+  # The first-argument variable of a binding `var = accessor(arg, …)` whose
+  # `var` is a live-out and whose RHS is an accessor call — the container the
+  # call reads from. A non-accessor RHS (`one(order)`) yields nothing, so a
+  # transforming block is never named after its input.
+  defp live_out_source({:=, _, [lhs, rhs]}, live_outs) do
+    with {var, _, ctx} when is_atom(var) and is_atom(ctx) <- lhs,
+         true <- MapSet.member?(live_outs, var),
+         carrier when is_atom(carrier) <- accessor_source(rhs) do
+      [carrier]
+    else
+      _ -> []
+    end
+  end
+
+  defp live_out_source(_stmt, _live_outs), do: []
+
+  # The first-argument variable of an accessor call. Two shapes:
+  #   * direct — `Keyword.get(opts, :x)` → carrier is the first arg `opts`.
+  #   * piped  — `opts |> Keyword.get(:x)` → carrier is the pipe's bare-var
+  #     LHS, accessor name from the RHS. A longer pipe whose immediate RHS is
+  #     not an accessor (`opts |> Keyword.get(:x) |> then(…)`) yields nil — the
+  #     value is transformed past the read, no longer a clean container access.
+  # Yields nil unless the call name is in `@accessor_calls` and the carrier is
+  # a bare variable.
+  defp accessor_source({:|>, _, [{name, _, ctx}, {{:., _, [_mod, fun]}, _, _}]})
+       when fun in @accessor_calls and is_atom(name) and is_atom(ctx),
+       do: name
+
+  defp accessor_source({{:., _, [_mod, fun]}, _, [{name, _, ctx} | _]})
+       when fun in @accessor_calls and is_atom(name) and is_atom(ctx),
+       do: name
+
+  defp accessor_source(_), do: nil
 
   # The three-part name only forms when verb, attribute AND object are all
   # present; otherwise nil and the plain `verb_object` is used.
