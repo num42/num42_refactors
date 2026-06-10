@@ -118,4 +118,131 @@ defmodule Number42.Refactors.Ex.ExtractExpressionCloneTest do
       assert_unchanged(@subject, source, min_mass: 5)
     end
   end
+
+  describe "live-out via value return (slice 1)" do
+    test "a shared block binding ONE live-out var returns it bare and destructures at each call" do
+      # The shared block is the first two statements; the tails differ
+      # (log_invoice vs store_total) so the clone is the prefix only, and
+      # the bound `taxed` is read by each differing tail — a single
+      # live-out, returned bare.
+      source = """
+      defmodule M do
+        def log_invoice(_), do: :ok
+        def store_total(_), do: :ok
+
+        def a(order) do
+          subtotal = Enum.sum(order.lines)
+          taxed = subtotal * 1.19
+          log_invoice(taxed)
+        end
+
+        def b(cart) do
+          subtotal = Enum.sum(cart.lines)
+          taxed = subtotal * 1.19
+          store_total(taxed)
+        end
+      end
+      """
+
+      out = apply_refactor(@subject, source, min_mass: 6)
+
+      # Bare return, not a tuple — one live-out var.
+      assert out =~ "taxed = extracted_clone(order)"
+      assert out =~ "taxed = extracted_clone(cart)"
+      assert out =~ "defp extracted_clone(order) do"
+      refute out =~ "{taxed} = extracted_clone"
+      # Differing tails stay put; the helper hands `taxed` back to them.
+      assert out =~ "log_invoice(taxed)"
+      assert out =~ "store_total(taxed)"
+
+      assert_compiles(out)
+      assert_idempotent(@subject, source, min_mass: 6)
+    end
+
+    test "a shared block binding TWO live-out vars returns a tuple and destructures at each call" do
+      source = """
+      defmodule M do
+        def log_invoice(_, _), do: :ok
+        def store_total(_, _), do: :ok
+
+        def a(order) do
+          subtotal = Enum.sum(order.lines)
+          taxed = subtotal * 1.19
+          log_invoice(subtotal, taxed)
+        end
+
+        def b(cart) do
+          subtotal = Enum.sum(cart.lines)
+          taxed = subtotal * 1.19
+          store_total(subtotal, taxed)
+        end
+      end
+      """
+
+      out = apply_refactor(@subject, source, min_mass: 6)
+
+      # Tuple return + destructure, in canonical (first-appearance) order:
+      # subtotal before taxed at every site and in the helper return.
+      assert out =~ "{subtotal, taxed} = extracted_clone(order)"
+      assert out =~ "{subtotal, taxed} = extracted_clone(cart)"
+      assert out =~ "defp extracted_clone(order) do"
+      assert out =~ "{subtotal, taxed}\n  end"
+
+      assert_compiles(out)
+      assert_idempotent(@subject, source, min_mass: 6)
+    end
+
+    test "a second pass over the tuple-return output is a no-op" do
+      source = """
+      defmodule M do
+        def log_invoice(_, _), do: :ok
+        def store_total(_, _), do: :ok
+
+        def a(order) do
+          subtotal = Enum.sum(order.lines)
+          taxed = subtotal * 1.19
+          log_invoice(subtotal, taxed)
+        end
+
+        def b(cart) do
+          subtotal = Enum.sum(cart.lines)
+          taxed = subtotal * 1.19
+          store_total(subtotal, taxed)
+        end
+      end
+      """
+
+      once = apply_refactor(@subject, source, min_mass: 6)
+      assert_compiles(once)
+      # Convergence: the extracted output is a fixpoint.
+      assert_unchanged(@subject, once, min_mass: 6)
+    end
+
+    test "structurally identical blocks with DIFFERENT live-out arity are not co-extracted" do
+      # a binds one live-out (taxed), b binds two (subtotal + taxed).
+      # Same block shape, but different return arity — fusing them would
+      # force one return shape on both. The live-out count in the
+      # fingerprint puts them in separate buckets, so neither fires.
+      source = """
+      defmodule M do
+        def log_invoice(_), do: :ok
+        def store_total(_, _), do: :ok
+
+        def a(order) do
+          subtotal = Enum.sum(order.lines)
+          taxed = subtotal * 1.19
+          log_invoice(taxed)
+        end
+
+        def b(cart) do
+          subtotal = Enum.sum(cart.lines)
+          taxed = subtotal * 1.19
+          store_total(subtotal, taxed)
+        end
+      end
+      """
+
+      assert_unchanged(@subject, source, min_mass: 6)
+    end
+  end
 end

@@ -59,17 +59,31 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
   Masse (`node_count`) muss `>= :min_mass` (Default 8, kleiner als bei den
   Funktions-Findern) sein.
 
+  ## live-out (Slice 1 — Tupel-Rückgabe)
+
+  Bindet der Block eine Variable, die *nach* dem Block im selben Body noch
+  gelesen wird, wird er **nicht mehr übersprungen**, sondern via
+  Wert-Rückgabe gehandhabt (Slice 1):
+
+    * Der Helper gibt die live-out-Menge zurück — ein-elementig als bare
+      Var (`… end`), mehr-elementig als Tupel (`{a, b} end`).
+    * Jeder Call-Site destrukturiert in seine *eigenen* Namen:
+      `a = extracted_clone(args)` bzw. `{a, b} = extracted_clone(args)`.
+    * **Ordnung der Tupel-Elemente**: nach erstem strukturellem Vorkommen
+      im Block (dieselbe kanonische de-Bruijn-Reihenfolge, die
+      `rename_vars/1` für den Hash benutzt). Slot N referenziert in jeder
+      Occurrence dieselbe Binding-Position — verschiedene Renamings
+      (`{subtotal, taxed}` vs `{sub, tax}`) können so nicht kreuz-verdrahten.
+    * **Bucket-Schutz**: `length(live_out)` geht in den Fingerprint ein
+      (analog `length(free_vars)`). Strukturell gleiche Blöcke mit
+      *unterschiedlicher* live-out-Anzahl landen in verschiedenen Buckets
+      und werden nie zusammen extrahiert (sonst würde ein bare-Return-Fall
+      ein Tupel destrukturieren o.ä.).
+
   ## SICHERHEITS-FALLEN (siehe auch Bericht)
 
   Der PoC ist bewusst konservativ. Eine Gruppe wird **übersprungen**, wenn:
 
-    * **live-out**: der Block bindet eine Variable, die *nach* dem Block im
-      selben Body noch gelesen wird. Ein Helper-Call kann nur EINEN Wert
-      zurückgeben; mehrere live-out-Variablen müsste man als Tupel
-      zurückgeben und am Call-Site destrukturieren. PoC: skip bei
-      `live_out != []` außer der triviale Fall "Block ist das Body-Ende und
-      sein Wert ist der Rückgabewert". (Production: Tupel-Rückgabe +
-      Destrukturierung.)
     * **Control-Flow**: der Block enthält `raise`/`throw`/`with`/`^`(Pin)/
       `&`-Capture-Refs/`@`-Modulattribut/`__MODULE__` & Co. Solche Blöcke
       sind nicht scope-neutral extrahierbar; PoC skippt sie.
@@ -113,9 +127,11 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
     """
     PROTOTYPE. Finds structurally identical contiguous statement groups
     that recur across two or more functions in a module and lifts them
-    into one shared defp, replacing each occurrence with a call. Deliberately
-    conservative: skips blocks with live-out bindings, control-flow
-    (raise/with/pin/capture/module-attr), or mismatched free-variable shape.
+    into one shared defp, replacing each occurrence with a call. Live-out
+    bindings (names read after the block) are returned from the helper —
+    bare for one, a tuple for several — and destructured at each call site.
+    Deliberately conservative: skips blocks with control-flow
+    (raise/with/pin/capture/module-attr) or mismatched free-variable shape.
     """
   end
 
@@ -196,7 +212,7 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
     contiguous_groups(stmts)
     |> Enum.flat_map(fn {i, j} ->
       group_stmts = Enum.slice(stmts, i..j)
-      candidate_for_group(group_stmts, i, j, stmts, segments, param_names, min_mass, clause)
+      candidate_for_group(group_stmts, i, j, segments, param_names, min_mass, clause)
     end)
   end
 
@@ -216,11 +232,14 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
         do: {i, j}
   end
 
-  defp candidate_for_group(group_stmts, i, j, stmts, segments, param_names, min_mass, clause) do
+  defp candidate_for_group(group_stmts, i, j, segments, param_names, min_mass, clause) do
     group_ast = wrap_block(group_stmts)
     scope_at_start = scope_before(segments, i, param_names)
     free = AstHelpers.free_vars(group_ast, scope_at_start)
-    live = live_out_of_group(segments, j, stmts)
+    # live-out in canonical structural order (see live_out_of_group/3): the
+    # names the group itself binds that some later statement still reads. An
+    # empty list means the trivial tail case (nothing read after the group).
+    live = live_out_of_group(group_ast, segments, j)
 
     cond do
       node_mass(group_ast) < min_mass ->
@@ -229,21 +248,14 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
       unsafe_control_flow?(group_ast) ->
         []
 
-      # live-out > trivial: the group binds names read later in the body.
-      # Extracting it would lose those bindings. PoC: only allow the
-      # trivial case where the group is the tail of the body (j == last)
-      # — then its value is the function's return value and nothing is
-      # read after it.
-      not MapSet.equal?(live, MapSet.new()) and j != length(stmts) - 1 ->
-        []
-
       true ->
         [
           %{
             ast: group_ast,
             clause_key: clause_key(clause),
             free_vars: free,
-            fingerprint: fingerprint(group_ast, free),
+            live_out: live,
+            fingerprint: fingerprint(group_ast, free, live),
             range: {i, j},
             stmts: group_stmts
           }
@@ -270,11 +282,54 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
     |> Enum.reduce(param_names, fn seg, acc -> MapSet.union(acc, seg.writes) end)
   end
 
-  # Variables written inside the group (segments i..j) that are read by
-  # some statement strictly after j. Reuses the BlockSegmentation live-out
-  # idea, scoped to this group's own end-cut.
-  defp live_out_of_group(segments, j, _stmts) do
-    BlockSegmentation.live_out(segments, j + 1)
+  # The group's live-out variables: names the group *itself* binds that
+  # some statement strictly after `j` still reads — the values the helper
+  # must hand back. Returned as an ordered list (not a set) so the helper's
+  # return tuple and every call-site's destructure agree positionally.
+  #
+  # `BlockSegmentation.live_out(segments, j + 1)` gives every name written
+  # in `0..j` and read after `j`; intersecting with the group's own bound
+  # names drops carriers established *before* the group (those stay in the
+  # host, the helper has no business returning them).
+  #
+  # ## Ordering (correctness-critical)
+  #
+  # Ordered by **first structural appearance inside the group** (the same
+  # canonical de-Bruijn index `rename_vars/1` assigns). Two structural
+  # clones share that index per slot, so slot N of every occurrence's
+  # ordered live-out refers to the *same* binding position. The helper
+  # returns slot N as the first occurrence's local name; each call-site
+  # destructures slot N into its own local name. Cross-occurrence rename
+  # divergence (`{subtotal, taxed}` vs `{sub, tax}`) therefore can't
+  # cross-wire. Alphabetical-by-name order would, since the names differ.
+  defp live_out_of_group(group_ast, segments, j) do
+    crossing = BlockSegmentation.live_out(segments, j + 1)
+    own = AstHelpers.bound_in(group_ast)
+    live_set = MapSet.intersection(crossing, own)
+
+    group_ast
+    |> canonical_var_order()
+    |> Enum.filter(&MapSet.member?(live_set, &1))
+  end
+
+  # Variable names in first-encounter (prewalk) order — the canonical
+  # ordering `rename_vars/1` hashes against. Underscored names are excluded
+  # (they're never live-out: nothing reads `_x`).
+  defp canonical_var_order(ast) do
+    {_ast, {_seen, order}} =
+      Macro.prewalk(ast, {MapSet.new(), []}, fn
+        {name, _, ctx} = node, {seen, order} when is_atom(name) and is_atom(ctx) ->
+          if AstHelpers.underscore?(name) or MapSet.member?(seen, name) do
+            {node, {seen, order}}
+          else
+            {node, {MapSet.put(seen, name), [name | order]}}
+          end
+
+        node, acc ->
+          {node, acc}
+      end)
+
+    Enum.reverse(order)
   end
 
   # --- overlap resolution ------------------------------------------------
@@ -321,16 +376,25 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
   # --- fingerprint -------------------------------------------------------
 
   # Structural hash modulo metadata, pipe-sugar, and variable renaming —
-  # plus the arity/shape of the free-variable list so that two groups only
-  # bucket together if they'd produce the same helper signature.
-  defp fingerprint(ast, free_vars) do
+  # plus the arity of the free-variable list AND the arity of the live-out
+  # list, so two groups only bucket together if they'd produce the same
+  # helper signature *and* return shape.
+  #
+  # Folding `length(live_out)` in is the safety latch the slice requires:
+  # live-out depends on the *surrounding* body (what's read after the
+  # group), not on the group AST, so two structurally identical groups can
+  # legitimately have different live-out arity. Bucketing them together
+  # would force one return shape on both — the bare-return occurrence would
+  # destructure a tuple, or vice versa, and miscompile. Different arity →
+  # different fingerprint → different bucket → never co-extracted.
+  defp fingerprint(ast, free_vars, live_out) do
     normalized =
       ast
       |> AstHelpers.inline_pipes()
       |> strip_meta()
       |> rename_vars()
 
-    {length(free_vars), :erlang.phash2(normalized)}
+    {length(free_vars), length(live_out), :erlang.phash2(normalized)}
     |> :erlang.phash2()
   end
 
@@ -374,9 +438,12 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
   # obviously-correct and idempotent — a re-run finds the next group).
   # Pick the highest-value group (mass * occurrence count), resolve
   # overlaps among its occurrences, then emit:
-  #   * one shared `defp helper(<free vars>) do ... end` before the
-  #     module's closing `end`
-  #   * one call-site replacement per surviving occurrence
+  #   * one shared `defp helper(<free vars>) do ...; <return> end` before
+  #     the module's closing `end`, where `<return>` is the first
+  #     occurrence's live-out (bare var, or tuple for 2+)
+  #   * one call-site replacement per surviving occurrence — a plain
+  #     `helper(args)` when nothing is live-out, or
+  #     `<lhs> = helper(args)` destructuring the occurrence's own live-out
   defp emit_plan(groups, mod_node, source) do
     case best_group(groups) do
       {:ok, occurrences} -> emit_group(occurrences, mod_node, source)
@@ -402,8 +469,11 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
   defp emit_group([first | _] = occurrences, mod_node, source) do
     helper_name = synth_name(occurrences)
     helper_args = first.free_vars
-
-    helper_patch = helper_append_patch(mod_node, helper_name, helper_args, first.ast)
+    # The helper body is the first occurrence's AST; its return shape is
+    # therefore the first occurrence's live-out, rendered in that
+    # occurrence's own names.
+    helper_patch =
+      helper_append_patch(mod_node, helper_name, helper_args, first.ast, first.live_out)
 
     call_patches =
       occurrences
@@ -417,20 +487,32 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
 
   defp synth_name(_occurrences), do: :extracted_clone
 
-  # Replace the occurrence's source range with `helper(args)`. The free
+  # Replace the occurrence's source range with the helper call. The free
   # vars of THIS occurrence (in fingerprint-canonical order) are the call
   # arguments — they line up positionally with the helper params because
-  # both derive from the same canonical ordering.
-  defp occurrence_call_patch(%{ast: ast, free_vars: free}, helper_name, source) do
+  # both derive from the same canonical ordering. When the group is
+  # live-out, the call is destructured into THIS occurrence's own live-out
+  # names (`{a, b} = helper(...)` / `a = helper(...)`) so the surrounding
+  # body still sees them.
+  defp occurrence_call_patch(%{ast: ast, free_vars: free, live_out: live}, helper_name, source) do
     case range_of_group(ast, source) do
       {:ok, range} ->
-        call = render_call(helper_name, free)
+        call = render_call(helper_name, free) |> bind_live_out(live)
         [%{change: call, range: range}]
 
       :error ->
         []
     end
   end
+
+  # Wrap a helper call in a destructuring bind when the group is live-out.
+  # Single live-out → bare bind; 2+ → tuple bind. Mirrors
+  # ExtractFunctionFromBlock's `return_lhs/1`.
+  defp bind_live_out(call, []), do: call
+  defp bind_live_out(call, live), do: "#{return_lhs(live)} = #{call}"
+
+  defp return_lhs([single]), do: Atom.to_string(single)
+  defp return_lhs(live), do: "{" <> Enum.map_join(live, ", ", &Atom.to_string/1) <> "}"
 
   defp range_of_group(ast, _source) do
     case Sourceror.get_range(ast) do
@@ -442,16 +524,16 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
   defp render_call(name, []), do: "#{name}()"
   defp render_call(name, args), do: "#{name}(#{Enum.join(args, ", ")})"
 
-  defp helper_append_patch({:defmodule, _, _} = mod_node, name, args, body_ast) do
+  defp helper_append_patch({:defmodule, _, _} = mod_node, name, args, body_ast, live_out) do
     %{end: end_pos} = Sourceror.get_range(mod_node)
 
-    rendered = render_helper(name, args, body_ast)
+    rendered = render_helper(name, args, body_ast, live_out)
     insert_pos = [line: end_pos[:line], column: 1]
 
     %{change: rendered, range: %{end: insert_pos, start: insert_pos}}
   end
 
-  defp render_helper(name, args, body_ast) do
+  defp render_helper(name, args, body_ast, live_out) do
     head =
       case args do
         [] -> "#{name}()"
@@ -459,9 +541,20 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
       end
 
     body_src = body_ast |> Sourceror.to_string() |> indent("    ")
+    return_src = render_return(live_out)
 
-    "  defp #{head} do\n#{body_src}\n  end\n"
+    "  defp #{head} do\n#{body_src}#{return_src}\n  end\n"
   end
+
+  # The helper's explicit return when the group is live-out: a bare var
+  # (single) or a tuple (2+), in the first occurrence's own names, on its
+  # own line after the relocated body. Empty live-out → the body's own
+  # last expression is the return, nothing appended.
+  defp render_return([]), do: ""
+  defp render_return([single]), do: "\n    #{single}"
+
+  defp render_return(live),
+    do: "\n    {" <> Enum.map_join(live, ", ", &Atom.to_string/1) <> "}"
 
   defp indent(text, prefix) do
     text
