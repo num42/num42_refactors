@@ -5,6 +5,29 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
 
   @subject ExtractFunctionFromBlock
 
+  # ExtractFunctionFromBlock is default-OFF: transform/2 is a no-op unless
+  # its own opts carry `enabled: true`. Every behaviour test below passes
+  # `@on` as the trailing opts so it exercises the enabled refactor; the
+  # default-OFF gate has its own dedicated test.
+  @on [enabled: true]
+
+  describe "default-OFF (opt-in only)" do
+    test "without enabled: true, transform is a no-op" do
+      source = """
+      defmodule M do
+        def report(order) do
+          subtotal = sum_lines(order)
+          tax = subtotal * region_rate(order)
+          total = subtotal + tax
+          format(total, tax)
+        end
+      end
+      """
+
+      assert apply_refactor(@subject, source) == source
+    end
+  end
+
   describe "rewrites — tuple return" do
     test "extracts a multi-binding prefix with two live-out bindings into a tuple-return helper" do
       before_source = """
@@ -38,7 +61,7 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
       end
       """
 
-      assert_rewrites(@subject, before_source, after_source)
+      assert_rewrites(@subject, before_source, after_source, @on)
     end
 
     # A trailing `!`/`?` is only legal as the final character of an
@@ -72,7 +95,7 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
       end
       """
 
-      assert_rewrites(@subject, before_source, after_source)
+      assert_rewrites(@subject, before_source, after_source, @on)
     end
 
     test "keeps a trailing question mark at the end of the generated helper name" do
@@ -101,7 +124,7 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
       end
       """
 
-      assert_rewrites(@subject, before_source, after_source)
+      assert_rewrites(@subject, before_source, after_source, @on)
     end
   end
 
@@ -134,7 +157,7 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
       end
       """
 
-      assert_rewrites(@subject, before_source, after_source)
+      assert_rewrites(@subject, before_source, after_source, @on)
     end
 
     # `a_and_b` would otherwise be the name; if a parameter is literally
@@ -166,7 +189,7 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
       end
       """
 
-      assert_rewrites(@subject, before_source, after_source)
+      assert_rewrites(@subject, before_source, after_source, @on)
     end
 
     # A boolean live-out (`enabled?`) is dropped from the object — a
@@ -199,7 +222,7 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
       end
       """
 
-      assert_rewrites(@subject, before_source, after_source)
+      assert_rewrites(@subject, before_source, after_source, @on)
     end
 
     # When *every* live-out is dropped (both boolean) and no verb-object
@@ -230,7 +253,7 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
       end
       """
 
-      assert_rewrites(@subject, before_source, after_source)
+      assert_rewrites(@subject, before_source, after_source, @on)
     end
 
     # Three or more live-outs would spell an `a_and_b_and_c` monster;
@@ -263,7 +286,7 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
       end
       """
 
-      assert_rewrites(@subject, before_source, after_source)
+      assert_rewrites(@subject, before_source, after_source, @on)
     end
   end
 
@@ -297,7 +320,7 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
       end
       """
 
-      assert_rewrites(@subject, before_source, after_source)
+      assert_rewrites(@subject, before_source, after_source, @on)
     end
   end
 
@@ -332,7 +355,7 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
       end
       """
 
-      assert_rewrites(@subject, before_source, after_source)
+      assert_rewrites(@subject, before_source, after_source, @on)
     end
   end
 
@@ -375,7 +398,7 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
       end
       """
 
-      assert_rewrites(@subject, before_source, after_source)
+      assert_rewrites(@subject, before_source, after_source, @on)
     end
   end
 
@@ -397,7 +420,8 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
 
           def f(_), do: :default
         end
-        """
+        """,
+        @on
       )
     end
   end
@@ -420,7 +444,8 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
             send(text, ctx)
           end
         end
-        '''
+        ''',
+        @on
       )
     end
 
@@ -437,7 +462,8 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
             emit(a, markup)
           end
         end
-        '''
+        ''',
+        @on
       )
     end
   end
@@ -473,7 +499,7 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
       end
       """
 
-      assert_rewrites(@subject, before_source, after_source)
+      assert_rewrites(@subject, before_source, after_source, @on)
     end
   end
 
@@ -488,7 +514,8 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
             use_it(a)
           end
         end
-        """
+        """,
+        @on
       )
     end
 
@@ -504,7 +531,8 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
             combine(a, b)
           end
         end
-        """
+        """,
+        @on
       )
     end
 
@@ -519,7 +547,8 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
             combine(a, b)
           end
         end
-        """
+        """,
+        @on
       )
     end
 
@@ -534,7 +563,8 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
             unrelated(x)
           end
         end
-        """
+        """,
+        @on
       )
     end
 
@@ -550,7 +580,8 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
             render(a, b)
           end
         end
-        """
+        """,
+        @on
       )
     end
 
@@ -561,7 +592,8 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
         defmodule M do
           def f(x), do: compute(x)
         end
-        """
+        """,
+        @on
       )
     end
 
@@ -575,7 +607,8 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
             b = derive(a)
           end
         end
-        """
+        """,
+        @on
       )
     end
   end
@@ -593,7 +626,8 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
             format(total, tax)
           end
         end
-        """
+        """,
+        @on
       )
     end
 
@@ -613,7 +647,7 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
       end
       """
 
-      assert_compiles(apply_refactor(@subject, source))
+      assert_compiles(apply_refactor(@subject, source, @on))
     end
   end
 end

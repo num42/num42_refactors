@@ -91,6 +91,19 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlock do
   whole host signature), so no unused-argument warnings. Bindings holding
   string interpolation or a sigil are skipped — relocating an interpolated
   heredoc by range patch left a dangling `\"""` in the host.
+
+  ## Default-OFF (opt-in only)
+
+  Disabled by default — `transform/2` is a no-op unless its own opts
+  carry `enabled: true`. Extracting a leading binding run is a judgement
+  call: the slice is a *setup phase*, not always a nameable
+  responsibility, so the result can read as indirection without a payoff
+  even with the verb/object naming. Opt in per project where the trade is
+  wanted:
+
+      configured_modules: [
+        {Number42.Refactors.Ex.ExtractFunctionFromBlock, enabled: true}
+      ]
   """
 
   use Number42.Refactors.Refactor
@@ -122,8 +135,12 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlock do
   def reformat_after?, do: true
 
   @impl Number42.Refactors.Refactor
-  def transform(source, _opts) do
-    Sourceror.parse_string(source) |> apply_to_parse_result(source)
+  def transform(source, opts) do
+    if Keyword.get(opts, :enabled, false) do
+      Sourceror.parse_string(source) |> apply_to_parse_result(source)
+    else
+      source
+    end
   end
 
   defp apply_to_parse_result({:ok, ast}, source), do: apply_to_ast(ast, source)

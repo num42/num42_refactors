@@ -190,18 +190,33 @@ defmodule Number42.RefactorCase do
   """
   @spec assert_compiles(String.t()) :: :ok
   def assert_compiles(source) do
+    # Compile + purge mutate the global module namespace, so they must run
+    # as one critical section — async tests reuse module names like `M`.
+    # CompileLock (started in test_helper) serializes them. `:infinity`:
+    # compiling untrusted refactor output can outrun the default timeout.
+    # The compile error is captured and returned, then flunked here in the
+    # test process — flunking inside the Agent would crash the lock.
+    case Agent.get(__MODULE__.CompileLock, fn _ -> compile_and_purge(source) end, :infinity) do
+      :ok ->
+        :ok
+
+      {:error, error} ->
+        flunk("""
+        Refactor output does not compile.
+
+        --- error ---
+        #{Exception.message(error)}
+        --- source ---
+        #{source}
+        """)
+    end
+  end
+
+  defp compile_and_purge(source) do
     Code.compile_string(source)
     :ok
   rescue
-    error ->
-      flunk("""
-      Refactor output does not compile.
-
-      --- error ---
-      #{Exception.message(error)}
-      --- source ---
-      #{source}
-      """)
+    error -> {:error, error}
   after
     purge_compiled_modules(source)
   end

@@ -89,6 +89,19 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilities do
   the fixpoint at one pass, any `defp` already named `<host>_phase_<int>`
   is recognised as this refactor's own output and never re-split. A
   re-run is a no-op.
+
+  ## Default-OFF (opt-in only)
+
+  Disabled by default — `transform/2` is a no-op unless its own opts
+  carry `enabled: true`. Cutting a body into pipeline phases is a
+  structural judgement call: not every data-flow boundary is a
+  responsibility boundary, so the split can fragment a coherent function
+  into phases that read as machinery. Opt in per project where the trade
+  is wanted:
+
+      configured_modules: [
+        {Number42.Refactors.Ex.SplitPipeableResponsibilities, enabled: true}
+      ]
   """
 
   use Number42.Refactors.Refactor
@@ -122,7 +135,11 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilities do
 
   @impl Number42.Refactors.Refactor
   def transform(source, opts) do
-    Sourceror.parse_string(source) |> apply_to_parse_result(source, opts)
+    if Keyword.get(opts, :enabled, false) do
+      Sourceror.parse_string(source) |> apply_to_parse_result(source, opts)
+    else
+      source
+    end
   end
 
   defp apply_to_parse_result({:ok, ast}, source, opts), do: apply_to_ast(ast, source, opts)
