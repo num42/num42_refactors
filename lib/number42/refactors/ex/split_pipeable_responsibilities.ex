@@ -62,7 +62,7 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilities do
   ## Options
 
   - `:min_statements_per_phase` (default `2`)
-  - `:min_phases` (default `2`)
+  - `:min_phases` (default `3`)
   - `:max_carriers` (default `3`)
 
   ## Pass scope & idempotence
@@ -191,7 +191,7 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilities do
          :ok <- ensure_splittable(exprs),
          segments = BlockSegmentation.segment(exprs),
          phases = BlockSegmentation.group_phases(segments, group_opts(opts)),
-         true <- length(phases) >= Keyword.get(group_opts(opts), :min_phases, 2),
+         true <- length(phases) >= Keyword.get(group_opts(opts), :min_phases, 3),
          param_set = MapSet.new(param_names),
          {:ok, plan} <- plan_phases(phases, param_set, fn_name, existing_names) do
       build_split(def_node, plan, def_node)
@@ -241,7 +241,7 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilities do
   defp group_opts(opts) do
     [
       min_statements_per_phase: Keyword.get(opts, :min_statements_per_phase, 2),
-      min_phases: Keyword.get(opts, :min_phases, 2),
+      min_phases: Keyword.get(opts, :min_phases, 3),
       max_carriers: Keyword.get(opts, :max_carriers, 3)
     ]
   end

@@ -98,7 +98,7 @@ defmodule Number42.Refactors.BlockSegmentation do
   Options:
 
   - `:min_statements_per_phase` (default `2`) — no phase shorter than this.
-  - `:min_phases` (default `2`) — return a single phase if the block
+  - `:min_phases` (default `3`) — return a single phase if the block
     can't be split into at least this many phases under the floor.
   - `:max_carriers` (default `3`) — a cut is only eligible if at most
     this many carriers cross it (a tuple transition wider than this is a
@@ -112,7 +112,7 @@ defmodule Number42.Refactors.BlockSegmentation do
   @spec group_phases([segment()], keyword()) :: [[segment()]]
   def group_phases(segments, opts \\ []) when is_list(segments) do
     min_per = Keyword.get(opts, :min_statements_per_phase, 2)
-    min_phases = Keyword.get(opts, :min_phases, 2)
+    min_phases = Keyword.get(opts, :min_phases, 3)
     max_carriers = Keyword.get(opts, :max_carriers, 3)
 
     case maximal_cuts(segments, min_per, max_carriers) do

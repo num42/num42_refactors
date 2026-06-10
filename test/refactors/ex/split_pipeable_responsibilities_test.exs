@@ -72,7 +72,40 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilitiesTest do
       end
       """
 
-      assert_rewrites(@subject, before_source, after_source, @on)
+      # 2-phase mechanic: pin min_phases: 2 so this stays a split
+      # regardless of the (now 3) default.
+      assert_rewrites(@subject, before_source, after_source, @on ++ [min_phases: 2])
+    end
+  end
+
+  describe "min_phases default (3) vs. explicit config" do
+    # The same body that yields exactly two phases: the default floor of
+    # 3 leaves it untouched, while an explicit `min_phases: 2` splits it.
+    # This proves the floor is honoured *and* configurable.
+    @two_phase_body """
+    defmodule M do
+      def report(order) do
+        subtotal = sum_lines(order)
+        discount = lookup_discount(order)
+        net = subtotal - discount
+        doubled = net * 2
+        adjusted = doubled + 1
+        format(adjusted)
+      end
+    end
+    """
+
+    test "a body that yields only two phases is left untouched under the default floor of 3" do
+      assert_unchanged(@subject, @two_phase_body, @on)
+    end
+
+    test "the same two-phase body IS split with explicit min_phases: 2" do
+      out = apply_refactor(@subject, @two_phase_body, @on ++ [min_phases: 2])
+
+      assert out != @two_phase_body
+      assert out =~ "report_phase_1"
+      assert out =~ "report_phase_2"
+      refute out =~ "report_phase_3"
     end
   end
 
@@ -285,11 +318,14 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilitiesTest do
       end
       """
 
-      once = SplitPipeableResponsibilities.transform(source, @on)
+      # 2-phase fan-in mechanic: pin min_phases: 2 so the single eligible
+      # cut still produces a split under the (now 3) default.
+      opts = @on ++ [min_phases: 2]
+      once = SplitPipeableResponsibilities.transform(source, opts)
 
       assert once =~ "build_phase_1"
       refute once =~ ~r/_phase_\d+_phase_\d+/
-      assert_idempotent(@subject, source, @on)
+      assert_idempotent(@subject, source, opts)
     end
   end
 
@@ -343,7 +379,8 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilitiesTest do
       end
       """
 
-      out = SplitPipeableResponsibilities.transform(source, @on)
+      # 2-phase string-handling mechanic: pin min_phases: 2.
+      out = SplitPipeableResponsibilities.transform(source, @on ++ [min_phases: 2])
 
       # Phase 1 returns {from_entity, to_entity} — both meaningful, no
       # verb → object-only name. The final phase (the interpolated tail)
@@ -410,7 +447,8 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilitiesTest do
       end
       """
 
-      out = SplitPipeableResponsibilities.transform(source, @on)
+      # 2-phase self-rebind mechanic: pin min_phases: 2.
+      out = SplitPipeableResponsibilities.transform(source, @on ++ [min_phases: 2])
 
       assert out =~ "build_phase_2(assigns,"
       assert_compiles(out)
@@ -434,7 +472,8 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilitiesTest do
       end
       """
 
-      out = SplitPipeableResponsibilities.transform(source, @on)
+      # 2-phase suffix-fallback mechanic: pin min_phases: 2.
+      out = SplitPipeableResponsibilities.transform(source, @on ++ [min_phases: 2])
 
       assert out =~ "add_nodes_phase_2"
       refute out =~ "add_nodes_block_phase"
