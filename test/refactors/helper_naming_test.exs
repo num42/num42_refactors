@@ -171,6 +171,38 @@ defmodule Number42.Refactors.HelperNamingTest do
     end
   end
 
+  describe "access-pattern fetch (assigns / Map.fetch! / tuple-LHS)" do
+    test "reading a single field off socket.assigns is a fetch" do
+      # `organization = socket.assigns.organization` — the RHS is an assigns
+      # access, not a call in the verb table. It still reads as fetch, and the
+      # field name is the object: fetch_organization (a standalone
+      # `organization` would shadow the live-out).
+      assert {:ok, :fetch_organization} =
+               name(:show, [:scope, :organization], """
+               scope = socket.assigns.current_scope
+               organization = socket.assigns.organization
+               """)
+    end
+
+    test "Map.fetch! over an args map is a fetch despite the bang" do
+      assert {:ok, :fetch_collection_id} =
+               name(:resolve, [:scope, :collection_id], """
+               scope = Map.fetch!(args, :scope)
+               collection_id = Map.fetch!(args, :collection_id)
+               """)
+    end
+
+    test "a tuple-LHS binding still yields the producing call's verb" do
+      # `{encoded_token, _} = build_email_token(user)` — the live-out is bound
+      # by a tuple pattern, not a bare var. The build verb must survive.
+      assert {:ok, :build_encoded_token} =
+               name(:create, [:encoded_token], """
+               {encoded_token, user_token} = UserToken.build_email_token(user, "login")
+               Repo.insert!(user_token)
+               """)
+    end
+  end
+
   describe "optional attribute (filter predicate adjective)" do
     test "a boolean predicate field slots an adjective between verb and object" do
       # `reject(& &1.archived)` → verb filter (reject), attribute inactive

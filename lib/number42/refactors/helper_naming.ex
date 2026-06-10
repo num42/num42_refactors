@@ -162,24 +162,49 @@ defmodule Number42.Refactors.HelperNaming do
     |> Enum.flat_map(&live_out_call(&1, live_outs))
   end
 
-  # A binding `var = call(...)` where `var` is a live-out yields that call name.
-  # Anything else (non-call RHS, non-live-out target, bare expression) yields
-  # nothing.
+  # A binding whose LHS binds a live-out and whose RHS is a call yields that
+  # call name. The LHS may be a bare var (`token = build(user)`) or a tuple
+  # pattern that destructures the result (`{token, _} = build(user)`) — both
+  # let the producing call name the verb. Anything else (non-call RHS, no
+  # live-out bound, bare expression) yields nothing.
   defp live_out_call({:=, _, [lhs, rhs]}, live_outs) do
-    with {var, _, ctx} when is_atom(var) and is_atom(ctx) <- lhs,
-         true <- MapSet.member?(live_outs, var),
-         fun when is_atom(fun) <- call_name(rhs) do
-      [fun]
+    # `call_name/1` returns nil for a non-call RHS; nil is itself an atom, so a
+    # `is_atom` guard would swallow it — match nil explicitly first.
+    if binds_live_out?(lhs, live_outs) do
+      case call_name(rhs) do
+        nil -> []
+        fun when is_atom(fun) -> [fun]
+      end
     else
-      _ -> []
+      []
     end
   end
 
   defp live_out_call(_stmt, _live_outs), do: []
 
+  # True when the LHS binds at least one live-out name — directly as a bare
+  # var, or as one element of a tuple pattern.
+  defp binds_live_out?({var, _, ctx}, live_outs) when is_atom(var) and is_atom(ctx),
+    do: MapSet.member?(live_outs, var)
+
+  defp binds_live_out?({:{}, _, elems}, live_outs) when is_list(elems),
+    do: Enum.any?(elems, &binds_live_out?(&1, live_outs))
+
+  defp binds_live_out?({a, b}, live_outs),
+    do: binds_live_out?(a, live_outs) or binds_live_out?(b, live_outs)
+
+  defp binds_live_out?(_lhs, _live_outs), do: false
+
   # Unwrap a pipe to its final call; pull the function name out of a
-  # remote (`Mod.fun`) or local (`fun`) call.
+  # remote (`Mod.fun`) or local (`fun`) call. A `socket.assigns.field` /
+  # `conn.assigns.field` read is treated as a `get` — reading an assign is a
+  # fetch, and `call_name` is the single point the verb table consults.
   defp call_name({:|>, _, [_lhs, rhs]}), do: call_name(rhs)
+
+  defp call_name({{:., _, [{{:., _, [_root, :assigns]}, _, _}, field]}, _, _})
+       when is_atom(field),
+       do: :get
+
   defp call_name({{:., _, [_callee, fun]}, _, _}) when is_atom(fun), do: fun
   defp call_name({fun, _, args}) when is_atom(fun) and is_list(args), do: fun
   defp call_name(_), do: nil
@@ -189,7 +214,7 @@ defmodule Number42.Refactors.HelperNaming do
   defp table_verb(nil), do: nil
 
   defp table_verb(fun) do
-    name = Atom.to_string(fun)
+    name = fun |> Atom.to_string() |> String.trim_trailing("!") |> String.trim_trailing("?")
 
     Enum.find_value(@verb_rules, fn {verb, stems} ->
       if Enum.any?(stems, &stem_match?(name, &1)), do: verb
