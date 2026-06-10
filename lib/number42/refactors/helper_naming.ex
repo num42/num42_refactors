@@ -47,6 +47,9 @@ defmodule Number42.Refactors.HelperNaming do
   they still count for shadow-safety.
   """
 
+  alias Number42.Refactors.AttributeClassifier
+  alias Number42.Refactors.Semantic
+
   @boilerplate ~w(scope socket conn assigns)a
 
   # Verb inferred from the *function name* of the call that produces the
@@ -194,7 +197,7 @@ defmodule Number42.Refactors.HelperNaming do
   defp semantic_verb(nil), do: nil
 
   defp semantic_verb(fun) do
-    case Number42.Refactors.Semantic.classify(Atom.to_string(fun)) do
+    case Semantic.classify(Atom.to_string(fun)) do
       {:ok, verb, _score} -> verb
       :unknown -> nil
     end
@@ -249,7 +252,7 @@ defmodule Number42.Refactors.HelperNaming do
   end
 
   defp classify_attribute(field) do
-    case Number42.Refactors.AttributeClassifier.classify(Atom.to_string(field)) do
+    case AttributeClassifier.classify(Atom.to_string(field)) do
       {:ok, attribute} -> attribute
       :none -> nil
     end
