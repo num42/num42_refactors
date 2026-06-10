@@ -151,27 +151,34 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
       äußerer und ein in ihm enthaltener Klon nicht doppelt extrahiert
       werden.
 
-  ## Gruppen-Auswahl (Slice 3 — Nutzen statt roher Masse)
+  ## Gruppen-Auswahl (Slice 4 — Multi-Extract pro Pass)
 
-  Pro Pass wird *eine* Klon-Gruppe extrahiert (re-run findet die
-  nächste). Die Auswahl rankt nicht mehr nach roher Masse
-  (`mass * occurrences`), sondern nach **Netto-Nutzen** (`group_value/1`,
-  derselbe `savings`-Term wie die `:min_savings`-Schwelle). Das löst die
-  greedy-Überlappung an `item_live`: dort gewann früher die *größte*
-  Gruppe (ein 8-Tupel-Return = Verschlechterung) und wurde dann
-  nachträglich zerlegt. Jetzt scheidet die 8-Tupel-Gruppe schon an
-  `:max_live_out` aus, und unter den verbleibenden gültigen Gruppen
-  gewinnt die nutzenstärkste — bevorzugt mehrere kleine sinnvolle Gruppen
-  (`fetch_sort_field_and_sort_dir`, `fetch_limit_and_offset`) statt einer
-  Riesen-Tupel-Gruppe.
+  Jeder Pass extrahiert **alle Klon-Gruppen, die nebeneinander bestehen
+  können**, nicht nur eine. Die Gruppen werden nach **Netto-Nutzen**
+  (`group_savings/1`, derselbe `savings`-Term wie die `:min_savings`-
+  Schwelle) absteigend sortiert und greedy akzeptiert: eine Gruppe wird
+  genommen, solange (a) ihr synthetisierter Helper-Name noch frei ist
+  (gegen die *während des Passes wachsende* `existing_names`-Menge) und (b)
+  keine ihrer Occurrence-Ranges mit einer schon akzeptierten Gruppe *in
+  derselben Klausel* überlappt.
 
-  Voll-optimales Set-Cover (mehrere disjunkte Gruppen *gleichzeitig* in
-  einem Pass, NP-hart) ist bewusst **nicht** gebaut: die
-  Nutzen-Rankings + `:max_live_out` lösen das beobachtete
-  Verschlechterungs-Problem, und Idempotenz konvergiert ohnehin über
-  re-runs (ein zweiter Pass greift die nächstbeste nicht-überlappende
-  Gruppe). Echtes simultanes Set-Cover bleibt ein dokumentierter
-  Folge-Slice.
+  Das ist der Konvergenz-Hebel: statt „eine Extraktion pro Lauf, N-mal
+  laufen" erledigt ein Pass alle nicht-kollidierenden Gruppen auf einmal.
+  Liegen bleiben nur Gruppen, deren Name mit einer akzeptierten kollidiert
+  (zwei *verschiedene* Helper wollen denselben Namen) oder deren Range eine
+  akzeptierte überlappt — selten; ein zweiter Pass räumt die ab. Im
+  Normalfall (keine Reste) ist der Refactor nach einem Pass idempotent;
+  andernfalls konvergiert er in wenigen Pässen.
+
+  Das Nutzen-Ranking löst weiterhin die greedy-Überlappung an `item_live`:
+  die 8-Tupel-Gruppe scheidet schon an `:max_live_out` aus, und unter den
+  gültigen Gruppen gewinnen die nutzenstärksten zuerst einen Slot.
+
+  Voll-optimales Set-Cover (die *beste* Teilmenge gleichzeitig
+  extrahierbarer Gruppen finden, NP-hart) ist bewusst **nicht** gebaut:
+  die greedy-Akzeptanz in Nutzen-Reihenfolge nimmt die wertvollsten zuerst
+  und ist für den beobachteten Fall ausreichend. Echtes simultanes
+  Set-Cover bleibt ein dokumentierter Folge-Slice.
 
   ## Default-OFF (opt-in only)
 
@@ -583,30 +590,71 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
   #   * one call-site replacement per surviving occurrence — a plain
   #     `helper(args)` when nothing is live-out, or
   #     `<lhs> = helper(args)` destructuring the occurrence's own live-out
+  # Extract every clone group that can coexist in ONE pass, highest net
+  # savings first. Two groups can coexist when their helper names differ and
+  # their source ranges don't overlap; greedy acceptance in savings order
+  # keeps the most valuable extractions and defers the rest to a later pass.
+  #
+  # This is what makes the refactor *converge*: instead of "one extraction
+  # per run, re-run N times", a single pass takes all non-conflicting groups
+  # at once. Groups left behind are only those whose name collides with an
+  # accepted one (two distinct helpers wanting the same name) or whose range
+  # overlaps an accepted group in the same clause — genuinely rare, and a
+  # second pass mops them up. Idempotence holds for the common case (no
+  # leftovers) and convergence is at most a couple of passes otherwise.
   defp emit_plan(groups, mod_node, existing_names, cfg, source) do
-    case best_group(groups, cfg) do
-      {:ok, occurrences} -> emit_group(occurrences, mod_node, existing_names, source)
-      :none -> []
-    end
+    groups
+    |> eligible_groups(cfg)
+    |> Enum.sort_by(&group_savings/1, :desc)
+    |> accept_groups(mod_node, existing_names, source)
   end
 
-  # Rank by net savings, not raw mass. Raw `mass * occurrences` over-values
-  # a big block that recurs widely even when it produces a regression-shaped
-  # return; net savings discounts that overhead, so several small genuine
-  # groups outrank one bloated one. Groups below `:min_savings` (computed on
-  # the overlap-resolved occurrence count) are dropped as not worth a helper.
-  defp best_group(groups, cfg) do
+  # Each fingerprint bucket → its overlap-resolved occurrences, kept only if
+  # still a real clone (≥2) clearing the savings floor. Rank by net savings,
+  # not raw mass: raw `mass * occurrences` over-values a big block that recurs
+  # widely even when it produces a regression-shaped return.
+  defp eligible_groups(groups, cfg) do
     groups
     |> Enum.map(fn {_fp, occs} -> resolve_overlaps(occs) end)
-    |> Enum.filter(&(length(&1) >= 2))
-    |> Enum.filter(&(group_savings(&1) >= cfg.min_savings))
-    |> case do
-      [] ->
-        :none
+    |> Enum.filter(&(length(&1) >= 2 and group_savings(&1) >= cfg.min_savings))
+  end
 
-      candidates ->
-        {:ok, Enum.max_by(candidates, &group_savings/1)}
-    end
+  # Walk the ranked groups, accepting a group only if its synthesised name is
+  # still free (collisions reserve the name and defer the loser) and none of
+  # its occurrence ranges overlap a range already claimed this pass. Threads
+  # the growing `existing_names` set and the set of claimed ranges so later
+  # groups see earlier decisions.
+  defp accept_groups(groups, mod_node, existing_names, source) do
+    {patches, _names, _claimed} =
+      Enum.reduce(groups, {[], existing_names, []}, fn occurrences, {patches, names, claimed} ->
+        with false <- group_overlaps_claimed?(occurrences, claimed),
+             {:ok, helper_name} <- synth_name(hd(occurrences), names),
+             new_patches when new_patches != [] <-
+               emit_named_group(occurrences, helper_name, mod_node, source) do
+          {patches ++ new_patches, MapSet.put(names, helper_name),
+           claimed ++ claimed_ranges(occurrences)}
+        else
+          _ -> {patches, names, claimed}
+        end
+      end)
+
+    patches
+  end
+
+  # A group conflicts if any of its occurrence ranges overlaps a range already
+  # claimed by an accepted group *in the same clause*. Cross-clause ranges
+  # never overlap (per-clause statement indices).
+  defp group_overlaps_claimed?(occurrences, claimed) do
+    Enum.any?(claimed_ranges(occurrences), fn {key, range} ->
+      Enum.any?(claimed, fn
+        {^key, claimed_range} -> ranges_overlap?(range, claimed_range)
+        _ -> false
+      end)
+    end)
+  end
+
+  defp claimed_ranges(occurrences) do
+    Enum.map(occurrences, fn %{clause_key: key, range: range} -> {key, range} end)
   end
 
   # Estimated net reduction in node count from extracting this group:
@@ -626,13 +674,6 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
     gross = node_mass(first.ast) * (occurrences - 1)
     cost = occurrences * (1 + length(first.free_vars) + length(first.live_out))
     gross - cost
-  end
-
-  defp emit_group([first | _] = occurrences, mod_node, existing_names, source) do
-    case synth_name(first, existing_names) do
-      {:ok, helper_name} -> emit_named_group(occurrences, helper_name, mod_node, source)
-      :skip -> []
-    end
   end
 
   defp emit_named_group([first | _] = occurrences, helper_name, mod_node, source) do
