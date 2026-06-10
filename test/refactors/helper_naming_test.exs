@@ -138,10 +138,11 @@ defmodule Number42.Refactors.HelperNamingTest do
                """)
     end
 
-    test "a boilerplate source carrier is not used as the object" do
-      # All bindings read from `assigns` (boilerplate) → `fetch_assigns` is
-      # too generic to be a name; fall back to the host.
-      assert {:ok, :prepare_block} =
+    test "a boilerplate carrier read 3+ times is named after it" do
+      # An assigns ladder fanning the LiveView container into 3+ bindings is a
+      # real fan-out; `fetch_assigns` beats the host fallback even though
+      # `assigns` is boilerplate. (Two reads stay boilerplate-dropped.)
+      assert {:ok, :fetch_assigns} =
                name(:prepare, [:slot_et, :masses, :params], """
                slot_et = Map.get(assigns, :slot_expected_type)
                masses = Map.get(assigns, :masses, [])
@@ -149,8 +150,34 @@ defmodule Number42.Refactors.HelperNamingTest do
                """)
     end
 
-    test "no shared source carrier across the calls → no source object" do
-      # Different first args (opts vs params) → no single source → host fallback.
+    test "a transforming line between accessor reads does not poison the source" do
+      # `search = opts |> Keyword.get(:search) |> String.trim()` is not a clean
+      # accessor read, but it must not block naming the other reads after their
+      # shared `opts` carrier — the transforming line is simply ignored.
+      assert {:ok, :fetch_opts} =
+               name(:list, [:sort_field, :search, :types, :statuses], """
+               sort_field = Keyword.get(opts, :sort_field, :name)
+               search = opts |> Keyword.get(:search) |> String.trim()
+               types = Keyword.get(opts, :types, MapSet.new())
+               statuses = Keyword.get(opts, :statuses, MapSet.new())
+               """)
+    end
+
+    test "a local transform call among accessor reads does not poison the source" do
+      # `deduped = deduplicated_query(base, …)` is a transform, not an accessor;
+      # ignored, so the Map.get reads still name the helper after `filters`.
+      assert {:ok, :fetch_filters} =
+               name(:query, [:sort_by, :sort_dir, :deduped], """
+               sort_by = Map.get(filters, :sort_by, "uploaded")
+               sort_dir = Map.get(filters, :sort_dir, "desc")
+               deduped = deduplicated_query(base_query, sort_by, sort_dir)
+               """)
+    end
+
+    test "no shared source carrier across the accessor calls → no source object" do
+      # Different first args (opts vs params), both accessors → no single
+      # source → host fallback. (The nil-from-non-accessor case is covered
+      # separately above; here both lines *are* accessors.)
       assert {:ok, :list_block} =
                name(:list, [:a, :b, :c], """
                a = Keyword.get(opts, :a)
