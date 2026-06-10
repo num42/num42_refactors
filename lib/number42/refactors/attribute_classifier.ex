@@ -21,16 +21,12 @@ defmodule Number42.Refactors.AttributeClassifier do
   which is correct, an unknown field is not an attribute.
   """
 
-  @model_path Application.app_dir(:number42_refactors, "priv/semantic/attribute_model.json")
-  @external_resource @model_path
-
-  @model @model_path |> File.read!() |> :json.decode()
-
-  @lexicon Map.fetch!(@model, "lexicon")
-  @classes Map.fetch!(@model, "classes")
-  @weights Map.fetch!(@model, "W")
-  @bias Map.fetch!(@model, "b")
-  @none_floor Map.fetch!(@model, "none_floor")
+  # Loaded once at runtime and cached in :persistent_term — see Semantic for
+  # the why (compile-time Application.app_dir/2 crashes downstream consumers
+  # because the app isn't loaded yet when they compile the dep).
+  @external_resource "priv/semantic/attribute_model.json"
+  @persistent_key {__MODULE__, :model}
+  @model_file "semantic/attribute_model.json"
 
   @type attribute :: atom()
 
@@ -40,18 +36,51 @@ defmodule Number42.Refactors.AttributeClassifier do
   """
   @spec classify(String.t()) :: {:ok, attribute()} | :none
   def classify(field) when is_binary(field) do
-    case embed(field) do
+    model = model()
+
+    case embed(field, model) do
       :empty -> :none
-      vec -> vec |> scores() |> softmax() |> pick()
+      vec -> vec |> scores(model) |> softmax() |> pick(model)
     end
+  end
+
+  # --- model loading (runtime, cached) ---
+
+  defp model do
+    case :persistent_term.get(@persistent_key, :miss) do
+      :miss ->
+        loaded = load_model()
+        :persistent_term.put(@persistent_key, loaded)
+        loaded
+
+      loaded ->
+        loaded
+    end
+  end
+
+  defp load_model do
+    raw =
+      :number42_refactors
+      |> :code.priv_dir()
+      |> Path.join(@model_file)
+      |> File.read!()
+      |> :json.decode()
+
+    %{
+      lexicon: Map.fetch!(raw, "lexicon"),
+      classes: Map.fetch!(raw, "classes"),
+      weights: Map.fetch!(raw, "W"),
+      bias: Map.fetch!(raw, "b"),
+      none_floor: Map.fetch!(raw, "none_floor")
+    }
   end
 
   # --- embedding (same lexicon-mean approach as Semantic) ---
 
-  defp embed(field) do
+  defp embed(field, model) do
     field
     |> String.split("_", trim: true)
-    |> Enum.flat_map(&Map.get(@lexicon, &1, []))
+    |> Enum.flat_map(&Map.get(model.lexicon, &1, []))
     |> case do
       [] -> :empty
       token_vecs -> token_vecs |> mean() |> normalize()
@@ -75,8 +104,8 @@ defmodule Number42.Refactors.AttributeClassifier do
 
   # --- linear model: scores = W·x + b, then softmax ---
 
-  defp scores(vec) do
-    Enum.zip_with(@weights, @bias, fn row, bias -> dot(row, vec) + bias end)
+  defp scores(vec, model) do
+    Enum.zip_with(model.weights, model.bias, fn row, bias -> dot(row, vec) + bias end)
   end
 
   defp dot(a, b), do: Enum.zip_reduce(a, b, 0.0, fn x, y, acc -> acc + x * y end)
@@ -90,11 +119,11 @@ defmodule Number42.Refactors.AttributeClassifier do
 
   # The winning class wins only if it is not `none` and clears the floor —
   # otherwise no attribute, keeping the two-word verb_object name.
-  defp pick(probs) do
+  defp pick(probs, model) do
     {prob, index} = probs |> Enum.with_index() |> Enum.max_by(&elem(&1, 0))
-    label = Enum.at(@classes, index)
+    label = Enum.at(model.classes, index)
 
-    if label == "none" or prob < @none_floor,
+    if label == "none" or prob < model.none_floor,
       do: :none,
       else: {:ok, String.to_atom(label)}
   end
