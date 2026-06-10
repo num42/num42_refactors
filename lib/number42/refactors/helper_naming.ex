@@ -95,15 +95,23 @@ defmodule Number42.Refactors.HelperNaming do
     in_scope = MapSet.new(live_out ++ params)
     verb = infer_verb(stmts, live_out)
     object = object_part(live_out)
+    attribute = infer_attribute(stmts)
     fallback = Keyword.get(opts, :fallback, suffixed(host, "_block"))
 
     # `object` may be a single name (`filters`) or a join (`a_and_b`).
     # As a *standalone* name a single object always equals its live-out
     # and would shadow it — only a join is safe standalone. With a verb
     # the composed name (`fetch_filters`) differs from the live-out, so a
-    # single object is fine there.
+    # single object is fine there. An attribute, when present, slots between
+    # verb and object (`delete_active_items`); it is preferred over the plain
+    # `verb_object` but both are offered so a shadow falls back cleanly.
     derived =
-      [compose(verb, object), standalone(object), strip_suffix(host)]
+      [
+        compose(verb, attribute, object),
+        compose(verb, object),
+        standalone(object),
+        strip_suffix(host)
+      ]
       |> Enum.reject(&(is_nil(&1) or MapSet.member?(in_scope, &1)))
 
     first_free(derived ++ [fallback], existing)
@@ -221,6 +229,61 @@ defmodule Number42.Refactors.HelperNaming do
   defp compose(nil, _object), do: nil
   defp compose(_verb, nil), do: nil
   defp compose(verb, object), do: :"#{verb}_#{object}"
+
+  # The three-part name only forms when verb, attribute AND object are all
+  # present; otherwise nil and the plain `verb_object` is used.
+  defp compose(nil, _attribute, _object), do: nil
+  defp compose(_verb, nil, _object), do: nil
+  defp compose(_verb, _attribute, nil), do: nil
+  defp compose(verb, attribute, object), do: :"#{verb}_#{attribute}_#{object}"
+
+  # --- attribute inference (optional middle word) ---
+
+  # Pull boolean predicate fields out of the block's filter/where calls and
+  # classify the first one that is an adjective. Most blocks carry no such
+  # field, so this is usually nil — the attribute is a bonus, never forced.
+  defp infer_attribute(stmts) do
+    stmts
+    |> Enum.flat_map(&predicate_fields/1)
+    |> Enum.find_value(&classify_attribute/1)
+  end
+
+  defp classify_attribute(field) do
+    case Number42.Refactors.AttributeClassifier.classify(Atom.to_string(field)) do
+      {:ok, attribute} -> attribute
+      :none -> nil
+    end
+  end
+
+  # Field names read off a boolean predicate, surgically — only the access on
+  # the lambda/row variable inside an `Enum.filter`/`Enum.reject`/`where` call,
+  # not arbitrary block words. `Enum.reject(xs, & &1.archived)` → [:archived].
+  defp predicate_fields(ast) do
+    ast
+    |> Macro.prewalker()
+    |> Enum.flat_map(&fields_in_filter_call/1)
+  end
+
+  defp fields_in_filter_call({{:., _, [{:__aliases__, _, [:Enum]}, fun]}, _, args})
+       when fun in [:filter, :reject] do
+    args |> Enum.flat_map(&access_fields/1)
+  end
+
+  defp fields_in_filter_call({:where, _, args}) when is_list(args) do
+    args |> Enum.flat_map(&access_fields/1)
+  end
+
+  defp fields_in_filter_call(_), do: []
+
+  # Field accesses `x.field` anywhere inside a predicate expression.
+  defp access_fields(ast) do
+    ast
+    |> Macro.prewalker()
+    |> Enum.flat_map(fn
+      {{:., _, [_obj, field]}, _, []} when is_atom(field) -> [field]
+      _ -> []
+    end)
+  end
 
   # One- and two-letter names (`x`, `cs`), `_`-prefixed throwaways, and
   # `?`/`!`-marked names (the marker is only legal as the last character

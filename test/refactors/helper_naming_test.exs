@@ -114,6 +114,32 @@ defmodule Number42.Refactors.HelperNamingTest do
     end
   end
 
+  describe "optional attribute (filter predicate adjective)" do
+    test "a boolean predicate field slots an adjective between verb and object" do
+      # `reject(& &1.archived)` → verb filter (reject), attribute inactive
+      # (archived), object items → filter_inactive_items.
+      assert {:ok, :filter_inactive_items} =
+               name(:scope, [:items], """
+               items = Enum.reject(rows, & &1.archived)
+               """)
+    end
+
+    test "an active predicate names the attribute directly" do
+      assert {:ok, :filter_active_items} =
+               name(:scope, [:items], """
+               items = Enum.filter(rows, & &1.active)
+               """)
+    end
+
+    test "a non-adjective predicate field adds no attribute" do
+      # `& &1.name` is not an adjective → plain verb_object, no middle word.
+      assert {:ok, :filter_items} =
+               name(:scope, [:items], """
+               items = Enum.filter(rows, & &1.name)
+               """)
+    end
+  end
+
   describe "shadow safety" do
     test "a candidate equal to a live-out name is rejected" do
       # Single live-out `total`; `total` would shadow at the call site, and no
