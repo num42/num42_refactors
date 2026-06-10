@@ -114,6 +114,63 @@ defmodule Number42.Refactors.HelperNamingTest do
     end
   end
 
+  describe "source object (3+ live-outs from one carrier)" do
+    test "a get ladder over a shared option arg names the helper after the source" do
+      # Five `Keyword.get(opts, …)` bindings → verb fetch, but five live-outs
+      # give no object. The shared first argument `opts` is the object:
+      # fetch_opts, not the host fallback.
+      assert {:ok, :fetch_opts} =
+               name(:list, [:sort_field, :sort_dir, :search, :types, :statuses], """
+               sort_field = Keyword.get(opts, :sort_field, :name)
+               sort_dir = Keyword.get(opts, :sort_dir, :asc)
+               search = Keyword.get(opts, :search)
+               types = Keyword.get(opts, :types, MapSet.new())
+               statuses = Keyword.get(opts, :statuses, MapSet.new())
+               """)
+    end
+
+    test "a Map.get ladder over a shared filters arg names after the source" do
+      assert {:ok, :fetch_filters} =
+               name(:query, [:sort_by, :sort_dir, :page], """
+               sort_by = Map.get(filters, :sort_by, "uploaded")
+               sort_dir = Map.get(filters, :sort_dir, "desc")
+               page = Map.get(filters, :page, 1)
+               """)
+    end
+
+    test "a boilerplate source carrier is not used as the object" do
+      # All bindings read from `assigns` (boilerplate) → `fetch_assigns` is
+      # too generic to be a name; fall back to the host.
+      assert {:ok, :prepare_block} =
+               name(:prepare, [:slot_et, :masses, :params], """
+               slot_et = Map.get(assigns, :slot_expected_type)
+               masses = Map.get(assigns, :masses, [])
+               params = Map.get(assigns, :params, [])
+               """)
+    end
+
+    test "no shared source carrier across the calls → no source object" do
+      # Different first args (opts vs params) → no single source → host fallback.
+      assert {:ok, :list_block} =
+               name(:list, [:a, :b, :c], """
+               a = Keyword.get(opts, :a)
+               b = Keyword.get(params, :b)
+               c = Keyword.get(opts, :c)
+               """)
+    end
+
+    test "two live-outs keep the object join, source is not consulted" do
+      # `Map.get` already yields verb fetch and two live-outs give the
+      # `a_and_b` object — `fetch_sort_by_and_sort_dir`. The source object is
+      # only reached when object_part returns nil, so it never displaces this.
+      assert {:ok, :fetch_sort_by_and_sort_dir} =
+               name(:query, [:sort_by, :sort_dir], """
+               sort_by = Map.get(filters, :sort_by)
+               sort_dir = Map.get(filters, :sort_dir)
+               """)
+    end
+  end
+
   describe "optional attribute (filter predicate adjective)" do
     test "a boolean predicate field slots an adjective between verb and object" do
       # `reject(& &1.archived)` → verb filter (reject), attribute inactive
