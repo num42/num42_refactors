@@ -168,10 +168,12 @@ defmodule Number42.Refactors.HelperNaming do
   # let the producing call name the verb. Anything else (non-call RHS, no
   # live-out bound, bare expression) yields nothing.
   defp live_out_call({:=, _, [lhs, rhs]}, live_outs) do
+    # `call_name/1` returns nil for a non-call RHS; nil is itself an atom, so a
+    # `is_atom` guard would swallow it — match nil explicitly first.
     if binds_live_out?(lhs, live_outs) do
       case call_name(rhs) do
-        fun when is_atom(fun) -> [fun]
         nil -> []
+        fun when is_atom(fun) -> [fun]
       end
     else
       []
