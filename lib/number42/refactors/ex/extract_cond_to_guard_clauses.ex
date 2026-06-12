@@ -13,13 +13,17 @@ defmodule Number42.Refactors.Ex.ExtractCondToGuardClauses do
       ↓
       def classify(n) when n < 0, do: :neg
       def classify(n) when n == 0, do: :zero
-      def classify(n), do: :pos
+      def classify(_n), do: :pos
 
   The N-branch sibling of `IfLiftToClauses`: where that lifts a two-way
   `if`/`else`, this lifts an N-way `cond`. Each non-final branch's
   condition becomes a `when` guard on a clause; the final `true ->`
   branch becomes the bare catch-all clause. Branch order is preserved,
   so dispatch semantics are identical to the `cond`'s top-to-bottom scan.
+
+  Each lifted clause gets its own parameter list: a parameter used in
+  neither the clause's guard nor its body is underscored (`_min`), so
+  the result compiles without unused-variable warnings.
 
   ## What lifts
 
@@ -200,17 +204,44 @@ defmodule Number42.Refactors.Ex.ExtractCondToGuardClauses do
   defp guard_allowed_call?(fun), do: MapSet.member?(@guard_callable, fun)
 
   defp render_clauses(kind, fn_name, params, clauses, source) do
-    head_text = "#{kind} #{fn_name}(#{param_text(params)})"
-
     clauses
-    |> Enum.map_join("\n\n", &render_clause(&1, head_text, source))
+    |> Enum.map_join("\n\n", &render_clause(&1, kind, fn_name, params, source))
   end
 
-  defp render_clause({:guard, cond_ast, body}, head_text, source),
-    do: render_body("#{head_text} when #{Sourceror.to_string(cond_ast)}", body, source)
+  defp render_clause({:guard, cond_ast, body}, kind, fn_name, params, source) do
+    head = clause_head(kind, fn_name, params, [cond_ast, body])
+    render_body("#{head} when #{Sourceror.to_string(cond_ast)}", body, source)
+  end
 
-  defp render_clause({:catch_all, body}, head_text, source),
-    do: render_body(head_text, body, source)
+  defp render_clause({:catch_all, body}, kind, fn_name, params, source),
+    do: render_body(clause_head(kind, fn_name, params, [body]), body, source)
+
+  # Each clause gets its own parameter list: params that appear in neither
+  # the guard nor the body are underscored so the lifted form compiles
+  # without unused-variable warnings.
+  defp clause_head(kind, fn_name, params, used_in) do
+    used = collect_var_names(used_in)
+    "#{kind} #{fn_name}(#{param_text(underscore_unused(params, used))})"
+  end
+
+  defp collect_var_names(asts) do
+    asts
+    |> Enum.flat_map(&Macro.prewalker/1)
+    |> Enum.reduce(MapSet.new(), fn
+      {name, _, ctx}, acc when is_atom(name) and is_atom(ctx) -> MapSet.put(acc, name)
+      _, acc -> acc
+    end)
+  end
+
+  defp underscore_unused(params, used), do: Enum.map(params, &underscore_param(&1, used))
+
+  defp underscore_param({name, meta, ctx} = param, used) do
+    if MapSet.member?(used, name) or underscored?(name),
+      do: param,
+      else: {:"_#{name}", meta, ctx}
+  end
+
+  defp underscored?(name), do: String.starts_with?(Atom.to_string(name), "_")
 
   defp render_body(head, body, source) do
     case body_lines(body, source) do
