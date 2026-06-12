@@ -62,11 +62,15 @@ defmodule Number42.Refactors.Ex.ExtractExpressionCloneTest do
 
       out = apply_refactor(@subject, source, @on ++ [min_mass: 8])
 
-      # Both call sites now delegate to one shared helper.
+      # Both call sites now delegate to one shared helper. The block ends in
+      # a bare tuple-literal return `{subtotal, taxed}` — no live-out, but its
+      # elements name the product: verb `compute` (Enum.sum), object from the
+      # tuple vars → compute_subtotal_and_taxed (not the placeholder).
       assert out =~ "def a(order) do"
-      assert out =~ "extracted_clone(order)"
-      assert out =~ "extracted_clone(cart)"
-      assert out =~ "defp extracted_clone(order) do"
+      assert out =~ "compute_subtotal_and_taxed(order)"
+      assert out =~ "compute_subtotal_and_taxed(cart)"
+      assert out =~ "defp compute_subtotal_and_taxed(order) do"
+      refute out =~ "extracted_clone"
 
       # The free variable became the single helper parameter, threaded
       # positionally at each call site (a(order) -> order, b(cart) -> cart).
@@ -585,6 +589,71 @@ defmodule Number42.Refactors.Ex.ExtractExpressionCloneTest do
       refute out =~ "{sort_field, sort_dir, limit, offset"
       assert_compiles(out)
       assert_idempotent(@subject, source, enabled: true)
+    end
+  end
+
+  describe "tuple-literal return naming (block's product, via Sourceror)" do
+    test "a block ending in a two-tuple is named after the tuple, not extracted_clone" do
+      # Regression guard for the Sourceror AST path: Sourceror wraps a
+      # 2-tuple literal as `{:__block__, _, [{a, b}]}`, not a bare `{a, b}`.
+      # HelperNaming must unwrap that to read the product names; otherwise
+      # the whole-body tuple-return clone falls back to `extracted_clone`.
+      source = """
+      defmodule M do
+        def a(order) do
+          subtotal = Enum.sum(order.lines)
+          taxed = subtotal * 1.19
+          {subtotal, taxed}
+        end
+
+        def b(cart) do
+          subtotal = Enum.sum(cart.lines)
+          taxed = subtotal * 1.19
+          {subtotal, taxed}
+        end
+      end
+      """
+
+      out = apply_refactor(@subject, source, @on ++ [min_mass: 8])
+
+      assert out =~ "defp compute_subtotal_and_taxed(order) do"
+      assert out =~ "compute_subtotal_and_taxed(order)"
+      assert out =~ "compute_subtotal_and_taxed(cart)"
+      refute out =~ "extracted_clone"
+      assert_compiles(out)
+      assert_idempotent(@subject, source, @on ++ [min_mass: 8])
+    end
+
+    test "a three-tuple return stays extracted_clone (object join caps at two)" do
+      # `{subtotal, tax, total}` — three product names. `object_part` joins at
+      # most two, there is no shared accessor source and no host, so the name
+      # honestly falls to `extracted_clone`. The tuple unwrap must not crash
+      # on the three-element `{:{}, _, elems}` shape; the extraction still
+      # happens and compiles.
+      source = """
+      defmodule M do
+        def a(order) do
+          subtotal = Enum.sum(order.lines)
+          tax = subtotal * 0.19
+          total = subtotal + tax
+          {subtotal, tax, total}
+        end
+
+        def b(cart) do
+          subtotal = Enum.sum(cart.lines)
+          tax = subtotal * 0.19
+          total = subtotal + tax
+          {subtotal, tax, total}
+        end
+      end
+      """
+
+      out = apply_refactor(@subject, source, @on ++ [min_mass: 8])
+
+      assert out =~ "defp extracted_clone(order) do"
+      assert out =~ "extracted_clone(order)"
+      assert_compiles(out)
+      assert_idempotent(@subject, source, @on ++ [min_mass: 8])
     end
   end
 
