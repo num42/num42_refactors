@@ -792,6 +792,30 @@ defmodule Number42.Refactors.Ex.IfElseToCondTest do
       """)
     end
 
+    test "partial rewrite (inner if only) is idempotent" do
+      assert_idempotent(@subject, """
+      def f(a, src, x) do
+        if a do
+          :r1
+        else
+          x = src[:k]
+
+          if x do
+            :r2
+          else
+            y = (x || 0) + 1
+
+            if y > 100 do
+              {:r3, y}
+            else
+              {:r4, y}
+            end
+          end
+        end
+      end
+      """)
+    end
+
     test "identical-outer-branches collapse is idempotent" do
       assert_idempotent(@subject, """
       def f(x) do

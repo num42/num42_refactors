@@ -442,7 +442,7 @@ defmodule Number42.Refactors.Ex.IfElseToCond do
       hoist_vars == [] -> :ok
       Enum.uniq(hoist_vars) != hoist_vars -> :error
       Enum.any?(hoist_vars, &(&1 in fn_names)) -> :error
-      Enum.any?(hoist_vars, &var_used_outside?(root, node, &1)) -> :error
+      Enum.any?(hoist_vars, var_used_outside_checker(root, node)) -> :error
       Enum.any?(type_tested_vars(conds), &ast_contains_var?(hoist_stmts, &1)) -> :error
       true -> :ok
     end
@@ -591,25 +591,31 @@ defmodule Number42.Refactors.Ex.IfElseToCond do
   # `x == nil`, …). Hoisting a binding that dereferences such a variable
   # would evaluate it eagerly on paths the guard used to protect.
   defp type_tested_vars(conds) do
-    Enum.reduce(conds, MapSet.new(), fn cond_ast, acc ->
-      {_, acc} =
-        Macro.prewalk(cond_ast, acc, fn
-          {guard, _, args} = n, acc when guard in @type_guards and is_list(args) ->
-            {n, collect_vars(args, acc)}
+    Enum.reduce(conds, MapSet.new(), &collect_type_tests/2)
+  end
 
-          {op, _, [l, r]} = n, acc when op in [:==, :===, :!=, :!==] ->
-            cond do
-              nil_literal?(l) -> {n, collect_vars([r], acc)}
-              nil_literal?(r) -> {n, collect_vars([l], acc)}
-              true -> {n, acc}
-            end
+  defp collect_type_tests(cond_ast, acc) do
+    {_, acc} =
+      Macro.prewalk(cond_ast, acc, fn
+        {guard, _, args} = n, acc when guard in @type_guards and is_list(args) ->
+          {n, collect_vars(args, acc)}
 
-          n, acc ->
-            {n, acc}
-        end)
+        {op, _, [l, r]} = n, acc when op in [:==, :===, :!=, :!==] ->
+          {n, collect_nil_compared(l, r, acc)}
 
-      acc
-    end)
+        n, acc ->
+          {n, acc}
+      end)
+
+    acc
+  end
+
+  defp collect_nil_compared(l, r, acc) do
+    cond do
+      nil_literal?(l) -> collect_vars([r], acc)
+      nil_literal?(r) -> collect_vars([l], acc)
+      true -> acc
+    end
   end
 
   defp nil_literal?(nil), do: true
@@ -627,9 +633,10 @@ defmodule Number42.Refactors.Ex.IfElseToCond do
   end
 
   # Does `var` occur in the enclosing def outside of `node` itself?
-  defp var_used_outside?(root, node, var) do
+  # The scope walk is the expensive part, so it happens once per node.
+  defp var_used_outside_checker(root, node) do
     scope = enclosing_def(root, node)
-    count_var(scope, var) > count_var(node, var)
+    fn var -> count_var(scope, var) > count_var(node, var) end
   end
 
   # Innermost def/defp containing `node`; the whole tree when none does
