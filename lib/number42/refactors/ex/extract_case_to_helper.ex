@@ -830,7 +830,7 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelper do
   # read, and that names the dispatch better. Non-accessor calls keep their
   # name (`Keyword.pop(opts, :provider)` → `handle_<host>_pop`, since the
   # `:provider` there is a lookup key, not the value's identity).
-  @noun_accessor_calls ~w(get get! fetch fetch! get_env fetch_env get_in get_lazy)a
+  @noun_accessor_call_strings ~w(get get! fetch fetch! get_env fetch_env get_in get_lazy)
 
   defp synth_handler_name(host_name, scrutinee_name, scrutinee, clauses) do
     noun = scrutinee_noun(scrutinee, scrutinee_name) || scrutinee_name
@@ -855,10 +855,11 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelper do
 
   defp scrutinee_noun(_, _), do: nil
 
-  defp accessor_call?(name) when is_binary(name),
-    do: String.to_atom(name) in @noun_accessor_calls
-
-  defp accessor_call?(_), do: false
+  # `scrutinee_name` always arrives as a string (from `callee_name/1`'s
+  # `Atom.to_string`), so a single binary clause is total. Compare against the
+  # accessor names as strings — no `String.to_atom` (avoids growing the atom
+  # table from arbitrary source-derived names).
+  defp accessor_call?(name) when is_binary(name), do: name in @noun_accessor_call_strings
 
   defp usable_noun_atom(atom) when atom in [nil, true, false], do: nil
 

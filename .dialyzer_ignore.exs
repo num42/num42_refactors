@@ -115,5 +115,18 @@
   {"lib/number42/refactors/ex/extract_parametric_clone.ex", :call_without_opaque},
   {"lib/number42/refactors/ex/extract_renamed_clone.ex", :call_without_opaque},
   {"lib/number42/refactors/ex/extract_shared_module.ex", :call_without_opaque},
-  {"lib/number42/refactors/ex/unused_variable.ex", :call_without_opaque}
+  {"lib/number42/refactors/ex/unused_variable.ex", :call_without_opaque},
+
+  # ---------------------------------------------------------------------------
+  # Category C — dev-only generator deps absent from the PLT.
+  #
+  # `mix n42.gen.predicate_model` is a dev-only Mix task (under `dev/`, only
+  # compiled for `Mix.env() == :dev`). It calls `Tokenizers`, `Safetensors`
+  # and `Nx`, which are declared `only: :dev, runtime: false` in mix.exs — so
+  # the task can build the frozen model JSON locally, but those apps are never
+  # part of a normal build and are absent from the Dialyzer PLT. Dialyzer then
+  # reports every call into them as `unknown_function`. The runtime never runs
+  # this task or loads these deps (it reads the committed JSON); the task is
+  # exercised by hand when regenerating the model. Scope the noise to the file.
+  {"dev/mix/tasks/n42.gen.predicate_model.ex", :unknown_function}
 ]
