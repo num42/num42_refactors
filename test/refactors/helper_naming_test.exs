@@ -306,6 +306,45 @@ defmodule Number42.Refactors.HelperNamingTest do
     end
   end
 
+  describe "map-literal return (block's product names it)" do
+    test "a block ending in a bare map literal names after its product, not _block" do
+      # No live-out — the map `%{item:, brand_item:, latest_price:}` IS the
+      # return. Three keys give no object join and no shared accessor source,
+      # but the multi-token host `surcharge_options` reads as more than a bare
+      # verb, so strip_suffix keeps it: `surcharge_options`, not the mechanical
+      # `_block` fallback. The point: the map keys are *seen* (no crash) and a
+      # meaningful host name survives instead of the extracted_ garbage.
+      assert {:ok, :surcharge_options} =
+               name(:surcharge_options, [], """
+               matching_bi = Map.get(brand_items_by_key, {item.id, bi.brand_id})
+
+               %{
+                 item: item,
+                 brand_item: matching_bi,
+                 latest_price: latest_price(matching_bi)
+               }
+               """)
+    end
+
+    test "a two-key map literal return joins the keys under the verb" do
+      assert {:ok, :compute_subtotal_and_taxed} =
+               name(nil, [], """
+               subtotal = compute(order)
+               %{subtotal: subtotal, taxed: subtotal * 1.19}
+               """)
+    end
+
+    test "string-keyed and non-meaningful map keys are dropped" do
+      # `%{"raw" => x, id: id}` — only the atom-key `id` is a meaningful name
+      # source; the string key contributes nothing.
+      assert {:ok, :run_block} =
+               name(:run, [], """
+               x = thing()
+               %{"raw" => x, id: x}
+               """)
+    end
+  end
+
   describe "optional attribute (filter predicate adjective)" do
     test "a boolean predicate field slots an adjective between verb and object" do
       # `reject(& &1.archived)` → verb filter (reject), attribute inactive

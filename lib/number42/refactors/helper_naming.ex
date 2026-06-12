@@ -114,7 +114,9 @@ defmodule Number42.Refactors.HelperNaming do
     # elements describe exactly what the helper produces. They join the
     # live-outs as a naming-only object source — they never widen the
     # extraction's actual live-out, only the name.
-    naming_live_out = live_out ++ tail_tuple_vars(stmts, live_out)
+    naming_live_out =
+      live_out ++ tail_tuple_vars(stmts, live_out) ++ tail_map_keys(stmts, live_out)
+
     verb = infer_verb(stmts, naming_live_out)
     object = object_part(naming_live_out)
     source = source_object(stmts, naming_live_out)
@@ -194,6 +196,40 @@ defmodule Number42.Refactors.HelperNaming do
   defp tuple_elems({:__block__, _, [inner]}), do: tuple_elems(inner)
   defp tuple_elems({a, b}), do: [a, b]
   defp tuple_elems(_), do: nil
+
+  # Key names of a trailing bare-map-literal return — the block's own
+  # product, used for naming only. `%{item: ..., brand_item: ..., latest_price:
+  # ...}` as the last statement gives `[:item, :brand_item, :latest_price]`.
+  # Only atom keys count (string keys can't seed an identifier); names already
+  # in `live_out` are dropped and only meaningful keys survive. Like the tail
+  # tuple these never widen the extraction — the map already IS the return;
+  # they widen the *name* only. A non-map tail yields `[]`.
+  defp tail_map_keys(stmts, live_out) do
+    case map_keys(List.last(stmts)) do
+      nil -> []
+      keys -> nameable_keys(keys, live_out)
+    end
+  end
+
+  # The atom-key list of a map-literal node, or nil if not a map literal.
+  # Sourceror wraps the literal as `{:%{}, _, pairs}`; a single-child block
+  # wrapper is unwrapped first (same metadata-carrying shape as tuples).
+  defp map_keys({:%{}, _, pairs}) when is_list(pairs), do: pairs
+  defp map_keys({:__block__, _, [inner]}), do: map_keys(inner)
+  defp map_keys(_), do: nil
+
+  defp nameable_keys(pairs, live_out) do
+    seen = MapSet.new(live_out)
+
+    pairs
+    |> Enum.flat_map(fn
+      {key, _value} when is_atom(key) -> [key]
+      _ -> []
+    end)
+    |> Enum.reject(&(&1 in seen))
+    |> Enum.filter(&meaningful_name?/1)
+    |> Enum.uniq()
+  end
 
   defp nameable_tuple_vars(elems, live_out) do
     seen = MapSet.new(live_out)

@@ -468,7 +468,7 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelper do
          # nested case/if/with, map literal, list literal, &-capture,
          # lambda, raise/throw/exit, block, …).
          false <- non_complex_case?(clauses) do
-      base_name = synth_handler_name(host_name, scrutinee_name, clauses)
+      base_name = synth_handler_name(host_name, scrutinee_name, scrutinee, clauses)
 
       head_params =
         head |> function_param_patterns() |> Enum.flat_map(&pattern_var_names/1) |> MapSet.new()
@@ -818,11 +818,58 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelper do
 
   # Name the helper after what the dispatch *decides on* — the clause
   # patterns — when those patterns form a recognizable family, else fall
-  # back to the mechanical `handle_<host>_<scrutinee>` (the scrutinee
-  # call name). Pattern-derived names beat call-derived ones: the call
-  # is "how we got the value", the patterns are "what we branch on".
-  defp synth_handler_name(host_name, scrutinee_name, clauses) do
-    generate_function_name("handle", scrutinee_name, %{host: host_name, clauses: clauses})
+  # back to a name built from the scrutinee. Pattern-derived names beat
+  # call-derived ones: the call is "how we got the value", the patterns
+  # are "what we branch on".
+  #
+  # For the call-derived fallback the noun is the scrutinee's last
+  # meaningful atom-literal argument when the scrutinee is an *accessor*
+  # call — `Application.get_env(:position_db, :schema_prefix)` reads as
+  # `handle_schema_prefix`, not the generic `handle_get_env`. An accessor
+  # (`get`/`fetch`/`get_env`/…) says *how* we read; the atom says *what* we
+  # read, and that names the dispatch better. Non-accessor calls keep their
+  # name (`Keyword.pop(opts, :provider)` → `handle_<host>_pop`, since the
+  # `:provider` there is a lookup key, not the value's identity).
+  @noun_accessor_calls ~w(get get! fetch fetch! get_env fetch_env get_in get_lazy)a
+
+  defp synth_handler_name(host_name, scrutinee_name, scrutinee, clauses) do
+    noun = scrutinee_noun(scrutinee, scrutinee_name) || scrutinee_name
+    generate_function_name("handle", noun, %{host: host_name, clauses: clauses})
+  end
+
+  # The scrutinee's last meaningful atom-literal argument, as a string, or
+  # nil — only for accessor calls. The *last* atom wins:
+  # `get_env(:app, :schema_prefix)` keys off the specific `:schema_prefix`,
+  # not the app namespace.
+  defp scrutinee_noun({_callee, _meta, args}, scrutinee_name) when is_list(args) do
+    if accessor_call?(scrutinee_name) do
+      args
+      |> Enum.reverse()
+      |> Enum.find_value(fn
+        {:__block__, _, [atom]} when is_atom(atom) -> usable_noun_atom(atom)
+        atom when is_atom(atom) -> usable_noun_atom(atom)
+        _ -> nil
+      end)
+    end
+  end
+
+  defp scrutinee_noun(_, _), do: nil
+
+  defp accessor_call?(name) when is_binary(name),
+    do: String.to_atom(name) in @noun_accessor_calls
+
+  defp accessor_call?(_), do: false
+
+  defp usable_noun_atom(atom) when atom in [nil, true, false], do: nil
+
+  defp usable_noun_atom(atom) do
+    str = Atom.to_string(atom)
+
+    cond do
+      String.contains?(str, "_") and String.length(str) > 2 -> str
+      String.length(str) > 3 -> str
+      true -> nil
+    end
   end
 
   defp unwrap_when({:when, _meta, [pat, guard]}), do: {pat, guard}
