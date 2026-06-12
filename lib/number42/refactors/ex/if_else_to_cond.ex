@@ -24,17 +24,28 @@ defmodule Number42.Refactors.Ex.IfElseToCond do
   ## When this fires
 
   - Outer `if/else` whose last expression in `do` or `else` branch is
-    another `if/else` (the inner one must have an `else`)
-  - With pre-statements in the branch: a local anonymous function is
-    extracted before the cond
+    another `if/else` (the inner one must have an `else`); linear chains
+    of any depth flatten to one arm per level
+  - With pre-statements in the branch: when the inner condition is
+    exactly the bound variable, a local anonymous function is extracted
+    before the cond (lazy, evaluated at most once); when the condition
+    is a compound expression referencing the binding, pure bindings are
+    hoisted verbatim before the cond and every guard survives as a
+    conjunction (issue #8)
   - When outer branches are structurally identical, the outer `if` is
     dropped and only the inner logic survives as `cond`
 
   ## When this skips
 
   - Inner `if` has no `else` (would change semantics)
+  - Both `do` and `else` nest a distinct `if/else` (non-linear shape)
   - Extracted helper fn would need to be called in more than one cond
     branch (would duplicate side-effects or computation)
+  - A pre-statement is not a pure binding (function calls count as
+    impure — hoisting would evaluate them eagerly)
+  - The bound name occurs elsewhere in the enclosing def (parameter,
+    earlier binding, use after the `if`) or repeats across levels —
+    hoisting would rebind it for foreign scopes
   """
 
   use Number42.Refactors.Refactor

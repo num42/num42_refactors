@@ -113,6 +113,39 @@ defmodule Number42.Refactors.Ex.IfElseToCondTest do
       assert_rewrites(@subject, before_source, after_source)
     end
 
+    test "three-level linear else-chain flattens to a single cond" do
+      before_source = """
+      def f(x) do
+        if a do
+          x1
+        else
+          if b do
+            y1
+          else
+            if c do
+              z1
+            else
+              default
+            end
+          end
+        end
+      end
+      """
+
+      after_source = """
+      def f(x) do
+        cond do
+          a -> x1
+          b -> y1
+          c -> z1
+          true -> default
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, after_source)
+    end
+
     test "branches contain multi-statement bodies (no pre-statements before nested if)" do
       before_source = """
       def f(x) do
@@ -490,6 +523,26 @@ defmodule Number42.Refactors.Ex.IfElseToCondTest do
       end
       """)
     end
+
+    test "non-linear nest (both do and else nest a distinct if) — skip" do
+      assert_unchanged(@subject, """
+      def f(x) do
+        if a do
+          if b do
+            x1
+          else
+            x2
+          end
+        else
+          if c do
+            y1
+          else
+            y2
+          end
+        end
+      end
+      """)
+    end
   end
 
   describe "idempotent" do
@@ -522,6 +575,44 @@ defmodule Number42.Refactors.Ex.IfElseToCondTest do
           else
             add_error(changeset, field, "is invalid")
           end
+        end
+      end
+      """)
+    end
+
+    test "three-level flattening is idempotent" do
+      assert_idempotent(@subject, """
+      def f(x) do
+        if a do
+          x1
+        else
+          if b do
+            y1
+          else
+            if c do
+              z1
+            else
+              default
+            end
+          end
+        end
+      end
+      """)
+    end
+
+    test "binding hoist is idempotent" do
+      assert_idempotent(@subject, """
+      def f(state, next) do
+        if next == nil do
+          total = state.a + state.b
+
+          if total > 0 do
+            vote
+          else
+            novote
+          end
+        else
+          novote
         end
       end
       """)
