@@ -5,13 +5,13 @@ defmodule Number42.Refactors.Ex.ExtractCondToGuardClausesTest do
 
   @subject ExtractCondToGuardClauses
 
-  describe "guard-expressible cond" do
-    test "comparison branches become guard clauses with a true catch-all" do
+  describe "guard-expressible cond with a clause-worthy branch" do
+    test "a multi-stage pipe branch lifts the whole cond" do
       before_source = """
       defmodule M do
         def classify(n) do
           cond do
-            n < 0 -> :neg
+            n < 0 -> n |> abs() |> Integer.to_string()
             n == 0 -> :zero
             true -> :pos
           end
@@ -21,7 +21,7 @@ defmodule Number42.Refactors.Ex.ExtractCondToGuardClausesTest do
 
       expected = """
       defmodule M do
-        def classify(n) when n < 0, do: :neg
+        def classify(n) when n < 0, do: n |> abs() |> Integer.to_string()
         def classify(n) when n == 0, do: :zero
         def classify(_n), do: :pos
       end
@@ -30,13 +30,15 @@ defmodule Number42.Refactors.Ex.ExtractCondToGuardClausesTest do
       assert_rewrites(@subject, before_source, expected)
     end
 
-    test "BIF and boolean-combined guards lift" do
+    test "BIF and boolean-combined guards lift around a block branch" do
       before_source = """
       defmodule M do
         def kind(x) do
           cond do
             is_atom(x) -> :atom
-            is_integer(x) and x > 10 -> :big_int
+            is_integer(x) and x > 10 ->
+              doubled = x * 2
+              {:big_int, doubled}
             true -> :other
           end
         end
@@ -46,7 +48,12 @@ defmodule Number42.Refactors.Ex.ExtractCondToGuardClausesTest do
       expected = """
       defmodule M do
         def kind(x) when is_atom(x), do: :atom
-        def kind(x) when is_integer(x) and x > 10, do: :big_int
+
+        def kind(x) when is_integer(x) and x > 10 do
+          doubled = x * 2
+          {:big_int, doubled}
+        end
+
         def kind(_x), do: :other
       end
       """
@@ -89,7 +96,7 @@ defmodule Number42.Refactors.Ex.ExtractCondToGuardClausesTest do
       defmodule M do
         defp tier(score) do
           cond do
-            score >= 90 -> :gold
+            score >= 90 -> score |> Integer.to_string() |> String.pad_leading(3)
             score >= 50 -> :silver
             true -> :bronze
           end
@@ -99,7 +106,7 @@ defmodule Number42.Refactors.Ex.ExtractCondToGuardClausesTest do
 
       expected = """
       defmodule M do
-        defp tier(score) when score >= 90, do: :gold
+        defp tier(score) when score >= 90, do: score |> Integer.to_string() |> String.pad_leading(3)
         defp tier(score) when score >= 50, do: :silver
         defp tier(_score), do: :bronze
       end
@@ -113,11 +120,11 @@ defmodule Number42.Refactors.Ex.ExtractCondToGuardClausesTest do
     test "params unused in a clause are underscored" do
       before_source = """
       defmodule M do
-        defp clamp(is, min, max) do
+        defp describe_range(n, min, max) do
           cond do
-            is > max -> max
-            is < min -> min
-            true -> is
+            n < min -> n |> Kernel.-(min) |> abs()
+            n > max -> :above
+            true -> :inside
           end
         end
       end
@@ -125,9 +132,9 @@ defmodule Number42.Refactors.Ex.ExtractCondToGuardClausesTest do
 
       expected = """
       defmodule M do
-        defp clamp(is, _min, max) when is > max, do: max
-        defp clamp(is, min, _max) when is < min, do: min
-        defp clamp(is, _min, _max), do: is
+        defp describe_range(n, min, _max) when n < min, do: n |> Kernel.-(min) |> abs()
+        defp describe_range(n, _min, max) when n > max, do: :above
+        defp describe_range(_n, _min, _max), do: :inside
       end
       """
 
@@ -139,8 +146,12 @@ defmodule Number42.Refactors.Ex.ExtractCondToGuardClausesTest do
       defmodule M do
         def pick(a, b) do
           cond do
-            a > 0 -> b
-            true -> a
+            a > 0 ->
+              doubled = b * 2
+              doubled
+
+            true ->
+              a
           end
         end
       end
@@ -148,7 +159,11 @@ defmodule Number42.Refactors.Ex.ExtractCondToGuardClausesTest do
 
       expected = """
       defmodule M do
-        def pick(a, b) when a > 0, do: b
+        def pick(a, b) when a > 0 do
+          doubled = b * 2
+          doubled
+        end
+
         def pick(a, _b), do: a
       end
       """
@@ -161,8 +176,12 @@ defmodule Number42.Refactors.Ex.ExtractCondToGuardClausesTest do
       defmodule M do
         def f(n, _opts) do
           cond do
-            n > 0 -> :pos
-            true -> :neg
+            n > 0 ->
+              x = n * 2
+              x + 1
+
+            true ->
+              :neg
           end
         end
       end
@@ -176,11 +195,14 @@ defmodule Number42.Refactors.Ex.ExtractCondToGuardClausesTest do
     test "applying twice equals applying once" do
       before_source = """
       defmodule M do
-        def classify(n) do
+        def step(n) do
           cond do
-            n < 0 -> :neg
-            n == 0 -> :zero
-            true -> :pos
+            n > 0 ->
+              x = n * 2
+              x + 1
+
+            true ->
+              0
           end
         end
       end
@@ -194,7 +216,7 @@ defmodule Number42.Refactors.Ex.ExtractCondToGuardClausesTest do
       defmodule CondCompileCheck do
         def classify(n) do
           cond do
-            n < 0 -> :neg
+            n < 0 -> n |> abs() |> Integer.to_string()
             n == 0 -> :zero
             true -> :pos
           end
@@ -218,13 +240,46 @@ defmodule Number42.Refactors.Ex.ExtractCondToGuardClausesTest do
     end
   end
 
+  describe "skips — complexity heuristic (inverse of MergeClausesIntoCondOrGuard)" do
+    test "skips when every branch body is simple" do
+      source = """
+      defmodule M do
+        def classify(n) do
+          cond do
+            n < 0 -> :neg
+            n == 0 -> :zero
+            true -> :pos
+          end
+        end
+      end
+      """
+
+      assert_unchanged(@subject, source)
+    end
+
+    test "a single-stage pipe is still a simple body" do
+      source = """
+      defmodule M do
+        def classify(n) do
+          cond do
+            n < 0 -> n |> abs()
+            true -> n
+          end
+        end
+      end
+      """
+
+      assert_unchanged(@subject, source)
+    end
+  end
+
   describe "skips" do
     test "skips when a branch condition is not guard-safe" do
       source = """
       defmodule M do
         def classify(n) do
           cond do
-            valid?(n) -> :ok
+            valid?(n) -> n |> abs() |> Integer.to_string()
             n == 0 -> :zero
             true -> :other
           end
@@ -242,7 +297,7 @@ defmodule Number42.Refactors.Ex.ExtractCondToGuardClausesTest do
           threshold = 10
 
           cond do
-            n > threshold -> :big
+            n > threshold -> n |> abs() |> Integer.to_string()
             true -> :small
           end
         end
@@ -257,7 +312,7 @@ defmodule Number42.Refactors.Ex.ExtractCondToGuardClausesTest do
       defmodule M do
         def classify(n) do
           cond do
-            n < 0 -> :neg
+            n < 0 -> n |> abs() |> Integer.to_string()
             n >= 0 -> :nonneg
           end
         end
@@ -272,7 +327,7 @@ defmodule Number42.Refactors.Ex.ExtractCondToGuardClausesTest do
       defmodule M do
         def classify(n) when is_number(n) do
           cond do
-            n < 0 -> :neg
+            n < 0 -> n |> abs() |> Integer.to_string()
             true -> :nonneg
           end
         end
@@ -287,7 +342,7 @@ defmodule Number42.Refactors.Ex.ExtractCondToGuardClausesTest do
       defmodule M do
         def classify(%{n: n}) do
           cond do
-            n < 0 -> :neg
+            n < 0 -> n |> abs() |> Integer.to_string()
             true -> :nonneg
           end
         end
@@ -304,7 +359,7 @@ defmodule Number42.Refactors.Ex.ExtractCondToGuardClausesTest do
           log(n)
 
           cond do
-            n < 0 -> :neg
+            n < 0 -> n |> abs() |> Integer.to_string()
             true -> :nonneg
           end
         end
@@ -319,7 +374,7 @@ defmodule Number42.Refactors.Ex.ExtractCondToGuardClausesTest do
       defmodule M do
         def classify(s) do
           cond do
-            String.length(s) > 3 -> :long
+            String.length(s) > 3 -> s |> String.upcase() |> String.reverse()
             true -> :short
           end
         end
@@ -334,7 +389,7 @@ defmodule Number42.Refactors.Ex.ExtractCondToGuardClausesTest do
       defmodule M do
         defmacro classify(n) do
           cond do
-            n < 0 -> :neg
+            n < 0 -> n |> abs() |> Integer.to_string()
             true -> :nonneg
           end
         end

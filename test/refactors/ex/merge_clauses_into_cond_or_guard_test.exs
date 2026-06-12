@@ -208,6 +208,58 @@ defmodule Number42.Refactors.Ex.MergeClausesIntoCondOrGuardTest do
     end
   end
 
+  describe "leaves alone — complexity heuristic (inverse of ExtractCondToGuardClauses)" do
+    test "a multi-statement clause body stays a clause" do
+      source = """
+      defmodule M do
+        defp format_ago(seconds) when seconds < 60, do: "just now"
+
+        defp format_ago(seconds) when seconds < 3600 do
+          minutes = div(seconds, 60)
+          if minutes == 1, do: "1 minute ago", else: "\#{minutes} minutes ago"
+        end
+
+        defp format_ago(seconds), do: "long ago"
+      end
+      """
+
+      assert_unchanged(@subject, source)
+    end
+
+    test "a clause body with a multi-stage pipe stays a clause" do
+      source = """
+      defmodule M do
+        def label(n) when n < 0, do: n |> abs() |> Integer.to_string()
+        def label(n), do: "rest"
+      end
+      """
+
+      assert_unchanged(@subject, source)
+    end
+
+    test "a single-stage pipe body still merges" do
+      before_source = """
+      defmodule M do
+        def label(n) when n < 0, do: n |> abs()
+        def label(n), do: n
+      end
+      """
+
+      expected = """
+      defmodule M do
+        def label(n) do
+          cond do
+            n < 0 -> n |> abs()
+            true -> n
+          end
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, expected)
+    end
+  end
+
   describe "leaves alone (skip cases)" do
     test "no total fallback → would-be CondClauseError, skip" do
       source = """
