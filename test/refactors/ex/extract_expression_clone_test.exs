@@ -418,11 +418,13 @@ defmodule Number42.Refactors.Ex.ExtractExpressionCloneTest do
       assert_idempotent(@subject, source, @on ++ [min_mass: 6])
     end
 
-    test "skips extraction when every candidate name (incl. fallback) is taken" do
-      # Single arithmetic-bound live-out → no verb, a lone object can't
-      # stand alone, so the only candidate is the `:extracted_clone`
-      # fallback. Occupying it leaves HelperNaming no free name → the whole
-      # extraction is skipped rather than emit a clashing helper.
+    test "diversifies the fallback when extracted_clone is already a def in the module" do
+      # Single arithmetic-bound live-out → no verb, a lone object can't stand
+      # alone, so the only candidate is the `:extracted_clone` fallback. A
+      # pre-existing `extracted_clone/1` occupies that name; rather than skip
+      # the extraction (the old single-slot behaviour, which silently dropped
+      # the clone), the refactor diversifies to the next free placeholder
+      # `extracted_clone_2` and extracts.
       source = """
       defmodule M do
         def log_invoice(_), do: :ok
@@ -443,7 +445,68 @@ defmodule Number42.Refactors.Ex.ExtractExpressionCloneTest do
       end
       """
 
-      assert_unchanged(@subject, source, @on ++ [min_mass: 6])
+      out = apply_refactor(@subject, source, @on ++ [min_mass: 6])
+
+      # The pre-existing def is untouched; the helper takes the next slot.
+      assert out =~ "def extracted_clone(_), do: :taken"
+      assert out =~ "defp extracted_clone_2(order) do"
+      assert out =~ "taxed = extracted_clone_2(order)"
+      assert out =~ "taxed = extracted_clone_2(cart)"
+      assert_compiles(out)
+      assert_idempotent(@subject, source, @on ++ [min_mass: 6])
+    end
+
+    test "two distinct unnameable clone groups are both extracted in one pass" do
+      # The bug the diversified fallback fixes: two structurally DIFFERENT
+      # clone groups, each unnameable (arithmetic-only, no verb, single
+      # live-out). Both want `extracted_clone`. The single-slot fallback gave
+      # it to the first and skipped the second — a re-run re-derived the same
+      # taken name and skipped again, so the second clone was lost forever.
+      # Now the second group takes `extracted_clone_2`; both are lifted in one
+      # pass and the result is idempotent.
+      source = """
+      defmodule M do
+        def t1(_), do: :ok
+        def t2(_), do: :ok
+        def t3(_), do: :ok
+        def t4(_), do: :ok
+
+        def a(x) do
+          p = x + 1
+          q = p * 2
+          t1(q)
+        end
+
+        def b(y) do
+          p = y + 1
+          q = p * 2
+          t2(q)
+        end
+
+        def c(m) do
+          r = m - 7
+          s = r * 9
+          t3(s)
+        end
+
+        def d(n) do
+          r = n - 7
+          s = r * 9
+          t4(s)
+        end
+      end
+      """
+
+      out = apply_refactor(@subject, source, @on ++ [min_mass: 6])
+
+      # Both distinct groups got their own placeholder — neither was dropped.
+      assert out =~ "defp extracted_clone("
+      assert out =~ "defp extracted_clone_2("
+      # Each group's pair of call sites delegates to the same helper.
+      assert length(Regex.scan(~r/defp extracted_clone\(/, out)) == 1
+      assert length(Regex.scan(~r/defp extracted_clone_2\(/, out)) == 1
+      assert_compiles(out)
+      assert_idempotent(@subject, source, @on ++ [min_mass: 6])
     end
   end
 

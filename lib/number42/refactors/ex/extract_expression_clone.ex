@@ -132,9 +132,20 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
   einem existierenden `def`/`defp` im Modul und schattet keinen live-out-
   oder Parameter-Namen. Ist ein abgeleiteter Name belegt, weicht der
   Refactor auf den nächsten freien Kandidaten aus
-  (`compute_subtotal_and_taxed` belegt → `subtotal_and_taxed`). Ist selbst
-  der Fallback belegt, wird die Extraktion **übersprungen** statt einen
-  kaputten Namen zu emittieren (analog `ExtractFunctionFromBlock`).
+  (`compute_subtotal_and_taxed` belegt → `subtotal_and_taxed`).
+
+  **Diversifizierter Fallback**: Lässt sich kein Name ableiten, hieße der
+  Helper `:extracted_clone`. Wollen aber *zwei verschiedene* unbenennbare
+  Gruppen in einem Pass diesen einen Namen, bekam früher die erste ihn und
+  die zweite wurde **übersprungen** — und ein Re-Run leitet denselben
+  belegten Namen erneut ab und überspringt wieder: die Gruppe ist
+  *verloren*, nicht aufgeschoben. Der Fallback ist daher der erste freie
+  `extracted_clone` / `extracted_clone_2` / `extracted_clone_3` … gegen die
+  im Pass wachsende `existing_names`-Menge — jede unbenennbare Gruppe bekommt
+  ihren eigenen ehrlichen Platzhalter und wird extrahiert. Idempotent: sind
+  die Klone erst gehoben, findet ein Re-Run keine mehr, also keine
+  `extracted_clone_N`-Inflation. Nur wenn *gar kein* nummerierter Fallback
+  frei wäre (praktisch nie), bliebe die Extraktion aus.
 
   ## SICHERHEITS-FALLEN (siehe auch Bericht)
 
@@ -715,9 +726,35 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
   # existing definition — in which case the whole extraction is skipped
   # rather than emit a confusing or clashing name (mirrors
   # `ExtractFunctionFromBlock`).
+  #
+  # The fallback is *diversified*, not single-slot: when nothing nameable
+  # surfaces, the helper would be `extracted_clone` — but two distinct
+  # unnameable groups in one pass both want that one name. The single-slot
+  # version handed it to the first and let `HelperNaming` `:skip` the rest,
+  # silently dropping genuine clones (a re-run re-derives the same taken
+  # name and skips again — they are lost, not deferred). Instead the
+  # fallback is the first free `extracted_clone` / `extracted_clone_2` /
+  # `extracted_clone_3` … against the pass's growing `existing_names`, so
+  # each unnameable group gets its own honest placeholder and is extracted.
+  # Idempotent: once the clones are lifted, a re-run finds none, so no
+  # `extracted_clone_N` inflation occurs.
   defp synth_name(%{stmts: stmts, free_vars: free, live_out: live}, existing_names) do
-    HelperNaming.name(nil, live, stmts, free, existing_names, fallback: :extracted_clone)
+    fallback = free_fallback(existing_names)
+    HelperNaming.name(nil, live, stmts, free, existing_names, fallback: fallback)
   end
+
+  # The first `extracted_clone` / `extracted_clone_2` / … not already taken
+  # this pass. `extracted_clone` (no suffix) stays the first choice so the
+  # common single-clone case keeps its established name; numbering only
+  # kicks in for a second unnameable group sharing the pass.
+  defp free_fallback(existing_names) do
+    Stream.iterate(1, &(&1 + 1))
+    |> Stream.map(&fallback_name/1)
+    |> Enum.find(&(not MapSet.member?(existing_names, &1)))
+  end
+
+  defp fallback_name(1), do: :extracted_clone
+  defp fallback_name(n), do: :"extracted_clone_#{n}"
 
   # Replace the occurrence's source range with the helper call. The free
   # vars of THIS occurrence (in fingerprint-canonical order) are the call
