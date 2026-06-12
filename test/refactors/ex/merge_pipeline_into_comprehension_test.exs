@@ -456,6 +456,102 @@ defmodule Number42.Refactors.Ex.MergePipelineIntoComprehensionTest do
     end
   end
 
+  describe "rewrites — reject form" do
+    test "operator-rooted reject pred fuses with parenthesized bang-negation" do
+      assert_rewrites(
+        @subject,
+        """
+        defmodule M do
+          def go(coll) do
+            coll
+            |> Enum.reject(&(&1 > 0))
+            |> Enum.map(&(&1 * 2))
+          end
+        end
+        """,
+        """
+        defmodule M do
+          def go(coll) do
+            for x <- coll, !(x > 0), do: x * 2
+          end
+        end
+        """
+      )
+    end
+
+    test "call-rooted reject pred negates without parens" do
+      assert_rewrites(
+        @subject,
+        """
+        defmodule M do
+          def go(coll) do
+            coll
+            |> Enum.reject(fn m -> Map.has_key?(m, :id) end)
+            |> Enum.map(fn m -> Map.get(m, :id) end)
+          end
+        end
+        """,
+        """
+        defmodule M do
+          def go(coll) do
+            for m <- coll, !Map.has_key?(m, :id), do: Map.get(m, :id)
+          end
+        end
+        """
+      )
+    end
+  end
+
+  describe "leaves alone — reject shapes" do
+    test "impure reject pred (dot-access) is not fused" do
+      assert_unchanged(@subject, """
+      defmodule M do
+        def go(coll) do
+          coll
+          |> Enum.reject(& &1.active)
+          |> Enum.map(& &1.id)
+        end
+      end
+      """)
+    end
+
+    test "function-reference reject capture has no body to splice" do
+      assert_unchanged(@subject, """
+      defmodule M do
+        def go(coll) do
+          coll
+          |> Enum.reject(&is_nil/1)
+          |> Enum.map(&double/1)
+        end
+      end
+      """)
+    end
+
+    test "reject without a downstream map" do
+      assert_unchanged(@subject, """
+      defmodule M do
+        def go(coll) do
+          coll |> Enum.reject(&(&1 > 0))
+        end
+      end
+      """)
+    end
+  end
+
+  describe "idempotent — reject form" do
+    test "reject rewrite is idempotent" do
+      assert_idempotent(@subject, """
+      defmodule M do
+        def go(coll) do
+          coll
+          |> Enum.reject(&(&1 > 0))
+          |> Enum.map(&(&1 * 2))
+        end
+      end
+      """)
+    end
+  end
+
   describe "idempotent" do
     test "capture-form rewrite is idempotent" do
       assert_idempotent(@subject, """

@@ -62,6 +62,11 @@ function that already does the same thing.
 
 > Convert single-call lambdas in Enum/Stream HOFs to `&`-capture form.
 
+### `Number42.Refactors.Ex.EnumFindToKeyfind`
+
+> `Enum.find(list, fn {k, _} -> k == key end)` →
+> `List.keyfind(list, key, 0)`.
+
 ### `Number42.Refactors.Ex.EnumIntoToMapNew`
 
 > `Enum.into(coll, %{})` → `Map.new(coll)`.
@@ -91,6 +96,19 @@ function that already does the same thing.
 ### `Number42.Refactors.Ex.MapNewToPipe`
 
 > `Map.new(coll)` → `coll |> Map.new()`.
+
+### `Number42.Refactors.Ex.MapSumToSumBy`
+
+> `Enum.map(coll, fun) |> Enum.sum()` → `Enum.sum_by(coll, fun)`.
+
+### `Number42.Refactors.Ex.MemberToInOperator`
+
+> `Enum.member?(coll, x)` → `x in coll` (negated calls → `not in`).
+
+### `Number42.Refactors.Ex.MergePipelineIntoComprehension`
+
+> `coll |> Enum.filter/reject(pred) |> Enum.map(f)` →
+> `for x <- coll, [!]pred(x), do: f(x)` (pure bodies only).
 
 ### `Number42.Refactors.Ex.ReduceAsMap`
 

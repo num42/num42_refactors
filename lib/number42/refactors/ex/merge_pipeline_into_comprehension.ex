@@ -25,10 +25,21 @@ defmodule Number42.Refactors.Ex.MergePipelineIntoComprehension do
   impure is left for a human (mirrors `FlatMapToFilter` deferring the
   `filter + map` shape).
 
+  ## The reject variant
+
+  `coll |> Enum.reject(p) |> Enum.map(m)` fuses the same way with the
+  filter negated: `for x <- coll, !p(x), do: m(x)`. The negation uses
+  `Kernel.!/1`, **not** `Kernel.not/1` — `Enum.reject` drops elements
+  whose predicate returns any *truthy* value, and `!` preserves exactly
+  that truthiness semantics where strict-boolean `not` would raise on a
+  `nil` predicate result. Predicates rooted in a binary/unary operator
+  are parenthesized (`!(x > 0)`) so the `!` never re-associates.
+
   ## What we match
 
-  - Host: `coll |> Enum.filter(p) |> Enum.map(m)` — the canonical
-    two-stage pipe, `Enum` exactly (aliased `MyEnum` is left alone).
+  - Host: `coll |> Enum.filter(p) |> Enum.map(m)` (or `Enum.reject`) —
+    the canonical two-stage pipe, `Enum` exactly (aliased `MyEnum` is
+    left alone).
   - `coll` must **not itself be a pipe** — fusing `a |> b() |> filter |>
     map` would emit a pipe inside the generator head, which reads worse
     than the original. Leave it for the user to pre-extract a binding.
@@ -67,7 +78,7 @@ defmodule Number42.Refactors.Ex.MergePipelineIntoComprehension do
 
   @impl Number42.Refactors.Refactor
   def description,
-    do: "coll |> Enum.filter(pred) |> Enum.map(f) -> for x <- coll, pred(x), do: f(x)"
+    do: "coll |> Enum.filter/reject(pred) |> Enum.map(f) -> for x <- coll, [!]pred(x), do: f(x)"
 
   @impl Number42.Refactors.Refactor
   def explanation do
@@ -97,14 +108,27 @@ defmodule Number42.Refactors.Ex.MergePipelineIntoComprehension do
 
   defp apply_patches({:error, _}, source), do: source
 
-  defp build_for(coll, {pred_var, pred_body}, {map_var, map_body}) do
+  defp build_for(coll, {pred_var, pred_body}, {map_var, map_body}, op) do
     binding = choose_binding(pred_var, pred_body, map_var, map_body)
     coll_str = coll |> render()
-    pred_str = pred_body |> rebind(pred_var, binding) |> render()
+
+    pred_str =
+      pred_body |> rebind(pred_var, binding) |> render() |> apply_polarity(op, pred_body)
+
     map_str = map_body |> rebind(map_var, binding) |> render()
 
     {:ok, "for #{binding} <- #{coll_str}, #{pred_str}, do: #{map_str}"}
   end
+
+  defp apply_polarity(pred_str, :filter, _pred_ast), do: pred_str
+
+  defp apply_polarity(pred_str, :reject, pred_ast),
+    do: if(operator_root?(pred_ast), do: "!(#{pred_str})", else: "!#{pred_str}")
+
+  defp operator_root?({op, _, args}) when is_atom(op) and is_list(args),
+    do: Macro.operator?(op, length(args))
+
+  defp operator_root?(_), do: false
 
   defp candidate_name(0), do: :x
   defp candidate_name(n), do: String.to_atom("x#{n}")
@@ -132,13 +156,13 @@ defmodule Number42.Refactors.Ex.MergePipelineIntoComprehension do
     end
   end
 
-  defp fuse(coll, pred_fun, map_fun) do
+  defp fuse(coll, pred_fun, map_fun, op) do
     with false <- pipe?(coll),
          {:ok, pred} <- inlinable(pred_fun),
          {:ok, map} <- inlinable(map_fun),
          true <- pure?(elem(pred, 1)),
          true <- pure?(elem(map, 1)) do
-      build_for(coll, pred, map)
+      build_for(coll, pred, map, op)
     else
       _ -> :skip
     end
@@ -171,11 +195,12 @@ defmodule Number42.Refactors.Ex.MergePipelineIntoComprehension do
   defp maybe_patch(
          {:|>, _,
           [
-            {:|>, _, [coll, {{:., _, [{:__aliases__, _, [:Enum]}, :filter]}, _, [pred_fun]}]},
+            {:|>, _, [coll, {{:., _, [{:__aliases__, _, [:Enum]}, op]}, _, [pred_fun]}]},
             {{:., _, [{:__aliases__, _, [:Enum]}, :map]}, _, [map_fun]}
           ]} = node
-       ),
-       do: fuse(coll, pred_fun, map_fun) |> handle_maybe_patch_fuse(node)
+       )
+       when op in [:filter, :reject],
+       do: fuse(coll, pred_fun, map_fun, op) |> handle_maybe_patch_fuse(node)
 
   defp maybe_patch(_), do: []
   defp patch_or_passthrough([], source), do: source
