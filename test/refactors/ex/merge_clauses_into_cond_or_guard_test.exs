@@ -360,4 +360,77 @@ defmodule Number42.Refactors.Ex.MergeClausesIntoCondOrGuardTest do
       assert_unchanged(@subject, source)
     end
   end
+
+  describe "clauses with rescue/catch/after keep their error handling" do
+    test "a clause body with rescue becomes a try/rescue in its cond branch (#305)" do
+      # #305 regression: merging dropped the `rescue` block, so
+      # String.to_existing_atom would raise instead of returning {:error, ...}.
+      # The rescue must survive — wrapped as try/rescue inside the branch.
+      before_source = """
+      defmodule M do
+        defp atom_from(value) when is_binary(value) do
+          {:ok, String.to_existing_atom(value)}
+        rescue
+          ArgumentError -> {:error, {:invalid_type, value}}
+        end
+
+        defp atom_from(value) when is_atom(value), do: {:ok, value}
+        defp atom_from(value), do: {:error, {:invalid_type, value}}
+      end
+      """
+
+      expected = """
+      defmodule M do
+        defp atom_from(value) do
+          cond do
+            is_binary(value) ->
+              try do
+                {:ok, String.to_existing_atom(value)}
+              rescue
+                ArgumentError -> {:error, {:invalid_type, value}}
+              end
+
+            is_atom(value) ->
+              {:ok, value}
+
+            true ->
+              {:error, {:invalid_type, value}}
+          end
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, expected)
+    end
+
+    test "the merged output with a rescue branch compiles and behaves" do
+      before_source = """
+      defmodule MergeRescueCompiles do
+        def classify(v) when is_binary(v) do
+          {:ok, String.to_existing_atom(v)}
+        rescue
+          ArgumentError -> :unknown
+        end
+
+        def classify(v) when is_atom(v), do: {:ok, v}
+        def classify(v) when is_nil(v), do: :unknown
+        def classify(v), do: :unknown
+      end
+      """
+
+      result = apply_refactor(@subject, before_source)
+      refute result == before_source, "expected the clauses to merge into a cond"
+      [{mod, _bin}] = Code.compile_string(result)
+
+      assert mod.classify(:ok) == {:ok, :ok}
+      # an atom that surely exists as a string in this VM:
+      assert mod.classify("ok") == {:ok, :ok}
+      # a binary that is not an existing atom → rescue path, not a crash:
+      assert mod.classify("definitely_not_an_existing_atom_zzz") == :unknown
+      assert mod.classify(123) == :unknown
+    after
+      :code.purge(MergeRescueCompiles)
+      :code.delete(MergeRescueCompiles)
+    end
+  end
 end
