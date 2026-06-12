@@ -42,10 +42,19 @@ defmodule Number42.Refactors.Ex.IfElseToCond do
   - Extracted helper fn would need to be called in more than one cond
     branch (would duplicate side-effects or computation)
   - A pre-statement is not a pure binding (function calls count as
-    impure — hoisting would evaluate them eagerly)
+    impure — hoisting would evaluate them eagerly; `state.field` is
+    assumed to be map access, a 0-arity local call of the same shape is
+    indistinguishable at the source level)
   - The bound name occurs elsewhere in the enclosing def (parameter,
     earlier binding, use after the `if`) or repeats across levels —
     hoisting would rebind it for foreign scopes
+  - A hoisted RHS references a fn-extracted binding (its binding site
+    vanishes into the lambda, the reference would capture a foreign scope)
+  - A hoisted RHS dereferences a variable that an arm condition
+    type-discriminates (`is_map(x)`, `x == nil`) — eager evaluation
+    would raise on paths the guard used to protect
+  - The outer condition is impure and flattening would duplicate it
+    (do-side nest) or drop it (identical-branch collapse)
   """
 
   use Number42.Refactors.Refactor
@@ -149,9 +158,10 @@ defmodule Number42.Refactors.Ex.IfElseToCond do
   # nil-cond marks the terminal `true ->` branch.
   # Decomposes nested if/else recursively.
   defp collect_branches(%{cond: cond_ast, do: do_body, else: else_body}) do
-    if ast_eq?(do_body, else_body) do
+    if ast_eq?(do_body, else_body) and pure_expr?(cond_ast) do
       # Outer if is dead — both branches identical. Drop outer condition,
-      # try to make a cond from the inner shape directly.
+      # try to make a cond from the inner shape directly. Dropping is only
+      # sound for pure conditions; an impure one would lose its effect.
       collect_from_branch(do_body, [])
     else
       with {:ok, do_branches} <- collect_from_branch(do_body, []),
@@ -177,10 +187,15 @@ defmodule Number42.Refactors.Ex.IfElseToCond do
         guarded_do = %{terminal_do | cond: cond_ast}
         {:ok, [guarded_do | else_branches]}
 
-      # Case B: do nests, else terminal.
-      true ->
+      # Case B: do nests, else terminal. The outer condition is copied into
+      # every do-side arm, so it gets re-evaluated once per arm — only
+      # sound when it is pure.
+      pure_expr?(cond_ast) ->
         guarded = Enum.map(do_branches, &guard_branch(cond_ast, &1))
         {:ok, guarded ++ else_branches}
+
+      true ->
+        :error
     end
   end
 
@@ -393,12 +408,23 @@ defmodule Number42.Refactors.Ex.IfElseToCond do
     other_uses =
       prepared
       |> Enum.reject(&(&1 == p))
-      |> Enum.any?(fn other -> branch_uses_var?(other.branch, var) end)
+      |> Enum.any?(fn other -> entry_uses_var?(other, var) end)
 
     if other_uses, do: {:halt, :error}, else: {:cont, :ok}
   end
 
   defp check_fn_var_not_shared(_p, _prepared), do: {:cont, :ok}
+
+  # The fn-extraction deletes the `var = rhs` binding, so any OTHER entry
+  # still referencing `var` — in its condition, body, hoisted statements,
+  # or its own fn body — would capture a foreign scope (or nothing).
+  defp entry_uses_var?(%{kind: :fn} = p, var),
+    do: branch_uses_var?(p.branch, var) or ast_contains_var?(p.fn_def, var)
+
+  defp entry_uses_var?(%{kind: :hoist} = p, var),
+    do: branch_uses_var?(p.branch, var) or ast_contains_var?(p.hoist_stmts, var)
+
+  defp entry_uses_var?(p, var), do: branch_uses_var?(p.branch, var)
 
   # Hoisted bindings land in the scope of every cond arm AND the code after
   # the cond. Safe only when the name is fresh: no duplicate across hoisted
@@ -406,14 +432,18 @@ defmodule Number42.Refactors.Ex.IfElseToCond do
   # the name anywhere else in the enclosing def (covers pre-existing
   # bindings, parameters, and uses after the if).
   defp check_hoists(prepared, node, root) do
-    hoist_vars = prepared |> Enum.filter(&(&1.kind == :hoist)) |> Enum.flat_map(& &1.hoist_vars)
+    hoists = Enum.filter(prepared, &(&1.kind == :hoist))
+    hoist_vars = Enum.flat_map(hoists, & &1.hoist_vars)
+    hoist_stmts = Enum.flat_map(hoists, & &1.hoist_stmts)
     fn_names = prepared |> Enum.filter(&(&1.kind == :fn)) |> Enum.map(& &1.fn_name)
+    conds = prepared |> Enum.map(& &1.branch.cond) |> Enum.reject(&is_nil/1)
 
     cond do
       hoist_vars == [] -> :ok
       Enum.uniq(hoist_vars) != hoist_vars -> :error
       Enum.any?(hoist_vars, &(&1 in fn_names)) -> :error
       Enum.any?(hoist_vars, &var_used_outside?(root, node, &1)) -> :error
+      Enum.any?(type_tested_vars(conds), &ast_contains_var?(hoist_stmts, &1)) -> :error
       true -> :ok
     end
   end
@@ -504,14 +534,42 @@ defmodule Number42.Refactors.Ex.IfElseToCond do
     :in
   ]
 
-  # Conservative whitelist: literals, variables, dot-access on a pure
-  # receiver, operator applications, and literal composites thereof.
-  # Anything with a function call is treated as impure.
+  @type_guards [
+    :is_nil,
+    :is_map,
+    :is_list,
+    :is_atom,
+    :is_binary,
+    :is_bitstring,
+    :is_number,
+    :is_integer,
+    :is_float,
+    :is_tuple,
+    :is_function,
+    :is_pid,
+    :is_reference,
+    :is_port,
+    :is_boolean,
+    :is_struct,
+    :is_exception,
+    :is_map_key
+  ]
+
+  # Conservative whitelist: literals, variables, no-parens dot-access on a
+  # variable receiver chain, type-guard calls, operator applications, and
+  # literal composites thereof. Anything else — in particular any function
+  # call — is treated as impure. A no-parens dot on an atom/alias receiver
+  # (`:rand.uniform`, `Mod.fun`) is a remote call, never map access, so the
+  # receiver chain must bottom out in a variable.
   defp pure_expr?(lit) when is_atom(lit) or is_number(lit) or is_binary(lit), do: true
   defp pure_expr?({:__block__, _, [inner]}), do: pure_expr?(inner)
   defp pure_expr?({var, _, ctx}) when is_atom(var) and is_atom(ctx), do: true
 
-  defp pure_expr?({{:., _, [recv, field]}, _, []}) when is_atom(field), do: pure_expr?(recv)
+  defp pure_expr?({{:., _, [_recv, field]}, _, []} = access) when is_atom(field),
+    do: access_chain?(access)
+
+  defp pure_expr?({guard, _, args}) when guard in @type_guards and is_list(args),
+    do: Enum.all?(args, &pure_expr?/1)
 
   defp pure_expr?({op, _, args}) when op in @pure_operators and is_list(args),
     do: Enum.all?(args, &pure_expr?/1)
@@ -521,6 +579,52 @@ defmodule Number42.Refactors.Ex.IfElseToCond do
   defp pure_expr?(list) when is_list(list), do: Enum.all?(list, &pure_expr?/1)
   defp pure_expr?({:%{}, _, pairs}), do: Enum.all?(pairs, &pure_expr?/1)
   defp pure_expr?(_), do: false
+
+  defp access_chain?({var, _, ctx}) when is_atom(var) and is_atom(ctx), do: true
+
+  defp access_chain?({{:., _, [recv, field]}, meta, []}) when is_atom(field),
+    do: Keyword.get(meta, :no_parens, false) and access_chain?(recv)
+
+  defp access_chain?(_), do: false
+
+  # Variables whose type an arm condition discriminates on (`is_map(x)`,
+  # `x == nil`, …). Hoisting a binding that dereferences such a variable
+  # would evaluate it eagerly on paths the guard used to protect.
+  defp type_tested_vars(conds) do
+    Enum.reduce(conds, MapSet.new(), fn cond_ast, acc ->
+      {_, acc} =
+        Macro.prewalk(cond_ast, acc, fn
+          {guard, _, args} = n, acc when guard in @type_guards and is_list(args) ->
+            {n, collect_vars(args, acc)}
+
+          {op, _, [l, r]} = n, acc when op in [:==, :===, :!=, :!==] ->
+            cond do
+              nil_literal?(l) -> {n, collect_vars([r], acc)}
+              nil_literal?(r) -> {n, collect_vars([l], acc)}
+              true -> {n, acc}
+            end
+
+          n, acc ->
+            {n, acc}
+        end)
+
+      acc
+    end)
+  end
+
+  defp nil_literal?(nil), do: true
+  defp nil_literal?({:__block__, _, [nil]}), do: true
+  defp nil_literal?(_), do: false
+
+  defp collect_vars(asts, acc) do
+    {_, acc} =
+      Macro.prewalk(asts, acc, fn
+        {var, _, ctx} = n, acc when is_atom(var) and is_atom(ctx) -> {n, MapSet.put(acc, var)}
+        n, acc -> {n, acc}
+      end)
+
+    acc
+  end
 
   # Does `var` occur in the enclosing def outside of `node` itself?
   defp var_used_outside?(root, node, var) do

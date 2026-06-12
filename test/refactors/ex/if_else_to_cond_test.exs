@@ -435,6 +435,142 @@ defmodule Number42.Refactors.Ex.IfElseToCondTest do
       """)
     end
 
+    test "hoist RHS referencing a fn-extracted binding — whole-tree flatten blocked" do
+      # Flattening the OUTER if would fn-extract `x` (its binding becomes a
+      # lambda and disappears), so hoisting `y = (x || 0) + 1` would capture
+      # the parameter `x` instead of the shadow binding. The gate blocks
+      # that; only the inner if — where `x` stays bound — may flatten.
+      before_source = """
+      def f(a, src, x) do
+        if a do
+          :r1
+        else
+          x = src[:k]
+
+          if x do
+            :r2
+          else
+            y = (x || 0) + 1
+
+            if y > 100 do
+              {:r3, y}
+            else
+              {:r4, y}
+            end
+          end
+        end
+      end
+      """
+
+      after_source = """
+      def f(a, src, x) do
+        if a do
+          :r1
+        else
+          x = src[:k]
+
+          y = (x || 0) + 1
+
+          cond do
+            x -> :r2
+            y > 100 -> {:r3, y}
+            true -> {:r4, y}
+          end
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, after_source)
+    end
+
+    test "binding RHS calls a zero-arity remote function — skip" do
+      assert_unchanged(@subject, """
+      def f(next) do
+        if next == nil do
+          total = :rand.uniform()
+
+          if total > 0.5 and total < 0.9 do
+            :high
+          else
+            :low
+          end
+        else
+          :none
+        end
+      end
+      """)
+
+      assert_unchanged(@subject, """
+      def f(next) do
+        if next == nil do
+          total = :erlang.system_time
+
+          if total > 0 and total < 99 do
+            :high
+          else
+            :low
+          end
+        else
+          :none
+        end
+      end
+      """)
+    end
+
+    test "binding RHS calls a function on a variable receiver with parens — skip" do
+      assert_unchanged(@subject, """
+      def f(repo, next) do
+        if next == nil do
+          rows = repo.fetch_all()
+
+          if rows != [] and length(rows) < 10 do
+            :some
+          else
+            :none
+          end
+        else
+          :none
+        end
+      end
+      """)
+    end
+
+    test "hoist RHS receiver is type-guarded by an outer condition — skip" do
+      # `state.a` is only reachable when `is_map(state)` held; hoisting
+      # would evaluate it eagerly and raise on the else path.
+      assert_unchanged(@subject, """
+      def f(state) do
+        if is_map(state) do
+          total = state.a + state.b
+
+          if total > 0 and total < 99 do
+            :vote
+          else
+            :novote
+          end
+        else
+          :novote
+        end
+      end
+      """)
+
+      assert_unchanged(@subject, """
+      def f(state) do
+        if state == nil do
+          :novote
+        else
+          total = state.a + state.b
+
+          if total > 0 and total < 99 do
+            :vote
+          else
+            :novote
+          end
+        end
+      end
+      """)
+    end
+
     test "same binding name introduced on two levels — skip" do
       # Hoisting both would let the second rebinding leak into every arm.
       assert_unchanged(@subject, """
@@ -518,6 +654,44 @@ defmodule Number42.Refactors.Ex.IfElseToCondTest do
             b
           else
             c
+          end
+        end
+      end
+      """)
+    end
+
+    test "impure outer condition would be duplicated across arms (do-side nest) — skip" do
+      # Flattening copies the outer condition into every do-side arm;
+      # `send/2` would fire once per arm instead of once.
+      assert_unchanged(@subject, """
+      def f(pid) do
+        if send(pid, :probe) == :probe do
+          if check(pid) do
+            a
+          else
+            b
+          end
+        else
+          c
+        end
+      end
+      """)
+    end
+
+    test "impure outer condition would be dropped by identical-branch collapse — skip" do
+      assert_unchanged(@subject, """
+      def f(x) do
+        if log_and_check(x) do
+          if inner_cond do
+            a
+          else
+            b
+          end
+        else
+          if inner_cond do
+            a
+          else
+            b
           end
         end
       end
