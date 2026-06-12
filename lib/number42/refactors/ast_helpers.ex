@@ -126,6 +126,28 @@ defmodule Number42.Refactors.AstHelpers do
   def bare_var(_), do: :skip
 
   @doc """
+  Whether a branch body is complex enough to deserve its own function
+  clause instead of living inline in a `cond` arm: a multi-statement
+  block, or a body containing a pipe chain of two or more stages.
+
+  `ExtractCondToGuardClauses` lifts a `cond` to clauses only when at
+  least one branch body is clause-worthy; `MergeClausesIntoCondOrGuard`
+  merges clauses into a `cond` only when none is. Sharing the predicate
+  makes the two target forms disjoint, so the inverse refactors cannot
+  oscillate.
+  """
+  def clause_worthy_body?({:__block__, _, exprs}) when length(exprs) > 1, do: true
+
+  def clause_worthy_body?(body) do
+    body
+    |> Macro.prewalker()
+    |> Enum.any?(&multi_stage_pipe?/1)
+  end
+
+  defp multi_stage_pipe?({:|>, _, [{:|>, _, _}, _]}), do: true
+  defp multi_stage_pipe?(_), do: false
+
+  @doc """
   Unwrap a `do` body into a flat list of expressions.
 
       iex> #{__MODULE__}.body_to_exprs({:__block__, [], [:a, :b]})

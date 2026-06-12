@@ -5,13 +5,13 @@ defmodule Number42.Refactors.Ex.ExtractCondToGuardClauses do
 
       def classify(n) do
         cond do
-          n < 0 -> :neg
+          n < 0 -> n |> abs() |> Integer.to_string()
           n == 0 -> :zero
           true -> :pos
         end
       end
       ↓
-      def classify(n) when n < 0, do: :neg
+      def classify(n) when n < 0, do: n |> abs() |> Integer.to_string()
       def classify(n) when n == 0, do: :zero
       def classify(_n), do: :pos
 
@@ -20,6 +20,15 @@ defmodule Number42.Refactors.Ex.ExtractCondToGuardClauses do
   condition becomes a `when` guard on a clause; the final `true ->`
   branch becomes the bare catch-all clause. Branch order is preserved,
   so dispatch semantics are identical to the `cond`'s top-to-bottom scan.
+
+  This is the inverse of `MergeClausesIntoCondOrGuard`. Both share the
+  `clause_worthy_body?/1` heuristic so the two target forms are
+  disjoint: a `cond` lifts only when at least one branch body is
+  clause-worthy (a multi-statement block, or a pipe of two or more
+  stages); a `cond` whose arms are all simple stays a `cond` — that
+  form reads better for short arms, and the merge refactor produces
+  exactly it. Without the shared heuristic the two refactors would
+  ping-pong the same function between forms on every pass.
 
   Each lifted clause gets its own parameter list: a parameter used in
   neither the clause's guard nor its body is underscored (`_min`), so
@@ -37,9 +46,14 @@ defmodule Number42.Refactors.Ex.ExtractCondToGuardClauses do
       `rem`, …),
     * leaves that are literals or references to the function's params.
 
-  The final branch must be a literal `true ->` catch-all.
+  The final branch must be a literal `true ->` catch-all, and at least
+  one branch body must be clause-worthy (see above).
 
   ## What we skip
+
+    * Every branch body is simple (single expression, no multi-stage
+      pipe) — the `cond` is already the preferred form; lifting it
+      would undo `MergeClausesIntoCondOrGuard` and oscillate.
 
     * A condition calling a non-guard function (`valid?(n)`,
       `String.length(s) > 3`) — not guard-safe.
@@ -104,7 +118,8 @@ defmodule Number42.Refactors.Ex.ExtractCondToGuardClauses do
          {:ok, param_names} <- bare_param_names(params),
          {:ok, body} <- do_body(body_kw),
          {:ok, branches} <- cond_branches(body),
-         {:ok, clauses} <- liftable_clauses(branches, MapSet.new(param_names)) do
+         {:ok, clauses} <- liftable_clauses(branches, MapSet.new(param_names)),
+         true <- Enum.any?(clauses, &clause_worthy?/1) do
       [Patch.replace(node, render_clauses(kind, fn_name, params, clauses, source))]
     else
       _ -> []
@@ -158,6 +173,9 @@ defmodule Number42.Refactors.Ex.ExtractCondToGuardClauses do
   defp guard_clause(cond_ast, body, param_set) do
     if guard_safe?(cond_ast, param_set), do: {:ok, {:guard, cond_ast, body}}, else: :skip
   end
+
+  defp clause_worthy?({:guard, _cond_ast, body}), do: clause_worthy_body?(body)
+  defp clause_worthy?({:catch_all, body}), do: clause_worthy_body?(body)
 
   defp literal_true?(true), do: true
   defp literal_true?({:__block__, _, [true]}), do: true
