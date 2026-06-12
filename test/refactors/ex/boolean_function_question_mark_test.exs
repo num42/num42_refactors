@@ -177,6 +177,111 @@ defmodule Number42.Refactors.Ex.BooleanFunctionQuestionMarkTest do
     end
   end
 
+  describe "semantic predicate gate (name must read as a predicate)" do
+    test "action name with a boolean body is not turned into a predicate" do
+      assert_unchanged(@subject, ~S'''
+      defmodule M do
+        def go(x), do: parse_boolean(x)
+        defp parse_boolean("true"), do: true
+        defp parse_boolean("false"), do: false
+        defp parse_boolean(_), do: false
+      end
+      ''')
+    end
+
+    test "a compute-shaped action name stays put even with a boolean body" do
+      assert_unchanged(@subject, ~S'''
+      defmodule M do
+        def go(a, b), do: compute_type_mismatch(a, b)
+        defp compute_type_mismatch(a, b), do: a != b
+      end
+      ''')
+    end
+
+    test "a state-adjective name the model knows is renamed" do
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def go(x), do: active(x)
+          defp active(x), do: x > 0
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          def go(x), do: active?(x)
+          defp active?(x), do: x > 0
+        end
+        '''
+      )
+    end
+
+    test "unknown name (model none) falls back to the verb heuristic — action stem skips" do
+      assert_unchanged(@subject, ~S'''
+      defmodule M do
+        def go(x), do: render_active(x)
+        defp render_active(x), do: x > 0
+      end
+      ''')
+    end
+
+    test "unknown name (model none) with no action stem is renamed" do
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def go(x), do: gt_zero(x)
+          defp gt_zero(x), do: x > 0
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          def go(x), do: gt_zero?(x)
+          defp gt_zero?(x), do: x > 0
+        end
+        '''
+      )
+    end
+  end
+
+  describe "side-effect gate (a predicate cannot mutate)" do
+    test "a body whose non-tail statement is a side effect is skipped" do
+      assert_unchanged(@subject, ~S'''
+      defmodule M do
+        def go(x), do: valid(x)
+        defp valid(x) do
+          Repo.update!(x)
+          x.amount > 0
+        end
+      end
+      ''')
+    end
+
+    test "a body whose non-tail statements are pure bindings is allowed" do
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def go(x), do: valid(x)
+          defp valid(x) do
+            amount = x.amount
+            amount > 0
+          end
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          def go(x), do: valid?(x)
+          defp valid?(x) do
+            amount = x.amount
+            amount > 0
+          end
+        end
+        '''
+      )
+    end
+  end
+
   describe "idempotent" do
     test "running twice equals running once" do
       assert_idempotent(@subject, ~S'''

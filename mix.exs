@@ -38,12 +38,22 @@ defmodule Number42.Refactors.MixProject do
     "AST-based refactor engine for Elixir — pluggable, idempotent rewrites driven by Sourceror."
   end
 
+  # The model-generation Mix task lives under dev/ and is compiled only in
+  # :dev — it depends on tokenizers/safetensors/nx, which are dev-only and
+  # absent in :test/:prod. The library proper (lib/) never touches them.
   defp elixirc_paths(:test), do: ["lib", "test/support"]
+  defp elixirc_paths(:dev), do: ["lib", "dev"]
   defp elixirc_paths(_), do: ["lib"]
 
   defp deps do
     [
       {:sourceror, "~> 1.7"},
+      # Static-embedding model generation only — see priv/semantic. The
+      # refactors load frozen JSON vector tables at runtime; these deps
+      # are needed solely to regenerate those tables from the source model.
+      {:tokenizers, "~> 0.5", only: :dev, runtime: false},
+      {:safetensors, "~> 0.1", only: :dev, runtime: false},
+      {:nx, "~> 0.9", only: :dev, runtime: false},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},

@@ -51,4 +51,28 @@ defmodule Number42.Refactors.SemanticTest do
       assert length(labels) == 11
     end
   end
+
+  describe "classify/2 with the :predicate model" do
+    test "state adjectives classify as predicate" do
+      assert {:ok, :predicate, _} = Semantic.classify("valid", :predicate)
+      assert {:ok, :predicate, _} = Semantic.classify("active", :predicate)
+      assert {:ok, :predicate, _} = Semantic.classify("empty", :predicate)
+    end
+
+    test "production verbs classify as action" do
+      assert {:ok, :action, _} = Semantic.classify("parse_boolean", :predicate)
+      assert {:ok, :action, _} = Semantic.classify("compute_type_mismatch", :predicate)
+    end
+
+    test "names with no known signal return :unknown" do
+      assert Semantic.classify("xyzzy_frobnicate", :predicate) == :unknown
+    end
+
+    test "labels/1 exposes the predicate model's two buckets" do
+      labels = Semantic.labels(:predicate)
+      assert :predicate in labels
+      assert :action in labels
+      assert length(labels) == 2
+    end
+  end
 end

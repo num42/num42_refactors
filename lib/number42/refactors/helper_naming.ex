@@ -141,6 +141,31 @@ defmodule Number42.Refactors.HelperNaming do
     first_free(derived ++ [fallback], existing)
   end
 
+  @doc """
+  True when `name` reads as a verb that *does* something — an action that
+  produces or mutates (`parse`, `compute`, `update`, `fetch`, `send`, …),
+  as opposed to a predicate that *asks* something.
+
+  Used as the `:none`-fallback gate behind the predicate model in
+  `BooleanFunctionQuestionMark`: when the embedding can't decide whether a
+  name is a predicate, an action verb stem is strong evidence it is *not*,
+  so the `?`-suffix rewrite skips it (`parse_boolean` stays put). Reuses
+  the same `@verb_rules` stem table as helper naming; only `:validate`
+  (`check`/`verify`/`ensure`/`confirm`) reads as predicate-adjacent and so
+  is not treated as an action.
+  """
+  @spec action_verb?(atom() | String.t()) :: boolean()
+  def action_verb?(name) when is_atom(name) or is_binary(name) do
+    case table_verb(to_atom(name)) do
+      nil -> false
+      :validate -> false
+      _action -> true
+    end
+  end
+
+  defp to_atom(name) when is_atom(name), do: name
+  defp to_atom(name) when is_binary(name), do: String.to_atom(name)
+
   # Variable names of a trailing bare-tuple-literal return — the block's
   # own product, used for naming only. `{subtotal, taxed}` as the last
   # statement gives `[:subtotal, :taxed]`. Names already in `live_out` are
