@@ -25,6 +25,13 @@ defmodule Number42.Refactors.HelperNaming do
   2. **object only** (`<a>_and_<b>`) — when no verb is inferable but the
      live-outs are two meaningful names. A *single* object name is never
      used standalone — it equals its live-out and would shadow it.
+
+     The object also draws on a trailing **bare-tuple-literal return**
+     (`{subtotal, taxed}` as the block's last statement). Such a block has
+     no live-out — the tuple *is* the return, nothing reads those names
+     after it — yet its elements name exactly what the helper produces.
+     They feed verb inference and the object part for naming only; they
+     never widen the extraction's real live-out.
   3. **verb + source** — when the live-outs give no object (3+ names, or
      none) but the block is an accessor ladder fanning one container into
      many bindings, the object comes from that *container*:
@@ -101,9 +108,16 @@ defmodule Number42.Refactors.HelperNaming do
           {:ok, atom()} | :skip
   def name(host, live_out, stmts, params, existing, opts \\ []) do
     in_scope = MapSet.new(live_out ++ params)
-    verb = infer_verb(stmts, live_out)
-    object = object_part(live_out)
-    source = source_object(stmts, live_out)
+    # The block's *result* names the helper too: a block ending in a bare
+    # tuple literal (`{subtotal, taxed}`) has no live-out (nothing reads
+    # those names after the block — the tuple IS the return), yet the tuple
+    # elements describe exactly what the helper produces. They join the
+    # live-outs as a naming-only object source — they never widen the
+    # extraction's actual live-out, only the name.
+    naming_live_out = live_out ++ tail_tuple_vars(stmts, live_out)
+    verb = infer_verb(stmts, naming_live_out)
+    object = object_part(naming_live_out)
+    source = source_object(stmts, naming_live_out)
     attribute = infer_attribute(stmts)
     fallback = Keyword.get(opts, :fallback, suffixed(host, "_block"))
 
@@ -125,6 +139,48 @@ defmodule Number42.Refactors.HelperNaming do
       |> Enum.reject(&(is_nil(&1) or MapSet.member?(in_scope, &1)))
 
     first_free(derived ++ [fallback], existing)
+  end
+
+  # Variable names of a trailing bare-tuple-literal return — the block's
+  # own product, used for naming only. `{subtotal, taxed}` as the last
+  # statement gives `[:subtotal, :taxed]`. Names already in `live_out` are
+  # dropped (no double-count) and only meaningful, bare-var elements survive
+  # — a tuple element that is a call, literal, or `_throwaway` describes
+  # nothing nameable.
+  #
+  # Unlike a real live-out these never reach the extraction (the tuple
+  # already IS the return); they widen the *name* only. Anything but a
+  # tuple-literal tail yields `[]` — a map literal, a `{:noreply, socket}`
+  # status tuple with a non-var head, or a call all stay unnamed.
+  defp tail_tuple_vars(stmts, live_out) do
+    case tuple_elems(List.last(stmts)) do
+      nil -> []
+      elems -> nameable_tuple_vars(elems, live_out)
+    end
+  end
+
+  # The element list of a tuple-literal node, or nil if the node is not a
+  # tuple literal. Three shapes reach here:
+  #   * 3+ tuple — `{:{}, _, elems}` in both `Code` and Sourceror ASTs.
+  #   * 2-tuple — a raw `{a, b}` from `Code.string_to_quoted`, OR Sourceror's
+  #     `{:__block__, _, [{a, b}]}` (Sourceror wraps the 2-tuple literal to
+  #     carry metadata). Unwrap the single-child block before matching.
+  defp tuple_elems({:{}, _, elems}) when is_list(elems), do: elems
+  defp tuple_elems({:__block__, _, [inner]}), do: tuple_elems(inner)
+  defp tuple_elems({a, b}), do: [a, b]
+  defp tuple_elems(_), do: nil
+
+  defp nameable_tuple_vars(elems, live_out) do
+    seen = MapSet.new(live_out)
+
+    elems
+    |> Enum.flat_map(fn
+      {name, _, ctx} when is_atom(name) and is_atom(ctx) -> [name]
+      _ -> []
+    end)
+    |> Enum.reject(&(&1 in seen))
+    |> Enum.filter(&meaningful_name?/1)
+    |> Enum.uniq()
   end
 
   # A join (`a_and_b`) names the helper on its own; a single object name

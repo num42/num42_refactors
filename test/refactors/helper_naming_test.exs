@@ -230,6 +230,82 @@ defmodule Number42.Refactors.HelperNamingTest do
     end
   end
 
+  describe "tuple-literal return (block's product names it)" do
+    test "a block ending in a bare two-tuple names after the tuple elements" do
+      # No live-out — the tuple `{subtotal, taxed}` IS the return, nothing
+      # reads those names after the block. The tuple elements still name the
+      # product: verb `compute` from `Enum.sum`, object from the two vars.
+      assert {:ok, :compute_subtotal_and_taxed} =
+               name(nil, [], """
+               subtotal = Enum.sum(order.lines)
+               taxed = subtotal * 1.19
+               {subtotal, taxed}
+               """)
+    end
+
+    test "a three-tuple return with a one-token host falls back to host_block" do
+      # 3+ tuple parses as `{:{}, _, elems}`; object_part joins up to two, so
+      # three elements yield no object. No shared accessor source either, and
+      # the one-token host `:build` gives no strip_suffix candidate → the
+      # `build_block` fallback. The point: three bare-var elements are
+      # extracted without crashing, even if they don't produce a name here.
+      assert {:ok, :build_block} =
+               name(:build, [], """
+               token = create_token(user)
+               ctx = create_context(user)
+               meta = create_meta(user)
+               {token, ctx, meta}
+               """)
+    end
+
+    test "a tuple return with no inferable verb falls to the object join" do
+      assert {:ok, :children_and_count} =
+               name(nil, [], """
+               children = pick(node)
+               count = size(node)
+               {children, count}
+               """)
+    end
+
+    test "a status tuple with a non-var head is not a product name" do
+      # `{:noreply, socket}` — the head is an atom literal, socket is
+      # boilerplate. No nameable tuple var, no live-out, no verb-bearing
+      # producing call (`assign` is update but binds no naming live-out) →
+      # the host `:handle_event` already reads as more than a bare verb, so
+      # strip_suffix hands back `handle_event` itself.
+      assert {:ok, :handle_event} =
+               name(:handle_event, [], """
+               socket = assign(socket, :x, 1)
+               {:noreply, socket}
+               """)
+    end
+
+    test "tuple elements already in live-out are not double-counted" do
+      # `taxed` is a real live-out (read after the block); the tail tuple
+      # repeats it alongside `subtotal`. naming_live_out is `[:taxed] ++
+      # [:subtotal]` — live-out first, then the fresh tail var — so the join
+      # reads `taxed_and_subtotal`, each name once (no duplicate `taxed`).
+      assert {:ok, :compute_taxed_and_subtotal} =
+               name(nil, [:taxed], """
+               subtotal = Enum.sum(order.lines)
+               taxed = subtotal * 1.19
+               {subtotal, taxed}
+               """)
+    end
+
+    test "a tuple element that is a call is ignored, only bare vars name" do
+      # `{subtotal, total(order)}` — only `subtotal` is a bare var. A single
+      # surviving object can't stand alone (would shadow nothing here since
+      # it's not a live-out, but object_part needs two for a join). With a
+      # verb it rides along: compute_subtotal.
+      assert {:ok, :compute_subtotal} =
+               name(nil, [], """
+               subtotal = Enum.sum(order.lines)
+               {subtotal, total(order)}
+               """)
+    end
+  end
+
   describe "optional attribute (filter predicate adjective)" do
     test "a boolean predicate field slots an adjective between verb and object" do
       # `reject(& &1.archived)` → verb filter (reject), attribute inactive
