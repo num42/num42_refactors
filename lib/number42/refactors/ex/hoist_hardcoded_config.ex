@@ -26,11 +26,15 @@ defmodule Number42.Refactors.Ex.HoistHardcodedConfig do
   ## Naming
 
   The attribute name comes from `IdentifierExpansion.derive_constant_name/2`:
-  a `key: "https://…"` keyword literal becomes `@key`, an otherwise
-  bare URL becomes `@default_url`, a bare path `@default_string`.
-  Distinct literals that would collide on a name are disambiguated with
-  a numeric suffix (`@default_url`, `@default_url_2`, …). Every
-  occurrence of the *same* literal collapses to a single attribute.
+  a `key: "https://…"` keyword literal becomes `@key`; otherwise the name
+  is derived from the value's content — `https://api.example.com/v1` ->
+  `@api_example_v1_url`, `/etc/myapp/config.toml` ->
+  `@etc_myapp_config_toml_path`. A literal with nothing nameable (a bare
+  IP, all-numeric segments) derives a placeholder name and is left
+  inline rather than hoisted under a meaningless `@default_*`. Every
+  occurrence of the *same* literal collapses to a single attribute; two
+  *distinct* literals that derive the *same* name don't get suffixed —
+  the first is hoisted, the rest stay inline.
 
   ## What it deliberately does not do
 
@@ -48,6 +52,10 @@ defmodule Number42.Refactors.Ex.HoistHardcodedConfig do
   alias Sourceror.Patch
 
   @url_schemes ["http://", "https://", "ftp://", "ws://"]
+
+  # Phoenix router/endpoint macros whose leading string argument is a
+  # route pattern, not a config value.
+  @router_dsl ~w(get post put patch delete options head live socket forward match resource resources)a
 
   @impl Number42.Refactors.Refactor
   def description, do: "Inline URL/absolute-path string literal -> @module_attribute"
@@ -158,6 +166,15 @@ defmodule Number42.Refactors.Ex.HoistHardcodedConfig do
   end
 
   defp walk({left, right}, _key), do: walk(left, nil) ++ walk(right, nil)
+
+  # Router/endpoint DSL call (`get "/path", …`, `socket "/path", …`): the
+  # leading string is a route *pattern*, not config. Skip the first arg,
+  # walk the rest — a real config literal in a later arg still hoists.
+  defp walk({form, _meta, [route | rest]}, _key)
+       when is_atom(form) and rest != [] do
+    if router_dsl?(form), do: walk_args(rest), else: walk_args([route | rest])
+  end
+
   defp walk({_form, _meta, args}, _key) when is_list(args), do: walk_args(args)
   defp walk(list, _key) when is_list(list), do: walk_args(list)
   defp walk(_leaf, _key), do: []
@@ -171,12 +188,19 @@ defmodule Number42.Refactors.Ex.HoistHardcodedConfig do
   @url_regex ~r{\A[a-z][a-z0-9+.\-]*://[^\s]+\z}
   @path_regex ~r{\A/[^\s/]+(?:/[^\s/]+)+\z|\A/[^\s/]+\.[^\s/]+\z}
 
-  defp config_shaped?(value), do: url?(value) or absolute_path?(value)
+  defp config_shaped?(value),
+    do: not route_pattern?(value) and (url?(value) or absolute_path?(value))
 
   defp url?(value),
     do: String.starts_with?(value, @url_schemes) and Regex.match?(@url_regex, value)
 
   defp absolute_path?(value), do: Regex.match?(@path_regex, value)
+
+  defp router_dsl?(form), do: form in @router_dsl
+
+  # A `:param` or `*glob` segment marks a route pattern, never a literal
+  # config path — even outside a recognized DSL call.
+  defp route_pattern?(value), do: value =~ ~r{/[:*]}
 
   # ---------------------------------------------------------------
   # Naming — one attribute per distinct value, collisions suffixed.
@@ -193,16 +217,24 @@ defmodule Number42.Refactors.Ex.HoistHardcodedConfig do
     |> Enum.reverse()
   end
 
+  @meaningless_names ~w(default_url default_string default_float constant)
+
   defp assign_group({value, occurrences}, {acc, taken}) do
     base = derive_constant_name(value, %{key: name_key(occurrences)})
 
-    case resolve_collision(base, taken) do
-      {:ok, name} ->
-        group = %{name: name, value: value, occurrences: occurrences}
-        {[group | acc], Map.put(taken, name, nil)}
-
-      :skip ->
+    cond do
+      base in @meaningless_names ->
         {acc, taken}
+
+      true ->
+        case resolve_collision(base, taken, on_collision: :skip) do
+          {:ok, name} ->
+            group = %{name: name, value: value, occurrences: occurrences}
+            {[group | acc], Map.put(taken, name, nil)}
+
+          :skip ->
+            {acc, taken}
+        end
     end
   end
 

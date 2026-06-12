@@ -782,8 +782,11 @@ defmodule Number42.Refactors.IdentifierExpansion do
      second-scaled timeout: `5000 → timeout_5s_ms`.
   5. Value-in-name fallback — never fails and never collides:
      integer → `int_<value>` (`int_42`, negatives `int_neg_7`),
-     float → `default_float`, url-shaped string → `default_url`,
-     other string → `default_string`, anything else → `constant`.
+     float → `default_float`. A URL or absolute path names itself from
+     its content — host (sans `www.`/TLD) + path segments + `_url`,
+     path segments + `_path`; a value with nothing nameable (a bare IP,
+     all-numeric segments) falls back to `default_url`/`default_string`.
+     Any other string → `default_string`, anything else → `constant`.
 
   Always returns a snake_case string (no leading `@`); the caller
   renders the attribute.
@@ -793,6 +796,14 @@ defmodule Number42.Refactors.IdentifierExpansion do
       iex> alias Number42.Refactors.IdentifierExpansion
       iex> IdentifierExpansion.derive_constant_name("https://api.example.com", %{key: "base_url"})
       "base_url"
+
+      iex> alias Number42.Refactors.IdentifierExpansion
+      iex> IdentifierExpansion.derive_constant_name("https://api.example.com/v1", %{})
+      "api_example_v1_url"
+
+      iex> alias Number42.Refactors.IdentifierExpansion
+      iex> IdentifierExpansion.derive_constant_name("/etc/myapp/config.toml", %{})
+      "etc_myapp_config_toml_path"
 
       iex> alias Number42.Refactors.IdentifierExpansion
       iex> IdentifierExpansion.derive_constant_name(3600, %{})
@@ -848,10 +859,73 @@ defmodule Number42.Refactors.IdentifierExpansion do
   end
 
   defp derive_constant_name_from_value(value) when is_binary(value) do
-    if url_shaped?(value), do: "default_url", else: "default_string"
+    cond do
+      url_shaped?(value) -> content_url_name(value) || "default_url"
+      absolute_path?(value) -> content_path_name(value) || "default_string"
+      true -> "default_string"
+    end
   end
 
   defp derive_constant_name_from_value(_value), do: "constant"
+
+  # A URL names itself after its host (sans `www.` and the TLD) plus its
+  # path segments, suffixed `_url`: `https://api.example.com/v1` ->
+  # `api_example_v1_url`. A host that survives sanitizing to nothing (a
+  # bare IP, all-numeric segments) yields nil so the caller falls back.
+  defp content_url_name(value) do
+    uri = URI.parse(value)
+    host_parts = host_tokens(uri.host)
+    path_parts = path_tokens(uri.path)
+
+    name_from_tokens(host_parts ++ path_parts, "url")
+  end
+
+  # An absolute path names itself after its segments, suffixed `_path`:
+  # `/etc/myapp/config.toml` -> `etc_myapp_config_toml_path`.
+  defp content_path_name(value) do
+    value |> path_tokens() |> name_from_tokens("path")
+  end
+
+  defp host_tokens(nil), do: []
+
+  defp host_tokens(host) do
+    host
+    |> String.replace_prefix("www.", "")
+    |> String.split(".")
+    |> drop_tld()
+    |> Enum.flat_map(&sanitize_token/1)
+  end
+
+  # Drop the last label as a TLD only when more than one remains, so a
+  # single-label host (`localhost`) keeps its only token.
+  defp drop_tld([_single] = labels), do: labels
+  defp drop_tld(labels), do: Enum.drop(labels, -1)
+
+  defp path_tokens(nil), do: []
+  defp path_tokens(""), do: []
+
+  defp path_tokens(path),
+    do: path |> String.split("/", trim: true) |> Enum.flat_map(&sanitize_token/1)
+
+  # A path/host segment becomes one or more lowercase alphanumeric tokens;
+  # any segment with no letters (`:id`, `127`, `*rest`) is dropped, so a
+  # `:param`/numeric-only segment can't seed a name.
+  defp sanitize_token(segment) do
+    cleaned =
+      segment |> String.downcase() |> String.replace(~r/[^a-z0-9]+/, "_") |> String.trim("_")
+
+    if cleaned == "" or not String.match?(cleaned, ~r/[a-z]/), do: [], else: [cleaned]
+  end
+
+  # Tokens + a kind suffix, deduped in order. Nil when no token carries a
+  # letter — a bare-IP URL or all-numeric path has nothing to name itself.
+  defp name_from_tokens([], _suffix), do: nil
+
+  defp name_from_tokens(tokens, suffix) do
+    (tokens ++ [suffix]) |> Enum.dedup() |> Enum.join("_")
+  end
+
+  defp absolute_path?(str), do: String.starts_with?(str, "/")
 
   # Round multiples of 1000 read as second-scaled ms timeouts.
   defp millisecond_name(value) when value > 1000 and rem(value, 1000) == 0,
