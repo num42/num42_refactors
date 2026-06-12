@@ -49,6 +49,13 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
     or a previously-resolved short form in the same function).
   - No long-form candidate scores above zero.
   - Multiple long-form candidates tie at the same top score.
+  - The only candidate is a field read off the binding itself: `fn spi ->
+    spi.surcharge_package_id ...` reads `surcharge_package_id` *out of*
+    `spi`, so it names a part of the row, not the row. Such field names are
+    struck from the candidate ranking before resolution — expanding `spi` to
+    `surcharge_package_id` would produce `surcharge_package_id.surcharge_package_id`.
+    A non-field candidate (e.g. a `from(spi in SurchargePackageItem)` schema
+    signal) still wins; only the field names are forbidden.
 
   ## Why procedural
 
@@ -432,21 +439,33 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
     # multi-element ranking, used as fallback when the first choice
     # collides with another binding in the same scope (see
     # `assign_long_forms/3`).
+    # Fields read off each binding via `name.field`. A binding accessed as
+    # `spi.surcharge_package_id` is a struct/map row, and that field is one
+    # of its *parts* — never a sound new name for the row itself (the #305
+    # `surcharge_package_id.surcharge_package_id` absurdity). These field
+    # names are stripped from each binding's candidate ranking.
+    accessed_fields = accessed_fields_by_var(body)
+
     ranked =
       short_bindings
       |> Enum.reject(fn {name, _node, _rhs} -> MapSet.member?(rebound, name) end)
       |> Enum.map(fn {name, _node, rhs} ->
-        {name,
-         ranked_long_forms(
-           name,
-           rhs,
-           from_schema_signals,
-           call_site_signals,
-           context_candidates,
-           context_compounds,
-           fn_compound,
-           context_compound
-         )}
+        forbidden = Map.get(accessed_fields, name, MapSet.new())
+
+        candidates =
+          ranked_long_forms(
+            name,
+            rhs,
+            from_schema_signals,
+            call_site_signals,
+            context_candidates,
+            context_compounds,
+            fn_compound,
+            context_compound
+          )
+          |> Enum.reject(&MapSet.member?(forbidden, &1))
+
+        {name, candidates}
       end)
 
     # Assign in source order, resolving same-scope collisions by walking
@@ -640,6 +659,29 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
       end
     end)
     |> MapSet.new()
+  end
+
+  # Map each variable to the set of field names read off it via dot access
+  # (`var.field`). Only a paren-less field read counts: `var.field` carries
+  # `no_parens: true`, while `var.field()` is a zero-arg call (no parens flag)
+  # and `var.fun(args)` a remote call — neither names a struct field. A
+  # chained `var.a.b` records only the first hop `a` (the var owns `a`, not
+  # `b`). Field names are returned as strings to match the candidate ranking.
+  defp accessed_fields_by_var(ast) do
+    ast
+    |> Macro.prewalker()
+    |> Enum.flat_map(fn
+      {{:., _, [{var, _, ctx}, field]}, call_meta, []}
+      when is_atom(var) and is_atom(ctx) and is_atom(field) ->
+        if Keyword.get(call_meta, :no_parens, false),
+          do: [{var, Atom.to_string(field)}],
+          else: []
+
+      _ ->
+        []
+    end)
+    |> Enum.group_by(fn {var, _} -> var end, fn {_, field} -> field end)
+    |> Map.new(fn {var, fields} -> {var, MapSet.new(fields)} end)
   end
 
   # Walk an AST and return every `{name, _, ctx}` var-reference node
