@@ -88,6 +88,36 @@ defmodule Number42.Refactors.Ex.MergeClausesIntoCondOrGuard do
       shadowing later guarded clauses (dead code, or already a
       compile warning) — we don't reorder; SKIP.
 
+  ## Error handling (`rescue`/`catch`/`after`/`else`)
+
+  A clause body carrying a `rescue`/`catch`/`after`/`else` block is not
+  just its `do:` value — the handler changes behaviour. Dropping it would
+  silently turn a rescued error into a raise (e.g.
+  `String.to_existing_atom/1` raising `ArgumentError` instead of returning
+  `{:error, ...}`). So such a clause's `cond` arm wraps the whole thing
+  back into a `try`:
+
+      def atom_from(v) when is_binary(v) do
+        {:ok, String.to_existing_atom(v)}
+      rescue
+        ArgumentError -> {:error, :bad}
+      end
+      def atom_from(v), do: {:ok, v}
+      ↓
+      def atom_from(v) do
+        cond do
+          is_binary(v) ->
+            try do
+              {:ok, String.to_existing_atom(v)}
+            rescue
+              ArgumentError -> {:error, :bad}
+            end
+
+          true ->
+            {:ok, v}
+        end
+      end
+
   ## Idempotence
 
   After the merge the function is a single clause whose body is a
@@ -272,16 +302,81 @@ defmodule Number42.Refactors.Ex.MergeClausesIntoCondOrGuard do
 
   defp all_bare_vars?(params), do: Enum.all?(params, &match?({:ok, _}, bare_var(&1)))
 
-  defp single_do_body(body_kw) do
-    bodies =
-      body_kw
-      |> Enum.flat_map(fn
-        {{:__block__, _, [:do]}, value} -> [value]
-        {:do, value} -> [value]
-        _ -> []
-      end)
+  # The clause's body as a single expression for the `cond` arm. A plain
+  # `do:` body returns its value verbatim. A clause carrying
+  # `rescue`/`catch`/`after`/`else` blocks is wrapped back into a `try` so
+  # the error handling survives the merge — dropping it would change
+  # behaviour (e.g. `String.to_existing_atom` raising instead of being
+  # rescued, the #305 bug). The original `body_kw` IS a valid `try` arg
+  # list, so `{:try, [], [body_kw]}` reproduces the clause's semantics
+  # exactly. A clause with neither a `do:` nor a recognizable handler shape
+  # aborts the run.
+  @try_block_keys [:rescue, :catch, :after, :else]
 
-    case bodies do
+  defp single_do_body(body_kw) do
+    has_do? = Enum.any?(body_kw, &do_pair?/1)
+    has_handler? = Enum.any?(body_kw, &handler_pair?/1)
+
+    cond do
+      not has_do? -> :error
+      has_handler? -> try_body(body_kw)
+      true -> do_value(body_kw)
+    end
+  end
+
+  defp do_pair?({{:__block__, _, [:do]}, _}), do: true
+  defp do_pair?({:do, _}), do: true
+  defp do_pair?(_), do: false
+
+  defp handler_pair?({{:__block__, _, [key]}, _}) when key in @try_block_keys, do: true
+  defp handler_pair?({key, _}) when key in @try_block_keys, do: true
+  defp handler_pair?(_), do: false
+
+  # Wrap a clause body that carries rescue/catch/after/else into a `try`.
+  # A naked `{:try, [], [body_kw]}` node renders in keyword short-form
+  # (`try do: ..., rescue: ->(...)`) which is unreadable and even invalid;
+  # round-tripping a built `try ... end` source through the parser attaches
+  # the block-format metadata Sourceror needs to render it as a real block.
+  defp try_body(body_kw) do
+    with {:ok, do_body} <- do_value(body_kw),
+         handlers = Enum.reject(body_kw, &do_pair?/1),
+         src = render_try_source(do_body, handlers),
+         {:ok, try_node} <- Sourceror.parse_string(src) do
+      {:ok, try_node}
+    else
+      _ -> :error
+    end
+  end
+
+  defp render_try_source(do_body, handlers) do
+    handler_blocks = Enum.map_join(handlers, "\n", &render_handler_block/1)
+    "try do\n#{render_body(do_body)}\n#{handler_blocks}\nend"
+  end
+
+  defp render_handler_block({key_ast, clauses}) do
+    key = handler_key(key_ast)
+
+    case key do
+      :after -> "#{key}\n#{render_body(clauses)}"
+      _ -> "#{key}\n#{Enum.map_join(clauses, "\n", &render_handler_clause/1)}"
+    end
+  end
+
+  defp handler_key({:__block__, _, [key]}), do: key
+  defp handler_key(key) when is_atom(key), do: key
+
+  defp render_handler_clause({:->, _, [patterns, body]}) do
+    "#{Enum.map_join(patterns, ", ", &render_guard/1)} -> #{render_body(body)}"
+  end
+
+  defp do_value(body_kw) do
+    body_kw
+    |> Enum.flat_map(fn
+      {{:__block__, _, [:do]}, value} -> [value]
+      {:do, value} -> [value]
+      _ -> []
+    end)
+    |> case do
       [body] -> {:ok, body}
       _ -> :error
     end

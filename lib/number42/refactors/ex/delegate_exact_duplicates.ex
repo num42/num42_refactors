@@ -69,6 +69,15 @@ defmodule Number42.Refactors.Ex.DelegateExactDuplicates do
        break after delegation since the attribute is per-module.
     5. Body has at least 5 AST nodes (`min_mass`). Tiny bodies aren't
        worth the indirection.
+    6. Their **transitive local-helper closures** are structurally
+       identical. Two bodies can be AST-equal yet call a same-named local
+       `defp` that does different work in each module (e.g. a private
+       `list/2` querying a different source). Delegating would run the
+       winner's helper for the loser's callers → wrong data or a crash on a
+       missing key. Every private helper reachable from the candidate is
+       hashed by name/arity and normalized body and folded into the match
+       key. Public `def`s in the closure are not — delegation preserves the
+       public contract wherever it lives.
 
   ## What we skip
 
@@ -194,7 +203,16 @@ defmodule Number42.Refactors.Ex.DelegateExactDuplicates do
     end
   end
 
-  defp build_function_entry(module, name, arity, clauses, body_exprs, min_mass) do
+  defp build_function_entry(
+         module,
+         name,
+         arity,
+         clauses,
+         body_exprs,
+         min_mass,
+         call_graph,
+         defp_bodies
+       ) do
     cond do
       not Enum.all?(clauses, &eligible_clause?/1) ->
         []
@@ -212,14 +230,19 @@ defmodule Number42.Refactors.Ex.DelegateExactDuplicates do
         # may bind different names — that's fine for the body hash, but
         # for the delegate we just take clause-1's names).
         args = clause_arg_names(hd(clauses))
+
+        # The match key folds in the transitive local-helper closure: two
+        # candidates match only when their own clauses AND every private
+        # helper they reach are structurally identical.
         hashed_clause = hash_clauses(clauses)
+        reached = closure_hash(name, arity, call_graph, defp_bodies)
 
         [
           %{
             args: args,
             arity: arity,
             body_exprs: body_exprs,
-            hash: hashed_clause,
+            hash: {hashed_clause, reached},
             module: module,
             name: name
           }
@@ -343,13 +366,62 @@ defmodule Number42.Refactors.Ex.DelegateExactDuplicates do
   defp extract_functions_or_empty({:error, _}, _min_mass), do: []
 
   defp functions_in_module(module, body_exprs, min_mass) do
+    # The module's local definitions and their call edges — used to hash the
+    # transitive closure of local `defp`s each candidate reaches. Two public
+    # bodies can be AST-identical yet call divergent local helpers (a
+    # same-named `defp list/2` doing different work per module); delegating
+    # then runs the wrong helper. Folding the closure into the match key
+    # blocks that. See `closure_hash/3`.
+    definitions = collect_definitions(body_exprs)
+    call_graph = Map.new(definitions, fn d -> {{d.name, d.arity}, d.calls} end)
+    defp_bodies = defp_body_hashes(definitions)
+
     body_exprs
     |> Enum.filter(&def_clause?/1)
     |> Enum.group_by(&def_name_arity_or_skip/1)
     |> Enum.reject(fn {key, _clauses} -> key == :skip end)
     |> Enum.flat_map(fn {{name, arity}, clauses} ->
-      build_function_entry(module, name, arity, clauses, body_exprs, min_mass)
+      build_function_entry(
+        module,
+        name,
+        arity,
+        clauses,
+        body_exprs,
+        min_mass,
+        call_graph,
+        defp_bodies
+      )
     end)
+  end
+
+  # `{name, arity} => structural body hash` for every local `defp`. A `def`
+  # in the closure is a public contract that delegation preserves on its own,
+  # so only private helpers need to match structurally.
+  defp defp_body_hashes(definitions) do
+    definitions
+    |> Enum.filter(&(&1.kind == :defp))
+    |> Map.new(fn d -> {{d.name, d.arity}, hash_clauses(d.clauses)} end)
+  end
+
+  # A structural fingerprint of every local `defp` transitively reachable
+  # from `{name, arity}`. Reachability uses the module's local call graph;
+  # the result hashes each reached private helper by name/arity *and* its
+  # normalized body, so two modules match only when their candidate calls
+  # the same private helpers AND those helpers are structurally identical.
+  # Public `def`s reached in the closure are not hashed — delegation keeps
+  # the public contract intact regardless of which module hosts it.
+  defp closure_hash(name, arity, call_graph, defp_bodies) do
+    MapSet.new([{name, arity}])
+    |> transitive_closure(call_graph)
+    |> MapSet.delete({name, arity})
+    |> Enum.flat_map(fn key ->
+      case Map.fetch(defp_bodies, key) do
+        {:ok, body_hash} -> [{key, body_hash}]
+        :error -> []
+      end
+    end)
+    |> Enum.sort()
+    |> :erlang.phash2()
   end
 
   defp hash_clauses(clauses),
@@ -399,10 +471,12 @@ defmodule Number42.Refactors.Ex.DelegateExactDuplicates do
     count
   end
 
-  defp normalize_clause({:def, _, [head, body_kw]}) do
+  defp normalize_clause({kind, _, [head, body_kw]}) when kind in [:def, :defp] do
     # Strip meta and rename variables positionally. Result is a pure
     # structural fingerprint: same shape, same vars, regardless of
-    # naming or location.
+    # naming or location. Used for the delegate candidate's own `def`
+    # clauses and for the private helpers in its transitive closure, so
+    # both `:def` and `:defp` reach here.
     stripped_head = strip_meta(head)
     stripped_body = body_kw |> Keyword.values() |> Enum.map(&strip_meta/1)
     rename_vars({stripped_head, stripped_body})

@@ -34,6 +34,62 @@ defmodule Number42.Refactors.Ex.ExtractNestedBlockTest do
       assert result =~ "FIXME"
       refute result == before_source
     end
+
+    test "names the helper via HelperNaming, never the mechanical extracted_<host>" do
+      # The lifted body binds `matching` from a Map.get and returns a map
+      # literal — no live-out, no inferable verb. HelperNaming routes through
+      # the host name instead of the #305 sinner `extracted_surcharge_options_*`.
+      # The host name itself is forbidden (would collide with `def
+      # surcharge_options/3`), so it lands on the `surcharge_options_block`
+      # fallback — distinct name, distinct from the host, and it compiles.
+      before_source = """
+      defmodule Pricing do
+        def surcharge_options(items, bi, by_key) do
+          Enum.map(items, fn group ->
+            Enum.map(group, fn item ->
+              Enum.map(item.parts, fn part ->
+                matching = Map.get(by_key, {part.id, bi.brand_id})
+
+                %{item: part, brand_item: matching, latest_price: latest_price(matching)}
+              end)
+            end)
+          end)
+        end
+      end
+      """
+
+      result = apply_refactor(@subject, before_source, @opts)
+
+      refute result =~ "extracted_surcharge_options"
+      assert result =~ "defp surcharge_options_block("
+      assert {:ok, _} = Code.string_to_quoted(result)
+    end
+
+    test "the helper never reuses the host name (would collide at the same arity)" do
+      # `strip_suffix(host)` hands back the host name verbatim; for an
+      # extracted helper that is the one name guaranteed to clash with the
+      # enclosing definition. Regression guard: a single-token host whose body
+      # gives no other signal must fall back to `<host>_block`, not `<host>`.
+      before_source = """
+      defmodule Foo do
+        def render(rows, ctx) do
+          Enum.map(rows, fn row ->
+            Enum.map(row.cells, fn cell ->
+              Enum.map(cell.parts, fn part ->
+                shaped = decorate(part, ctx)
+                {part.id, shaped}
+              end)
+            end)
+          end)
+        end
+      end
+      """
+
+      result = apply_refactor(@subject, before_source, @opts)
+
+      refute result =~ ~r/defp render\(/, "helper must not reuse the host name `render`"
+      assert result =~ "defp render_block("
+    end
   end
 
   describe "leaves alone" do
@@ -136,7 +192,7 @@ defmodule Number42.Refactors.Ex.ExtractNestedBlockTest do
 
       # The helper must accept `bi` (or whatever Sourceror renames it to)
       # so the captured closure variable resolves.
-      assert result =~ ~r/defp extracted_\w+\([^)]*\bbi\b/,
+      assert result =~ ~r/defp \w+\([^)]*\bbi\b/,
              "extracted helper must take `bi` (the `for` generator binding) as a parameter:\n#{result}"
     end
 
@@ -160,7 +216,7 @@ defmodule Number42.Refactors.Ex.ExtractNestedBlockTest do
 
       assert {:ok, _} = Code.string_to_quoted(result)
 
-      assert result =~ ~r/defp extracted_\w+\([^)]*\bprefix\b/,
+      assert result =~ ~r/defp \w+\([^)]*\bprefix\b/,
              "extracted helper must take `prefix` (the `with`-clause binding) as a parameter:\n#{result}"
     end
   end

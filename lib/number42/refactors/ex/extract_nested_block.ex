@@ -50,6 +50,7 @@ defmodule Number42.Refactors.Ex.ExtractNestedBlock do
 
   use Number42.Refactors.Refactor
 
+  alias Number42.Refactors.HelperNaming
   alias Sourceror.Patch
 
   @impl Number42.Refactors.Refactor
@@ -266,7 +267,7 @@ defmodule Number42.Refactors.Ex.ExtractNestedBlock do
   defp function_param_patterns(_), do: []
 
   defp generate_helper_name(host_fn_name, fn_body, extracted_index) do
-    base = synth_compound_name("extracted", host_fn_name, "", "")
+    base = semantic_base(host_fn_name, fn_body, extracted_index)
 
     same? = fn existing_bodies ->
       existing_bodies |> Enum.any?(&bodies_equal?(&1, fn_body))
@@ -274,6 +275,37 @@ defmodule Number42.Refactors.Ex.ExtractNestedBlock do
 
     resolve_collision(base, extracted_index, same?: same?)
   end
+
+  # Prefer a name that says what the lifted block *does* (via HelperNaming —
+  # the producing call's verb plus the block's product) over the mechanical
+  # `extracted_<host>`. The block has no live-out (it's the fn's return value),
+  # so HelperNaming leans on the tail tuple/map product and the host name.
+  # Fall back to `extracted_<host>` only when HelperNaming can find no
+  # meaningful name (`:skip`).
+  defp semantic_base(host_fn_name, fn_body, extracted_index) do
+    # The host's own name is a forbidden candidate: a helper named exactly
+    # `<host>` collides with the enclosing `def`/`defp` (same name, same
+    # arity once free vars line up) → won't compile. Feed it into `existing`
+    # so HelperNaming's `strip_suffix(host)` candidate is rejected and the
+    # name falls back to `<host>_block`. The `extracted_index` carries only
+    # `defp`s, not the host `def`, so we add it explicitly.
+    # HelperNaming compares atom candidates against `existing`, so the set
+    # must hold atoms. `extracted_index` is keyed by string defp names.
+    existing =
+      extracted_index
+      |> Map.keys()
+      |> Enum.map(&String.to_atom/1)
+      |> MapSet.new()
+      |> MapSet.put(host_fn_name)
+
+    case HelperNaming.name(host_fn_name, [], body_stmts(fn_body), [], existing) do
+      {:ok, name} -> Atom.to_string(name)
+      :skip -> synth_compound_name("extracted", host_fn_name, "", "")
+    end
+  end
+
+  defp body_stmts({:__block__, _, exprs}) when is_list(exprs), do: exprs
+  defp body_stmts(single), do: [single]
 
   defp indent_body(str), do: String.split(str, "\n") |> Enum.map_join("\n", &("    " <> &1))
   defp index_defps_by_name(nil), do: %{}

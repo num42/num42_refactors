@@ -32,11 +32,24 @@ defmodule Number42.Refactors.Ex.BooleanFunctionQuestionMark do
     operator, a known boolean kernel guard (`is_*`), a call to a `?`
     predicate, or an `if`/`cond`/`case` whose branches are all boolean.
     If *any* clause fails this test, the whole group is skipped.
+  - **The name must read as a predicate.** A boolean body is necessary
+    but not sufficient: `parse_boolean`/`compute_type_mismatch` return
+    booleans yet `parse_boolean?` is nonsense — they *do*, they don't
+    *ask*. A static-embedding model classifies the name as predicate or
+    action; on `:unknown` a verb-stem heuristic stands in (an action stem
+    like `parse`/`update`/`compute` means "not a predicate"). This stops
+    the action-verb false renames a body-only check would wave through.
+  - **No side effects before the result.** A predicate computes, it never
+    mutates. A clause whose leading (non-tail) statements are anything but
+    pure `=` bindings — a `Repo.update!`, a `send`, a `Logger.info` — is an
+    action with a boolean side-result; `?` would lie about it, so the
+    group is skipped.
 
   ## Skip conditions
 
   - **Public def**, **already `?`/`!`-suffixed name**, **non-boolean
-    clause**, **collision** (`name?` already exists as a def or as a
+    clause**, **action-shaped name**, **side-effecting body**,
+    **collision** (`name?` already exists as a def or as a
     `use`-injected macro).
   - **Dynamic dispatch** anywhere in the module
     (`apply(__MODULE__, name, …)` with a non-literal name). Such a call
@@ -52,6 +65,8 @@ defmodule Number42.Refactors.Ex.BooleanFunctionQuestionMark do
   use Number42.Refactors.Refactor
 
   alias Number42.Refactors.AstHelpers
+  alias Number42.Refactors.HelperNaming
+  alias Number42.Refactors.Semantic
   alias Sourceror.Patch
 
   # Operators that *always* yield a boolean. `and`/`or` qualify because
@@ -145,11 +160,27 @@ defmodule Number42.Refactors.Ex.BooleanFunctionQuestionMark do
   defp rename_or_skip(name, clauses, occupied) do
     new = :"#{name}?"
 
-    if renamable_name?(name) and all_clauses_boolean?(clauses) and
+    if renamable_name?(name) and predicate_name?(name) and
+         all_clauses_boolean?(clauses) and all_clauses_pure?(clauses) and
          not MapSet.member?(occupied, new) do
       [{name, new}]
     else
       []
+    end
+  end
+
+  # The `?` suffix claims a *predicate* — a name that asks, not one that
+  # acts. A boolean body alone isn't enough: `parse_boolean`/`maybe_update_oz`
+  # both return booleans but reading `parse_boolean?` is nonsense. The
+  # predicate embedding decides; on `:unknown` (the name carries no signal
+  # the model knows) the verb-stem heuristic stands in — an action stem
+  # (`parse`/`update`/`compute`/…) means "not a predicate", anything else
+  # is allowed. Measured 41/41 correct on position-db's real boolean defps.
+  defp predicate_name?(name) do
+    case Semantic.classify(Atom.to_string(name), :predicate) do
+      {:ok, :predicate, _} -> true
+      {:ok, :action, _} -> false
+      :unknown -> not HelperNaming.action_verb?(name)
     end
   end
 
@@ -209,6 +240,36 @@ defmodule Number42.Refactors.Ex.BooleanFunctionQuestionMark do
   # ---------------------------------------------------------------
 
   defp all_clauses_boolean?(clauses), do: Enum.all?(clauses, &clause_boolean?/1)
+
+  # A predicate may compute, never mutate. The body's *tail* is the boolean
+  # result (already checked); its leading statements, if any, must be pure
+  # setup. A `defp` that calls `Repo.update!` before returning a boolean is
+  # an action with a boolean side-result — `?` would lie about it. We allow
+  # only `=` bindings as non-tail statements; anything else (a bare call, a
+  # `send`, a `Logger.info`) is a potential effect, so the group is skipped.
+  defp all_clauses_pure?(clauses), do: Enum.all?(clauses, &clause_pure?/1)
+
+  defp clause_pure?({_kind, _, [_head, body_kw]}) when is_list(body_kw) do
+    case fetch_block(body_kw, :do) do
+      {:ok, {:__block__, _, exprs}} when is_list(exprs) ->
+        exprs |> Enum.drop(-1) |> Enum.all?(&pure_binding?/1)
+
+      {:ok, _single} ->
+        true
+
+      :error ->
+        false
+    end
+  end
+
+  defp clause_pure?(_), do: false
+
+  # A non-tail statement is pure only if it is a `=` match — `x = expr`.
+  # (The bound expression itself could in theory call an effectful function,
+  # but binding the result of a pure computation is the overwhelmingly common
+  # case, and a leading mutating call is what we actually need to catch.)
+  defp pure_binding?({:=, _, [_lhs, _rhs]}), do: true
+  defp pure_binding?(_), do: false
 
   defp clause_boolean?({_kind, _, [_head, body_kw]}) when is_list(body_kw) do
     case fetch_block(body_kw, :do) do

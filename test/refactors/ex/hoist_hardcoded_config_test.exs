@@ -6,23 +6,23 @@ defmodule Number42.Refactors.Ex.HoistHardcodedConfigTest do
   @subject HoistHardcodedConfig
 
   describe "rewrites" do
-    test "hoists an inline URL literal into a @module_attribute" do
+    test "names a hoisted URL after its host and path" do
       before_source = """
       defmodule Client do
         def call do
-          get("https://api.example.com/v1")
+          fetch("https://api.example.com/v1")
         end
       end
       """
 
       result = apply_refactor(@subject, before_source)
 
-      assert result =~ ~s(@default_url "https://api.example.com/v1")
-      assert result =~ "get(@default_url)"
-      refute result =~ ~s|get("https://api.example.com/v1")|
+      assert result =~ ~s(@api_example_v1_url "https://api.example.com/v1")
+      assert result =~ "fetch(@api_example_v1_url)"
+      refute result =~ ~s|fetch("https://api.example.com/v1")|
     end
 
-    test "hoists an absolute filesystem path into a @module_attribute" do
+    test "names a hoisted filesystem path after its segments" do
       before_source = """
       defmodule Loader do
         def read do
@@ -33,25 +33,24 @@ defmodule Number42.Refactors.Ex.HoistHardcodedConfigTest do
 
       result = apply_refactor(@subject, before_source)
 
-      assert result =~ ~s("/etc/myapp/config.toml")
-      assert result =~ "@"
-      assert result =~ "File.read(@"
+      assert result =~ ~s(@etc_myapp_config_toml_path "/etc/myapp/config.toml")
+      assert result =~ "File.read(@etc_myapp_config_toml_path)"
       refute result =~ ~s|File.read("/etc/myapp/config.toml")|
     end
 
     test "collapses multiple occurrences of the same literal into one attribute" do
       before_source = """
       defmodule Client do
-        def a, do: get("https://api.example.com")
-        def b, do: post("https://api.example.com")
+        def a, do: fetch("https://api.example.com")
+        def b, do: send_to("https://api.example.com")
       end
       """
 
       result = apply_refactor(@subject, before_source)
 
-      assert length(String.split(result, ~s(@default_url "https://api.example.com"))) == 2
-      assert result =~ "get(@default_url)"
-      assert result =~ "post(@default_url)"
+      assert length(String.split(result, ~s(@api_example_url "https://api.example.com"))) == 2
+      assert result =~ "fetch(@api_example_url)"
+      assert result =~ "send_to(@api_example_url)"
     end
 
     test "uses the keyword key as the attribute name" do
@@ -69,20 +68,36 @@ defmodule Number42.Refactors.Ex.HoistHardcodedConfigTest do
       assert result =~ "base_url: @base_url"
     end
 
-    test "gives two distinct URLs two distinct attributes" do
+    test "gives two distinct URLs two distinct content-derived attributes" do
       before_source = """
       defmodule Client do
-        def a, do: get("https://api.one.com")
-        def b, do: get("https://api.two.com")
+        def a, do: fetch("https://api.one.com")
+        def b, do: fetch("https://api.two.com")
       end
       """
 
       result = apply_refactor(@subject, before_source)
 
-      assert result =~ ~s(@default_url "https://api.one.com")
-      assert result =~ ~s(@default_url_2 "https://api.two.com")
-      assert result =~ "get(@default_url)"
-      assert result =~ "get(@default_url_2)"
+      assert result =~ ~s(@api_one_url "https://api.one.com")
+      assert result =~ ~s(@api_two_url "https://api.two.com")
+      assert result =~ "fetch(@api_one_url)"
+      assert result =~ "fetch(@api_two_url)"
+      refute result =~ "_url_2"
+    end
+
+    test "keyword key still beats the content-derived name" do
+      before_source = """
+      defmodule Client do
+        def opts do
+          [website_url: "https://brand.de/imprint"]
+        end
+      end
+      """
+
+      result = apply_refactor(@subject, before_source)
+
+      assert result =~ ~s(@website_url "https://brand.de/imprint")
+      assert result =~ "website_url: @website_url"
     end
 
     test "output compiles" do
@@ -136,6 +151,59 @@ defmodule Number42.Refactors.Ex.HoistHardcodedConfigTest do
       assert_unchanged(@subject, """
       defmodule M do
         def handle("https://api.example.com"), do: :ok
+      end
+      """)
+    end
+
+    test "ignores route paths in router DSL calls" do
+      assert_unchanged(@subject, """
+      defmodule MyAppWeb.Router do
+        def routes do
+          get("/downloads/latest.zip", FileController, :download)
+          live("/users/settings/confirm", UserLive.Settings, :confirm)
+          post("/users/log-in.json", UserSessionController, :create)
+        end
+      end
+      """)
+    end
+
+    test "ignores the socket path in an endpoint" do
+      assert_unchanged(@subject, """
+      defmodule MyAppWeb.Endpoint do
+        def conf do
+          socket("/phoenix/live_reload/socket", Phoenix.LiveReloader.Socket)
+        end
+      end
+      """)
+    end
+
+    test "ignores route patterns with :params anywhere" do
+      assert_unchanged(@subject, """
+      defmodule M do
+        def route, do: build("/users/:id/settings.html")
+      end
+      """)
+    end
+
+    test "leaves the second of two distinct values colliding on a name inline" do
+      before_source = """
+      defmodule Loader do
+        def a, do: File.read("/etc/myapp/config.toml")
+        def b, do: File.read("/etc/myapp-config.toml")
+      end
+      """
+
+      result = apply_refactor(@subject, before_source)
+
+      assert result =~ ~s(@etc_myapp_config_toml_path "/etc/myapp/config.toml")
+      assert result =~ ~s|File.read("/etc/myapp-config.toml")|
+      refute result =~ "_path_2"
+    end
+
+    test "skips a literal whose derived name would be meaningless" do
+      assert_unchanged(@subject, """
+      defmodule M do
+        def call, do: fetch("https://127.0.0.1/2/3")
       end
       """)
     end

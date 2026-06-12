@@ -667,9 +667,22 @@ defmodule Number42.Refactors.IdentifierExpansionTest do
   end
 
   describe "derive_constant_name/2 — type-based fallback" do
-    test "url-shaped string → default_url" do
-      assert "default_url" =
+    test "url-shaped string → content-derived name from host + path" do
+      assert "example_url" =
                IdentifierExpansion.derive_constant_name("https://example.com", %{})
+
+      assert "api_example_v1_url" =
+               IdentifierExpansion.derive_constant_name("https://api.example.com/v1", %{})
+    end
+
+    test "absolute path → content-derived name from segments" do
+      assert "etc_myapp_config_toml_path" =
+               IdentifierExpansion.derive_constant_name("/etc/myapp/config.toml", %{})
+    end
+
+    test "url with nothing nameable → default_url" do
+      assert "default_url" =
+               IdentifierExpansion.derive_constant_name("https://127.0.0.1", %{})
     end
 
     test "plain string → default_string" do

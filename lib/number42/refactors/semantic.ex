@@ -29,21 +29,31 @@ defmodule Number42.Refactors.Semantic do
   # @external_resource is a repo-relative literal (no function call), so it
   # only triggers a recompile here without forcing a compile-time path lookup.
   @external_resource "priv/semantic/verb_model.json"
-  @persistent_key {__MODULE__, :model}
-  @model_file "semantic/verb_model.json"
+  @external_resource "priv/semantic/predicate_model.json"
+
+  # The classifier serves more than one frozen table: `:verb` names helper
+  # functions by their action, `:predicate` decides whether a name reads as
+  # a predicate (for the `?`-suffix rewrite). Same nearest-prototype shape,
+  # different prototypes — pick by name, default to `:verb` for callers
+  # written before the second model existed.
+  @models %{
+    verb: "semantic/verb_model.json",
+    predicate: "semantic/predicate_model.json"
+  }
 
   @type label :: atom()
+  @type model_name :: :verb | :predicate
   @type result :: {:ok, label(), float()} | :unknown
 
   @doc """
-  Classify `identifier` against the frozen prototypes.
+  Classify `identifier` against the frozen prototypes of `model_name`.
 
   Returns `{:ok, label, score}` when one bucket wins clearly, or `:unknown`
   when no word is known or the win is too close to call.
   """
-  @spec classify(String.t()) :: result()
-  def classify(identifier) when is_binary(identifier) do
-    model = model()
+  @spec classify(String.t(), model_name()) :: result()
+  def classify(identifier, model_name \\ :verb) when is_binary(identifier) do
+    model = model(model_name)
 
     case embed(identifier, model) do
       :empty -> :unknown
@@ -51,19 +61,23 @@ defmodule Number42.Refactors.Semantic do
     end
   end
 
-  @doc "The labels this classifier can return, as atoms."
-  @spec labels() :: [label()]
-  def labels, do: model().prototypes |> Map.keys() |> Enum.map(&String.to_atom/1)
+  @doc "The labels a model can return, as atoms."
+  @spec labels(model_name()) :: [label()]
+  def labels(model_name \\ :verb),
+    do: model(model_name).prototypes |> Map.keys() |> Enum.map(&String.to_atom/1)
 
   # --- model loading (runtime, cached) ---
 
-  # Read + parse once, then serve from :persistent_term (lock-free reads). The
-  # table is immutable, so caching it once for the node is correct and cheap.
-  defp model do
-    case :persistent_term.get(@persistent_key, :miss) do
+  # Read + parse once per model, then serve from :persistent_term (lock-free
+  # reads). The tables are immutable, so caching each once for the node is
+  # correct and cheap.
+  defp model(model_name) do
+    key = {__MODULE__, model_name}
+
+    case :persistent_term.get(key, :miss) do
       :miss ->
-        loaded = load_model()
-        :persistent_term.put(@persistent_key, loaded)
+        loaded = load_model(model_name)
+        :persistent_term.put(key, loaded)
         loaded
 
       loaded ->
@@ -71,11 +85,13 @@ defmodule Number42.Refactors.Semantic do
     end
   end
 
-  defp load_model do
+  defp load_model(model_name) do
+    file = Map.fetch!(@models, model_name)
+
     raw =
       :number42_refactors
       |> :code.priv_dir()
-      |> Path.join(@model_file)
+      |> Path.join(file)
       |> File.read!()
       |> :json.decode()
 

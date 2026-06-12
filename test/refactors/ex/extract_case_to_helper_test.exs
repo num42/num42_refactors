@@ -149,6 +149,70 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelperTest do
       assert_rewrites(@subject, before_source, expected)
     end
 
+    test "prefers a scrutinee atom-literal arg as the noun over a generic accessor name" do
+      # `Application.get_env(:position_db, :schema_prefix)` — the call name
+      # `get_env` is a generic accessor; the *last* atom arg `:schema_prefix`
+      # names what is fetched (the app namespace `:position_db` is skipped in
+      # favour of the more specific trailing atom). The handler reads
+      # `handle_schema_prefix`, not the #305 sinner `handle_get_env`.
+      before_source = """
+      defmodule M do
+        def qualify(table) do
+          case Application.get_env(:position_db, :schema_prefix) do
+            nil ->
+              table
+
+            prefix ->
+              ~s(\#{prefix}.\#{table})
+          end
+        end
+      end
+      """
+
+      expected = """
+      defmodule M do
+        def qualify(table) do
+          Application.get_env(:position_db, :schema_prefix) |> handle_schema_prefix(table)
+        end
+
+        defp handle_schema_prefix(nil, table) do
+          table
+        end
+
+        defp handle_schema_prefix(prefix, table) do
+          ~s(\#{prefix}.\#{table})
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, expected)
+    end
+
+    test "a non-accessor scrutinee keeps its call name (atom arg is a lookup key, not the value)" do
+      # `Keyword.pop(opts, :provider)` is not an accessor — the `:provider`
+      # atom is the key being popped, not the identity of the returned value.
+      # The handler keeps the call-derived `handle_<host>_pop` shape rather
+      # than mis-naming itself `handle_provider`.
+      before_source = """
+      defmodule M do
+        def resolve(opts) do
+          case Keyword.pop(opts, :provider) do
+            {nil, rest} ->
+              {build(:ai, :default, %{flag: true}), rest}
+
+            {mod, rest} when is_atom(mod) ->
+              {mod, rest}
+          end
+        end
+      end
+      """
+
+      result = apply_refactor(@subject, before_source)
+
+      refute result =~ "handle_provider"
+      assert result =~ "defp handle_resolve_pop("
+    end
+
     test "preceding statements stay; only the tail case is extracted" do
       # `wrap(r, y, %{step: 2})` is the complex clause that gates
       # the extraction; `y` alone stays trivial.

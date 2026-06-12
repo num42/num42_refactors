@@ -1666,4 +1666,62 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindingsTest do
       ''')
     end
   end
+
+  describe "rule 6: a binding read via `.field` must not be named after its own field" do
+    test "lambda param `spi` is not expanded to one of its accessed fields" do
+      # #305 regression: `fn spi -> spi.surcharge_package_id ... spi.item_id`.
+      # `spi` is a struct/map row, not an id; the field `surcharge_package_id`
+      # is accessed *on* it. Renaming `spi` to `surcharge_package_id` produced
+      # the absurd `surcharge_package_id.surcharge_package_id`. The fields
+      # accessed on the binding are forbidden expansion targets.
+      assert_unchanged(@subject, ~S'''
+      defmodule M do
+        def filter_items(state, item_ids, surcharge_package_ids) do
+          state.surcharge_package_items
+          |> Enum.reverse()
+          |> Enum.filter(fn spi ->
+            MapSet.member?(surcharge_package_ids, spi.surcharge_package_id) and
+              MapSet.member?(item_ids, spi.item_id)
+          end)
+        end
+      end
+      ''')
+    end
+
+    test "an `=` binding read via `.field` is not named after that field" do
+      assert_unchanged(@subject, ~S'''
+      defmodule M do
+        def go(source) do
+          rec = fetch_record(source)
+          {rec.organization_id, rec.name}
+        end
+      end
+      ''')
+    end
+
+    test "a non-field expansion target is still allowed for a `.field`-read binding" do
+      # `bi` is read via `bi.brand_id` AND there's a `from(bi in BrandItem)`
+      # schema signal. The field gate forbids `brand_id` but not `brand_item`
+      # — the schema-derived name still wins.
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def go(scope) do
+            rows = from(bi in BrandItem, where: bi.brand_id == ^scope) |> Repo.all()
+            Enum.map(rows, fn bi -> bi.brand_id end)
+          end
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          def go(scope) do
+            rows = from(brand_item in BrandItem, where: brand_item.brand_id == ^scope) |> Repo.all()
+            Enum.map(rows, fn brand_item -> brand_item.brand_id end)
+          end
+        end
+        '''
+      )
+    end
+  end
 end

@@ -315,6 +315,103 @@ defmodule Number42.Refactors.Ex.DelegateExactDuplicatesTest do
     end
   end
 
+  describe "transitive call closure must match too" do
+    test "identical public body but divergent local helper → not delegated (#305)" do
+      # #305 regression: `fetch_page` is AST-identical in both modules, but
+      # each calls its OWN `defp list/2` with completely different logic.
+      # Delegating `fetch_page` to one module makes the other run the wrong
+      # `list/2` → wrong data (or a crash on a missing key). The transitive
+      # call closure diverges, so neither may delegate.
+      filtered = """
+      defmodule MyApp.FilteredSource do
+        def fetch_page(direction, cursor, limit, args) do
+          slice = resolve(direction, cursor, limit)
+          {entries, total} = list(args, slice)
+          {:ok, index(entries), next(total)}
+        end
+
+        defp list(args, slice) do
+          scope = Map.fetch!(args, :scope)
+          search = Map.get(args, :search)
+          fetch_filtered(scope, search, slice)
+        end
+      end
+      """
+
+      collection = """
+      defmodule MyApp.CollectionSource do
+        def fetch_page(direction, cursor, limit, args) do
+          slice = resolve(direction, cursor, limit)
+          {entries, total} = list(args, slice)
+          {:ok, index(entries), next(total)}
+        end
+
+        defp list(args, slice) do
+          scope = Map.fetch!(args, :scope)
+          collection_id = Map.fetch!(args, :collection_id)
+          fetch_collection(scope, collection_id, slice)
+        end
+      end
+      """
+
+      plan = prepared([{"filtered.ex", filtered}, {"collection.ex", collection}])
+
+      assert_unchanged(@subject, filtered, prepared: plan)
+      assert_unchanged(@subject, collection, prepared: plan)
+    end
+
+    test "identical public body AND identical local helper → still delegated" do
+      # The whole transitive closure is structurally equal, so delegation is
+      # safe: the winner's `list/2` does exactly what the loser's did.
+      a = """
+      defmodule MyApp.A do
+        def fetch_page(direction, cursor, limit, args) do
+          slice = resolve(direction, cursor, limit)
+          {entries, total} = list(args, slice)
+          {:ok, index(entries), next(total)}
+        end
+
+        defp list(args, slice) do
+          scope = Map.fetch!(args, :scope)
+          fetch_shared(scope, slice)
+        end
+      end
+      """
+
+      b = """
+      defmodule MyApp.A.Longer do
+        def fetch_page(direction, cursor, limit, args) do
+          slice = resolve(direction, cursor, limit)
+          {entries, total} = list(args, slice)
+          {:ok, index(entries), next(total)}
+        end
+
+        defp list(args, slice) do
+          scope = Map.fetch!(args, :scope)
+          fetch_shared(scope, slice)
+        end
+      end
+      """
+
+      plan = prepared([{"a.ex", a}, {"b.ex", b}])
+
+      # After delegation `list/2` is only reachable from the delegated
+      # `fetch_page`, so it's dead in module A and the dead-helper cleanup
+      # removes it. The point of this test is that delegation *happens* (the
+      # closure matched), not the leftover helper.
+      expected_a = """
+      defmodule MyApp.A do
+        defdelegate fetch_page(direction, cursor, limit, args), to: MyApp.A.Longer
+
+
+      end
+      """
+
+      assert_rewrites(@subject, a, expected_a, prepared: plan)
+      assert_unchanged(@subject, b, prepared: plan)
+    end
+  end
+
   describe "idempotence" do
     test "second pass on a rewritten loser is a no-op" do
       shorter = """
