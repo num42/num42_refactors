@@ -74,22 +74,22 @@ defmodule Number42.Refactors.Ex.IfElseToCond do
   defp build_patches(ast) do
     ast
     |> Macro.prewalker()
-    |> Enum.flat_map(&maybe_patch/1)
+    |> Enum.flat_map(&maybe_patch(&1, ast))
     |> Enum.take(1)
   end
 
-  defp maybe_patch({:if, _meta, [_cond, _kw]} = node) do
+  defp maybe_patch({:if, _meta, [_cond, _kw]} = node, root) do
     with {:ok, outer} <- if_shape(node),
          true <- has_nested_if?(outer),
          {:ok, branches} <- collect_branches(outer),
-         {:ok, replacement} <- render_replacement(branches) do
+         {:ok, replacement} <- render_replacement(branches, node, root) do
       [Patch.replace(node, replacement)]
     else
       _ -> []
     end
   end
 
-  defp maybe_patch(_), do: []
+  defp maybe_patch(_, _root), do: []
 
   # Fires only when do or else branch contains a nested if/else (directly or
   # as the tail of a __block__). Plain 2-branch if/else is left alone.
@@ -229,9 +229,9 @@ defmodule Number42.Refactors.Ex.IfElseToCond do
 
   # --- Rendering -------------------------------------------------------------
 
-  defp render_replacement(branches) do
+  defp render_replacement(branches, node, root) do
     case Enum.any?(branches, fn b -> b.pre != [] end) do
-      true -> render_with_pre_fns(branches)
+      true -> render_with_pre_fns(branches, node, root)
       false -> {:ok, render_plain_cond(branches)}
     end
   end
@@ -251,11 +251,12 @@ defmodule Number42.Refactors.Ex.IfElseToCond do
     {:cond, cond_meta, [[{{:__block__, [], [:do]}, clauses}]]}
   end
 
-  # For each branch with pre-statements, attempt to extract a fn.
+  # For each branch with pre-statements, attempt fn-extraction or hoisting.
   # Returns :error if any branch can't be safely handled (forcing whole-tree skip).
-  defp render_with_pre_fns(branches) do
+  defp render_with_pre_fns(branches, node, root) do
     with {:ok, prepared} <- prepare_branches_with_fns(branches),
-         :ok <- check_no_double_use(prepared) do
+         :ok <- check_no_double_use(prepared),
+         :ok <- check_hoists(prepared, node, root) do
       {:ok, render_block_with_fns(prepared)}
     else
       _ -> :error
@@ -283,7 +284,14 @@ defmodule Number42.Refactors.Ex.IfElseToCond do
 
   defp prepare_branch(%{pre: []} = b), do: {:ok, %{kind: :plain, branch: b}}
 
-  defp prepare_branch(%{pre: pre, cond: cond_ast, body: body} = b) do
+  defp prepare_branch(b) do
+    case prepare_fn_branch(b) do
+      {:ok, prepared} -> {:ok, prepared}
+      :error -> prepare_hoist_branch(b)
+    end
+  end
+
+  defp prepare_fn_branch(%{pre: pre, cond: cond_ast, body: body} = b) do
     # The fn-extraction replaces the WHOLE branch condition with
     # `compute_var.()`. That is only sound when the condition *is* exactly the
     # bound variable — then `compute_var.()` is semantically equal to testing
@@ -302,6 +310,40 @@ defmodule Number42.Refactors.Ex.IfElseToCond do
       {:ok, %{kind: :fn, branch: new_branch, fn_def: fn_def, fn_name: fn_name}}
     else
       _ -> :error
+    end
+  end
+
+  # Hoist path (issue #8): the branch condition is a compound expression
+  # referencing bindings from the pre-statements, so fn-extraction cannot
+  # apply. When every pre-statement is a pure binding, the bindings move
+  # verbatim before the cond — each arm keeps its full conjunction and the
+  # binding still evaluates exactly once. Hoisting makes the evaluation
+  # eager (it now runs even when no arm needs it), which is only safe for
+  # side-effect-free right-hand sides — hence the purity gate.
+  defp prepare_hoist_branch(%{pre: pre} = b) do
+    case pure_binding_vars(pre) do
+      {:ok, vars} ->
+        {:ok, %{kind: :hoist, branch: %{b | pre: []}, hoist_stmts: pre, hoist_vars: vars}}
+
+      :error ->
+        :error
+    end
+  end
+
+  # All statements must be `var = pure_rhs` bindings. Returns the bound names.
+  defp pure_binding_vars(pre) do
+    vars =
+      Enum.reduce_while(pre, [], fn
+        {:=, _, [{var, _, ctx}, rhs]}, acc when is_atom(var) and is_atom(ctx) ->
+          if pure_expr?(rhs), do: {:cont, [var | acc]}, else: {:halt, :error}
+
+        _, _acc ->
+          {:halt, :error}
+      end)
+
+    case vars do
+      :error -> :error
+      list -> {:ok, Enum.reverse(list)}
     end
   end
 
@@ -347,7 +389,30 @@ defmodule Number42.Refactors.Ex.IfElseToCond do
 
   defp check_fn_var_not_shared(_p, _prepared), do: {:cont, :ok}
 
+  # Hoisted bindings land in the scope of every cond arm AND the code after
+  # the cond. Safe only when the name is fresh: no duplicate across hoisted
+  # branches, no collision with a synthesized fn-name, and no occurrence of
+  # the name anywhere else in the enclosing def (covers pre-existing
+  # bindings, parameters, and uses after the if).
+  defp check_hoists(prepared, node, root) do
+    hoist_vars = prepared |> Enum.filter(&(&1.kind == :hoist)) |> Enum.flat_map(& &1.hoist_vars)
+    fn_names = prepared |> Enum.filter(&(&1.kind == :fn)) |> Enum.map(& &1.fn_name)
+
+    cond do
+      hoist_vars == [] -> :ok
+      Enum.uniq(hoist_vars) != hoist_vars -> :error
+      Enum.any?(hoist_vars, &(&1 in fn_names)) -> :error
+      Enum.any?(hoist_vars, &var_used_outside?(root, node, &1)) -> :error
+      true -> :ok
+    end
+  end
+
   defp render_block_with_fns(prepared) do
+    hoisted =
+      prepared
+      |> Enum.filter(&(&1.kind == :hoist))
+      |> Enum.flat_map(& &1.hoist_stmts)
+
     fn_defs =
       prepared
       |> Enum.filter(&(&1.kind == :fn))
@@ -356,7 +421,7 @@ defmodule Number42.Refactors.Ex.IfElseToCond do
     branches = Enum.map(prepared, & &1.branch)
     cond_node = cond_ast(branches)
 
-    block = {:__block__, [], fn_defs ++ [cond_node]}
+    block = {:__block__, [], hoisted ++ fn_defs ++ [cond_node]}
 
     # Use the special inner-content form so Sourceror renders without
     # outer parens for the block.
@@ -399,6 +464,86 @@ defmodule Number42.Refactors.Ex.IfElseToCond do
       end)
 
     found?
+  end
+
+  # --- Hoist purity & scope analysis ------------------------------------------
+
+  @pure_operators [
+    :+,
+    :-,
+    :*,
+    :/,
+    :==,
+    :!=,
+    :===,
+    :!==,
+    :<,
+    :>,
+    :<=,
+    :>=,
+    :and,
+    :or,
+    :not,
+    :&&,
+    :||,
+    :!,
+    :<>,
+    :++,
+    :--,
+    :in
+  ]
+
+  # Conservative whitelist: literals, variables, dot-access on a pure
+  # receiver, operator applications, and literal composites thereof.
+  # Anything with a function call is treated as impure.
+  defp pure_expr?(lit) when is_atom(lit) or is_number(lit) or is_binary(lit), do: true
+  defp pure_expr?({:__block__, _, [inner]}), do: pure_expr?(inner)
+  defp pure_expr?({var, _, ctx}) when is_atom(var) and is_atom(ctx), do: true
+
+  defp pure_expr?({{:., _, [recv, field]}, _, []}) when is_atom(field), do: pure_expr?(recv)
+
+  defp pure_expr?({op, _, args}) when op in @pure_operators and is_list(args),
+    do: Enum.all?(args, &pure_expr?/1)
+
+  defp pure_expr?({:{}, _, elems}), do: Enum.all?(elems, &pure_expr?/1)
+  defp pure_expr?({a, b}), do: pure_expr?(a) and pure_expr?(b)
+  defp pure_expr?(list) when is_list(list), do: Enum.all?(list, &pure_expr?/1)
+  defp pure_expr?({:%{}, _, pairs}), do: Enum.all?(pairs, &pure_expr?/1)
+  defp pure_expr?(_), do: false
+
+  # Does `var` occur in the enclosing def outside of `node` itself?
+  defp var_used_outside?(root, node, var) do
+    scope = enclosing_def(root, node)
+    count_var(scope, var) > count_var(node, var)
+  end
+
+  # Innermost def/defp containing `node`; the whole tree when none does
+  # (top-level expression).
+  defp enclosing_def(root, node) do
+    root
+    |> Macro.prewalker()
+    |> Enum.filter(fn
+      {kind, _, _} = d when kind in [:def, :defp] -> contains_node?(d, node)
+      _ -> false
+    end)
+    |> List.last()
+    |> Kernel.||(root)
+  end
+
+  defp contains_node?(haystack, needle) do
+    haystack
+    |> Macro.prewalker()
+    |> Enum.any?(&(&1 == needle))
+  end
+
+  defp count_var(ast, var) do
+    {_, count} =
+      Macro.prewalk(ast, 0, fn
+        {^var, _meta, ctx} = node, acc when is_atom(ctx) -> {node, acc + 1}
+        node, acc -> {node, acc}
+      end)
+
+    count
   end
 
   # `compute_<var>` — drop trailing `?`/`!` if present.

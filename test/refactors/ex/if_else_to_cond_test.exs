@@ -225,6 +225,82 @@ defmodule Number42.Refactors.Ex.IfElseToCondTest do
     end
   end
 
+  describe "rewrites — pure outer-body bindings hoisted before cond" do
+    test "compound inner condition referencing a pure binding — binding hoisted, guards conjoined" do
+      before_source = """
+      def f(state, next) do
+        if next == nil do
+          total = state.a + state.b
+
+          if total > 0 do
+            vote
+          else
+            novote
+          end
+        else
+          novote
+        end
+      end
+      """
+
+      after_source = """
+      def f(state, next) do
+        total = state.a + state.b
+
+        cond do
+          next == nil and total > 0 -> vote
+          next == nil -> novote
+          true -> novote
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, after_source)
+    end
+
+    test "issue #8 repro: every guard survives as a conjunction, binding hoisted" do
+      # Historic failure mode: the whole compound guard was replaced by a
+      # no-op `compute_total.()` lambda call, silently dropping every guard.
+      before_source = """
+      def update_state(state, {_prev, _curr, next}, _emit_buf, _src, _grp) do
+        if next == nil do
+          total = state.literal_count + state.id_count
+
+          if total > 0 and not state.has_control_flow and
+               state.literal_count / total > 0.6 do
+            {MapSet.new([{:data_vote, 2}]), :halt}
+          else
+            {MapSet.new(), state}
+          end
+        else
+          {MapSet.new(), state}
+        end
+      end
+      """
+
+      after_source = """
+      def update_state(state, {_prev, _curr, next}, _emit_buf, _src, _grp) do
+        total = state.literal_count + state.id_count
+
+        cond do
+          next == nil and
+              (total > 0 and not state.has_control_flow and
+                 state.literal_count / total > 0.6) ->
+            {MapSet.new([{:data_vote, 2}]), :halt}
+
+          next == nil ->
+            {MapSet.new(), state}
+
+          true ->
+            {MapSet.new(), state}
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, after_source)
+    end
+  end
+
   describe "skips — semantics-changing or ambiguous shapes" do
     test "inner if without else is left alone" do
       assert_unchanged(@subject, """
@@ -283,30 +359,6 @@ defmodule Number42.Refactors.Ex.IfElseToCondTest do
           else
             c
           end
-        end
-      end
-      """)
-    end
-
-    test "inner condition is a compound expression referencing an outer-body binding — skip (issue #8)" do
-      # Repro from the issue. The outer `if` body introduces `total`, and the
-      # inner `if` guards on a compound expression that *references* `total`.
-      # Flattening here previously replaced the WHOLE compound guard with a
-      # no-op `compute_total.()` lambda call, silently dropping every guard.
-      # Safest default: leave it alone.
-      assert_unchanged(@subject, """
-      def update_state(state, {_prev, _curr, next}, _emit_buf, _src, _grp) do
-        if next == nil do
-          total = state.literal_count + state.id_count
-
-          if total > 0 and not state.has_control_flow and
-               state.literal_count / total > 0.6 do
-            {MapSet.new([{:data_vote, 2}]), :halt}
-          else
-            {MapSet.new(), state}
-          end
-        else
-          {MapSet.new(), state}
         end
       end
       """)
