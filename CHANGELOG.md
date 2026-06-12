@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `MemberToInOperator`: `Enum.member?(coll, x)` → `x in coll`, negated
+  calls fold to `not in`; guard context gated on literal collections.
+- `MapSumToSumBy`: `Enum.map(coll, fun) |> Enum.sum()` →
+  `Enum.sum_by(coll, fun)` (Elixir 1.18+).
+- `EnumFindToKeyfind`: `Enum.find(list, fn {k, _} -> k == key end)` →
+  `List.keyfind(list, key, 0)`, incl. the `elem(t, n) ==` form.
+- `MergePipelineIntoComprehension` now also fuses
+  `Enum.reject |> Enum.map` (`for x <- coll, !pred(x), do: f(x)`).
 - Initial public release, extracted from an internal project.
 - ~60 AST refactors covering Enum/Map/Stream idioms, pattern-matching
   rewrites, pipe and `with` reshaping, definition hygiene, cross-file

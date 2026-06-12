@@ -121,6 +121,7 @@ defmodule Number42.Refactors.MixProject do
         ],
         "Refactors – Enum / Map / Stream": [
           Number42.Refactors.Ex.EnumCapture,
+          Number42.Refactors.Ex.EnumFindToKeyfind,
           Number42.Refactors.Ex.EnumIntoToMapNew,
           Number42.Refactors.Ex.EnumMapIntoToMapNew,
           Number42.Refactors.Ex.EnumReduceToSum,
@@ -128,6 +129,9 @@ defmodule Number42.Refactors.MixProject do
           Number42.Refactors.Ex.FlatMapToFilter,
           Number42.Refactors.Ex.MapNewLambdaToForComprehension,
           Number42.Refactors.Ex.MapNewToPipe,
+          Number42.Refactors.Ex.MapSumToSumBy,
+          Number42.Refactors.Ex.MemberToInOperator,
+          Number42.Refactors.Ex.MergePipelineIntoComprehension,
           Number42.Refactors.Ex.ReduceAsMap,
           Number42.Refactors.Ex.ReduceMapPut,
           Number42.Refactors.Ex.RejectIsNil,
