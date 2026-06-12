@@ -23,7 +23,7 @@ defmodule Number42.Refactors.Ex.ExtractCondToGuardClausesTest do
       defmodule M do
         def classify(n) when n < 0, do: :neg
         def classify(n) when n == 0, do: :zero
-        def classify(n), do: :pos
+        def classify(_n), do: :pos
       end
       """
 
@@ -47,7 +47,7 @@ defmodule Number42.Refactors.Ex.ExtractCondToGuardClausesTest do
       defmodule M do
         def kind(x) when is_atom(x), do: :atom
         def kind(x) when is_integer(x) and x > 10, do: :big_int
-        def kind(x), do: :other
+        def kind(_x), do: :other
       end
       """
 
@@ -77,7 +77,7 @@ defmodule Number42.Refactors.Ex.ExtractCondToGuardClausesTest do
           x + 1
         end
 
-        def step(n), do: 0
+        def step(_n), do: 0
       end
       """
 
@@ -101,11 +101,74 @@ defmodule Number42.Refactors.Ex.ExtractCondToGuardClausesTest do
       defmodule M do
         defp tier(score) when score >= 90, do: :gold
         defp tier(score) when score >= 50, do: :silver
-        defp tier(score), do: :bronze
+        defp tier(_score), do: :bronze
       end
       """
 
       assert_rewrites(@subject, before_source, expected)
+    end
+  end
+
+  describe "unused parameters per lifted clause" do
+    test "params unused in a clause are underscored" do
+      before_source = """
+      defmodule M do
+        defp clamp(is, min, max) do
+          cond do
+            is > max -> max
+            is < min -> min
+            true -> is
+          end
+        end
+      end
+      """
+
+      expected = """
+      defmodule M do
+        defp clamp(is, _min, max) when is > max, do: max
+        defp clamp(is, min, _max) when is < min, do: min
+        defp clamp(is, _min, _max), do: is
+      end
+      """
+
+      assert_rewrites(@subject, before_source, expected)
+    end
+
+    test "body-only usage keeps the param named" do
+      before_source = """
+      defmodule M do
+        def pick(a, b) do
+          cond do
+            a > 0 -> b
+            true -> a
+          end
+        end
+      end
+      """
+
+      expected = """
+      defmodule M do
+        def pick(a, b) when a > 0, do: b
+        def pick(a, _b), do: a
+      end
+      """
+
+      assert_rewrites(@subject, before_source, expected)
+    end
+
+    test "skips when a param is already underscored (bare_var rejects it)" do
+      source = """
+      defmodule M do
+        def f(n, _opts) do
+          cond do
+            n > 0 -> :pos
+            true -> :neg
+          end
+        end
+      end
+      """
+
+      assert_unchanged(@subject, source)
     end
   end
 
