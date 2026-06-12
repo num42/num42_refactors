@@ -299,6 +299,133 @@ defmodule Number42.Refactors.Ex.IfElseToCondTest do
 
       assert_rewrites(@subject, before_source, after_source)
     end
+
+    test "cascading bindings across levels hoist in order" do
+      before_source = """
+      def f(state) do
+        if state.mode == :off do
+          :off
+        else
+          t1 = state.a + state.b
+
+          if t1 > 0 do
+            :pos
+          else
+            t2 = t1 * -1
+
+            if t2 > 5 do
+              :very_neg
+            else
+              :mild
+            end
+          end
+        end
+      end
+      """
+
+      after_source = """
+      def f(state) do
+        t1 = state.a + state.b
+        t2 = t1 * -1
+
+        cond do
+          state.mode == :off -> :off
+          t1 > 0 -> :pos
+          t2 > 5 -> :very_neg
+          true -> :mild
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, after_source)
+    end
+  end
+
+  describe "skips — hoisting safety gates" do
+    test "compound condition over an impure binding (function call RHS) — skip" do
+      assert_unchanged(@subject, """
+      def f(state, next) do
+        if next == nil do
+          total = compute_total(state)
+
+          if total > 0 and total < 100 do
+            vote
+          else
+            novote
+          end
+        else
+          novote
+        end
+      end
+      """)
+    end
+
+    test "binding name already bound before the if and used after it — skip" do
+      # Hoisting would rebind `total` for the code after the cond.
+      assert_unchanged(@subject, """
+      def f(state, next) do
+        total = state.x
+
+        r =
+          if next == nil do
+            total = state.a + state.b
+
+            if total > 0 do
+              :hot
+            else
+              :cold
+            end
+          else
+            :cold
+          end
+
+        {r, total}
+      end
+      """)
+    end
+
+    test "binding name shadows a function parameter — skip" do
+      assert_unchanged(@subject, """
+      def f(total, next) do
+        if next == nil do
+          total = total + 1
+
+          if total > 0 do
+            :hot
+          else
+            :cold
+          end
+        else
+          :cold
+        end
+      end
+      """)
+    end
+
+    test "same binding name introduced on two levels — skip" do
+      # Hoisting both would let the second rebinding leak into every arm.
+      assert_unchanged(@subject, """
+      def f(state) do
+        if state.off do
+          :off
+        else
+          t = state.p + 1
+
+          if t > 0 do
+            :p_pos
+          else
+            t = state.q + 1
+
+            if t > 0 do
+              :q_pos
+            else
+              :rest
+            end
+          end
+        end
+      end
+      """)
+    end
   end
 
   describe "skips — semantics-changing or ambiguous shapes" do
