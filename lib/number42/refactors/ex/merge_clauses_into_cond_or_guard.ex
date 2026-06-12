@@ -25,6 +25,15 @@ defmodule Number42.Refactors.Ex.MergeClausesIntoCondOrGuard do
   single `def` whose body is a `cond`, which `IfLiftToClauses` won't
   touch (that one matches single-`if` bodies, not `cond`).
 
+  It is also the inverse of `ExtractCondToGuardClauses`. Both share the
+  `clause_worthy_body?/1` heuristic so the two target forms are
+  disjoint: clauses merge into a `cond` only when **every** body is
+  simple; a clause whose body is clause-worthy (a multi-statement
+  block, or a pipe of two or more stages) keeps its own clause, which
+  is exactly the form the extract refactor produces. Without the shared
+  heuristic the two refactors would ping-pong the same function between
+  forms on every pass.
+
   ## Why a total fallback is mandatory
 
   A function with no matching clause raises `FunctionClauseError`. A
@@ -54,6 +63,10 @@ defmodule Number42.Refactors.Ex.MergeClausesIntoCondOrGuard do
 
   ## What we skip
 
+    * **Clause-worthy bodies.** A clause whose body is a
+      multi-statement block or contains a multi-stage pipe stays a
+      clause — inlining it into a `cond` arm hurts readability and
+      would oscillate with `ExtractCondToGuardClauses`. SKIP the run.
     * **Pattern bindings.** `def f({:ok, v})` binds `v` via the head;
       `cond` can't. Any clause head with a non-bare-variable parameter
       (destructuring, literal, struct, `_`) makes the run unmergeable —
@@ -190,6 +203,7 @@ defmodule Number42.Refactors.Ex.MergeClausesIntoCondOrGuard do
 
     with true <- only_run_for_key?(key, all_exprs, length(run)),
          {:ok, clauses} <- analyze_clauses(run),
+         false <- Enum.any?(clauses, &clause_worthy_body?(&1.body)),
          {:ok, param_text} <- identical_bare_params(clauses, source),
          {:ok, guarded, fallback} <- split_guarded_and_fallback(clauses) do
       replacement = render_merged(kind, fn_name(key), param_text, guarded, fallback)
