@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `MapPutChainToLiteral`: `%{}`-seeded `Map.put/3` rebind chains now
+  collapse to map literals, while mixed chains and interleaved reads
+  are left alone.
 - `MemberToInOperator`: `Enum.member?(coll, x)` → `x in coll`, negated
   calls fold to `not in`; guard context gated on literal collections.
 - `MapSumToSumBy`: `Enum.map(coll, fun) |> Enum.sum()` →

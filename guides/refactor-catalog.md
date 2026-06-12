@@ -97,6 +97,10 @@ function that already does the same thing.
 
 > `Map.new(coll)` → `coll |> Map.new()`.
 
+### `Number42.Refactors.Ex.MapPutChainToLiteral`
+
+> `%{}`-seeded `Map.put/3` rebind chains → map literals.
+
 ### `Number42.Refactors.Ex.MapSumToSumBy`
 
 > `Enum.map(coll, fun) |> Enum.sum()` → `Enum.sum_by(coll, fun)`.
