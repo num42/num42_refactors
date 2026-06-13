@@ -10,17 +10,18 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPatternTest do
     end)
   end
 
-  # Two structs the inference can resolve against, sharing `id`/`name`
-  # (so `id+name` alone is ambiguous, but a distinctive field pins one).
+  # Two structs the inference can resolve against, sharing the generic
+  # `id`/`name` (so those alone are ambiguous AND don't count toward the
+  # distinctive-field threshold) but each with two distinctive fields.
   defp struct_defs do
     {"Schemas",
      """
        defmodule Position do
-         defstruct [:id, :name, :parent_id]
+         defstruct [:id, :name, :parent_id, :depth]
        end
 
        defmodule Item do
-         defstruct [:id, :name, :sku]
+         defstruct [:id, :name, :sku, :price]
        end
      """}
   end
@@ -30,8 +31,8 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPatternTest do
   describe "struct index" do
     test "reads defstruct field lists project-wide" do
       idx = plan([]).structs
-      assert MapSet.equal?(idx[Position], MapSet.new([:id, :name, :parent_id]))
-      assert MapSet.equal?(idx[Item], MapSet.new([:id, :name, :sku]))
+      assert MapSet.equal?(idx[Position], MapSet.new([:id, :name, :parent_id, :depth]))
+      assert MapSet.equal?(idx[Item], MapSet.new([:id, :name, :sku, :price]))
     end
 
     test "reads defstruct keyword form (a: 1, b: 2)" do
@@ -43,38 +44,59 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPatternTest do
   end
 
   describe "lifting on a unique field-set match" do
-    test "a distinctive field set pins one struct and lifts the head" do
-      # parent_id + name: only Position has both (Item has name, no parent_id)
-      src = "defmodule R do\n  def f(r), do: {r.parent_id, r.name}\nend\n"
+    test "two distinctive fields pin one struct and lift the head" do
+      # parent_id + depth: both distinctive, only Position has them
+      src = "defmodule R do\n  def f(r), do: {r.parent_id, r.depth}\nend\n"
       idx = plan([]).structs
 
       assert_rewrites(
         Subject,
         src,
-        "defmodule R do\n  def f(%Position{} = r), do: {r.parent_id, r.name}\nend\n",
+        "defmodule R do\n  def f(%Position{} = r), do: {r.parent_id, r.depth}\nend\n",
         prepared: %{structs: idx}
       )
     end
 
-    test "a single accessed field is too thin to pin a struct (declined)" do
-      # parent_id alone fits only Position, but one generic field is not
-      # enough proof — the min_fields floor declines it
+    test "a single distinctive field is too thin to pin a struct (declined)" do
+      # parent_id alone fits only Position, but one field is not enough proof
       src = "defmodule R do\n  def f(r), do: r.parent_id\nend\n"
       assert_unchanged(Subject, src, prepared: %{structs: plan([]).structs})
 
-      assert %{reason: :too_few_fields} =
+      assert %{reason: :too_few_distinctive_fields} =
                Enum.find(
                  plan([{"R", "  def f(r), do: r.parent_id\n"}]).declined,
                  &(&1.name == :f)
                )
     end
 
+    test "generic fields (id/name/type) don't count toward the threshold" do
+      # only generic fields read — distinctive count is 0, so declined even
+      # though id+name+depth would uniquely fit Position
+      src = "defmodule R do\n  def f(r), do: {r.id, r.name, r.type}\nend\n"
+      assert_unchanged(Subject, src, prepared: %{structs: plan([]).structs})
+
+      assert %{reason: :too_few_distinctive_fields} =
+               Enum.find(
+                 plan([{"R", "  def f(r), do: {r.id, r.name}\n"}]).declined,
+                 &(&1.name == :f)
+               )
+    end
+
+    test "a generic field plus enough distinctive ones still lifts" do
+      # name (generic) + parent_id + depth (distinctive) → 2 distinctive, lifts
+      src = "defmodule R do\n  def f(r), do: {r.name, r.parent_id, r.depth}\nend\n"
+
+      assert Subject.transform(src, prepared: %{structs: plan([]).structs}) =~
+               "def f(%Position{} = r)"
+    end
+
     test "the body is left untouched, only the head changes" do
-      src = "defmodule R do\n  def f(r), do: %{out: r.sku, n: r.name}\nend\n"
+      # sku + price: both distinctive, only Item — and not a struct builder
+      src = "defmodule R do\n  def f(r), do: %{out: r.sku, p: r.price}\nend\n"
       out = Subject.transform(src, prepared: %{structs: plan([]).structs})
 
       assert out =~ "def f(%Item{} = r)"
-      assert out =~ "%{out: r.sku, n: r.name}"
+      assert out =~ "%{out: r.sku, p: r.price}"
     end
 
     test "nested-alias structs resolve to their full name" do
@@ -109,16 +131,21 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPatternTest do
   end
 
   describe "declines (the inference guard)" do
-    test "an ambiguous field set (fits >=2 structs) is left alone" do
-      # id+name fits both Position and Item
-      src = "defmodule R do\n  def f(r), do: {r.id, r.name}\nend\n"
-      assert_unchanged(Subject, src, prepared: %{structs: plan([]).structs})
+    test "an ambiguous field set (fits >=2 structs on distinctive fields) is left alone" do
+      # foo + bar are distinctive yet shared by both Alpha and Beta → ambiguous
+      modules = [
+        {"Alpha", "  defstruct [:foo, :bar, :only_a]\n"},
+        {"Beta", "  defstruct [:foo, :bar, :only_b]\n"}
+      ]
 
-      assert %{reason: :ambiguous_struct} =
-               Enum.find(
-                 plan([{"R", "  def f(r), do: {r.id, r.name}\n"}]).declined,
-                 &(&1.name == :f)
-               )
+      idx = Subject.build_plan(sources(modules)).structs
+      src = "defmodule R do\n  def f(r), do: {r.foo, r.bar}\nend\n"
+      assert_unchanged(Subject, src, prepared: %{structs: idx})
+
+      declined =
+        Subject.build_plan(sources(modules ++ [{"R", "  def f(r), do: {r.foo, r.bar}\n"}])).declined
+
+      assert %{reason: :ambiguous_struct} = Enum.find(declined, &(&1.name == :f))
     end
 
     test "a field set fitting NO struct is left alone (the projection acid test)" do
@@ -233,7 +260,7 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPatternTest do
 
   describe "report/1" do
     test "lists liftable params with their inference source" do
-      report = Subject.report(plan([{"R", "  def f(r), do: {r.parent_id, r.name}\n"}]))
+      report = Subject.report(plan([{"R", "  def f(r), do: {r.parent_id, r.depth}\n"}]))
       assert report =~ "R.f/1 (r) -> %Position{} (via fields)"
     end
 

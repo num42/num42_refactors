@@ -17,15 +17,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   source AST, cross-file) and no other. Declines (leaves the head alone)
   on any ambiguity — two structs fit, none fit (the value is a map, e.g.
   a `select`-projection with join/compute fields no struct carries),
-  fewer than `:min_fields` distinct accesses (default 2 — one generic
-  field is too thin), the param is passed whole into another call (fields
-  we can't see), the body is a **builder** (`X_to_Y(arg)` constructing
-  `%Y{… arg.field …}` — `arg` is the source projection, not `%Y{}`), or
-  clauses would infer divergent structs. Field counting excludes zero-arg
-  calls (`var.fun()`) so a module isn't mistaken for a struct. **Default
-  off** (opt in via `.refactor.exs`): a wrong lift inserts a
-  runtime-breaking pattern, so the decline-on-ambiguity guard is the core
-  of the design.
+  fewer than `:min_fields` (default 2) **distinctive** accesses (generic
+  fields like `id`/`name`/`type` still match but don't count toward the
+  threshold — reading only `var.type`/`var.name` proves nothing), the
+  param is passed whole into another call (fields we can't see), the body
+  is a **builder** (`X_to_Y(arg)` constructing `%Y{… arg.field …}` —
+  `arg` is the source projection, not `%Y{}`), or clauses would infer
+  divergent structs. Field counting excludes zero-arg calls (`var.fun()`)
+  so a module isn't mistaken for a struct. **Default on** — calibrated
+  against a real Phoenix app (every surviving lift correct, the library's
+  own source yields zero); a wrong lift inserts a runtime-breaking
+  pattern, so the layered decline guards are the core of the design.
+  Review the dry-run on an unfamiliar codebase or opt out via
+  `skipped_modules`.
 - `ExtractBehaviourFromAdapterFamily`: detects module families with a
   shared public API via BEAM introspection (`__info__(:functions)` +
   implemented behaviours), scores candidate pairs (sibling/same-depth

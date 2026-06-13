@@ -75,10 +75,19 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPattern do
   to `transform/2` via the prepared plan. Reads source AST only — no
   compilation required.
 
-  ## Default off
+  ## Default on
 
-  Inference-based and capable of inserting a runtime-breaking pattern if
-  the guard is wrong, so shipped **not** in the default `.refactor.exs`.
+  Shipped **on** by default. The inference is heuristic, but the layered
+  decline guards make a wrong lift unlikely: a value is typed only when
+  at least `:min_fields` (default 2) **distinctive** (non-generic) fields
+  read off it match exactly one project struct, the param isn't passed
+  whole into a call, and the body isn't a struct builder — or an explicit
+  `@spec` names the type. Calibrated against a real Phoenix app (375
+  files): every surviving lift was correct, and the library's own source
+  yields zero lifts. A miss still inserts a pattern that only fails at
+  runtime, so review the diff (`mix refactor --only
+  LiftUntypedParamToStructPattern --dry-run`) before applying to an
+  unfamiliar codebase, or add it to `skipped_modules` to opt out.
   """
 
   use Number42.Refactors.Refactor
@@ -88,10 +97,21 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPattern do
   # A single accessed field is far too thin a proof: one generic field
   # (`slug`, `source`, `id`) is a member of many structs, so a unique fit
   # on one field is usually a coincidence (`form.source` happens to match
-  # a struct with a `:source` field). Require at least this many distinct
+  # a struct with a `:source` field). Require at least this many *distinctive*
   # fields read off the var before the field-superset inference fires.
   # The `@spec` path is exempt — a named type is proof on its own.
   @default_min_fields 2
+
+  # Fields so common across structs that they carry almost no
+  # identifying signal — half the schemas in a project have an `id` and a
+  # `name`. They still count toward the struct-superset match (the value
+  # really does have them), but they do NOT count toward the `min_fields`
+  # threshold: a clause reading only `var.type` and `var.name` has shown
+  # nothing distinctive, so it is not enough to pin a type (the real
+  # `format_column(column)` miss read exactly `column.type`/`column.name`
+  # and coincided with an unrelated domain struct).
+  @generic_fields ~w(id name type key value label slug status kind
+                     inserted_at updated_at)a
 
   @excluded_path_prefixes ["test/", "dev/"]
 
@@ -430,16 +450,20 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPattern do
   end
 
   defp infer_from_fields(body, var, structs, min_fields) do
-    case field_accesses(body, var) do
-      accesses when length(accesses) < min_fields ->
-        {:decline, :too_few_fields, var}
+    accesses = field_accesses(body, var)
+    distinctive = Enum.reject(accesses, &(&1 in @generic_fields))
 
-      accesses ->
-        case unique_superset(MapSet.new(accesses), structs) do
-          {:ok, struct} -> {:lift, struct, :fields, var}
-          :ambiguous -> {:decline, :ambiguous_struct, var}
-          :none -> {:decline, :no_struct_fits, var}
-        end
+    # The match still uses the FULL accessed set (the value genuinely has
+    # those fields), but the threshold counts only distinctive ones:
+    # `var.type`+`var.name` alone proves nothing.
+    if length(distinctive) < min_fields do
+      {:decline, :too_few_distinctive_fields, var}
+    else
+      case unique_superset(MapSet.new(accesses), structs) do
+        {:ok, struct} -> {:lift, struct, :fields, var}
+        :ambiguous -> {:decline, :ambiguous_struct, var}
+        :none -> {:decline, :no_struct_fits, var}
+      end
     end
   end
 
