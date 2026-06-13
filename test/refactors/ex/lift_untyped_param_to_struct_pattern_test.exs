@@ -334,15 +334,26 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPatternTest do
       assert %{struct: Position, via: :call_site} = lift(plan(modules), :f)
     end
 
-    test "a struct bound earlier in the caller is NOT yet tracked (declines)" do
+    test "a struct bound in the caller head and passed bare is tracked" do
       # %Position{} = p in the head, then P.f(p): p is a bare var at the
-      # call site. Variable-binding tracking is a later refinement.
+      # call site, but bound to %Position{} in scope — the binding tracker
+      # carries the type to the call.
       modules = [
         {"P", "  def f(r), do: r.id\n"},
         {"Caller", "  def go(%Position{} = p), do: P.f(p)\n"}
       ]
 
-      assert %{reason: _} = declined(plan(modules), :f)
+      assert %{struct: Position, via: :call_site} = lift(plan(modules), :f)
+    end
+
+    test "a struct bound in the caller body and passed bare is tracked" do
+      # p = %Item{...} then P.f(p): the body match binds p to %Item{}
+      modules = [
+        {"P", "  def f(r), do: r.id\n"},
+        {"Caller", "  def go do\n    p = %Item{id: 1, sku: \"x\"}\n    P.f(p)\n  end\n"}
+      ]
+
+      assert %{struct: Item, via: :call_site} = lift(plan(modules), :f)
     end
 
     test "a bare variable argument carries no call-site signal (declines)" do

@@ -27,10 +27,13 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPattern do
      Binding even over the builder guard below.
   2. **Call sites (AST).** A project-wide scan of every call to the
      function: an argument that is a struct literal (`f(%Brand{})`,
-     `f(%Brand{} = x)`) reveals the parameter's type by real data flow.
-     Overrides a weaker field guess to the same struct (and a *conflict*
-     with the field guess declines); rescues a body that proved nothing.
-     When callers pass **several** distinct structs, see Polymorphism.
+     `f(%Brand{} = x)`) — or a **variable bound to a struct** earlier in
+     the caller clause (`%Brand{} = b` in the head, or `b = %Brand{…}` in
+     the body, then `f(b)`) — reveals the parameter's type by real data
+     flow. Overrides a weaker field guess to the same struct (and a
+     *conflict* with the field guess declines); rescues a body that proved
+     nothing. When callers pass **several** distinct structs, see
+     Polymorphism.
   3. **Field-superset.** Collect the `var.field` accesses; if exactly one
      in-project struct's field set is a superset of them *and no other
      struct's is*, that is the type. Two or more fit → ambiguous →
@@ -343,46 +346,107 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPattern do
 
   defp module_call_sites({:defmodule, _, [name_ast, [{_do, body}]]}, structs) do
     case alias_to_module(name_ast) do
-      {:ok, module} -> calls_in_ast(body, module, structs)
-      :error -> []
+      {:ok, module} ->
+        body
+        |> body_to_exprs()
+        |> Enum.flat_map(&clause_call_sites(&1, module, structs))
+
+      :error ->
+        []
     end
   end
 
   defp module_call_sites(_node, _structs), do: []
 
+  # Call sites within one function clause, with the clause's struct-bound
+  # variables in scope. A var bound to a struct in the head (`%Brand{} =
+  # b`) or body (`b = %Brand{}`) and then passed as a bare arg counts as a
+  # struct call site — the literal-only scan would miss it.
+  defp clause_call_sites({kind, _, [head | rest]}, enclosing, structs)
+       when kind in [:def, :defp] do
+    bindings = clause_struct_bindings(strip_when(head), clause_body(rest), structs)
+    calls_in_ast(clause_body(rest), enclosing, structs, bindings)
+  end
+
+  defp clause_call_sites(_expr, _enclosing, _structs), do: []
+
+  # `%{var => struct}` for variables provably bound to an in-project
+  # struct within the clause: head params (`%Brand{} = b`) and top-level
+  # body matches (`b = %Brand{...}`, `%Brand{} = b = expr`).
+  defp clause_struct_bindings(head, body, structs) do
+    head_bindings = head |> head_args() |> Enum.flat_map(&binding_from_pattern(&1, structs))
+    body_bindings = body |> body_to_exprs() |> Enum.flat_map(&binding_from_match(&1, structs))
+
+    Map.new(head_bindings ++ body_bindings)
+  end
+
+  defp head_args(head) do
+    case name_and_args(head) do
+      {:ok, _name, args} -> args
+      :error -> []
+    end
+  end
+
+  # `%Brand{} = b` (head param or body match) -> {b, Brand}. The var is
+  # whichever side is a bare var; the struct whichever side is a literal.
+  defp binding_from_pattern({:=, _, [lhs, rhs]}, structs) do
+    struct = literal_struct(lhs, structs) || literal_struct(rhs, structs)
+    var = pattern_var(lhs) || pattern_var(rhs)
+
+    if struct && var, do: [{var, struct}], else: []
+  end
+
+  defp binding_from_pattern(_node, _structs), do: []
+
+  defp binding_from_match({:=, _, _} = match, structs), do: binding_from_pattern(match, structs)
+  defp binding_from_match(_expr, _structs), do: []
+
+  defp pattern_var({var, _meta, ctx}) when is_atom(var) and is_atom(ctx), do: var
+  defp pattern_var(_node), do: nil
+
   # Every call node under `body`, mapped to `{key, arg_struct_map}`.
-  defp calls_in_ast(body, enclosing, structs) do
+  defp calls_in_ast(body, enclosing, structs, bindings) do
     body
     |> Macro.prewalker()
-    |> Enum.flat_map(&call_record(&1, enclosing, structs))
+    |> Enum.flat_map(&call_record(&1, enclosing, structs, bindings))
   end
 
   # Remote call `Mod.fun(args)`.
-  defp call_record({{:., _, [mod_ast, fun]}, _, args}, _enclosing, structs)
+  defp call_record({{:., _, [mod_ast, fun]}, _, args}, _enclosing, structs, bindings)
        when is_atom(fun) and is_list(args) do
     case alias_to_module(mod_ast) do
-      {:ok, module} -> [{{module, fun, length(args)}, arg_structs(args, structs)}]
+      {:ok, module} -> [{{module, fun, length(args)}, arg_structs(args, structs, bindings)}]
       :error -> []
     end
   end
 
   # Local call `fun(args)` — attributed to the enclosing module. Excludes
   # AST operators and the dotted-access node handled above.
-  defp call_record({fun, _, args}, enclosing, structs)
+  defp call_record({fun, _, args}, enclosing, structs, bindings)
        when is_atom(fun) and is_list(args) and fun not in @non_call_forms do
-    [{{enclosing, fun, length(args)}, arg_structs(args, structs)}]
+    [{{enclosing, fun, length(args)}, arg_structs(args, structs, bindings)}]
   end
 
-  defp call_record(_node, _enclosing, _structs), do: []
+  defp call_record(_node, _enclosing, _structs, _bindings), do: []
 
-  # `%{pos => struct | nil}` for each argument position, recording the
-  # struct identity of explicit struct literals (`%Brand{}`, `%Brand{} =
-  # x`) when the struct is in-project; nil otherwise.
-  defp arg_structs(args, structs) do
+  # `%{pos => struct | nil}` for each argument position: a struct literal
+  # (`%Brand{}`, `%Brand{} = x`) or a bare var bound to a struct earlier
+  # in the clause; nil otherwise.
+  defp arg_structs(args, structs, bindings) do
     args
     |> Enum.with_index()
-    |> Map.new(fn {arg, pos} -> {pos, literal_struct(arg, structs)} end)
+    |> Map.new(fn {arg, pos} -> {pos, arg_struct(arg, structs, bindings)} end)
   end
+
+  defp arg_struct(arg, structs, bindings) do
+    literal_struct(arg, structs) || bound_var_struct(arg, bindings)
+  end
+
+  defp bound_var_struct({var, _meta, ctx}, bindings) when is_atom(var) and is_atom(ctx) do
+    Map.get(bindings, var)
+  end
+
+  defp bound_var_struct(_node, _bindings), do: nil
 
   # `%Brand{...}` -> Brand (if in-project); `%Brand{} = _` (either side) ->
   # same; anything else -> nil.

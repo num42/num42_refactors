@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `LiftUntypedParamToStructPattern`'s call-site source now tracks
+  **variable bindings**, not just struct literals at the call. A var
+  bound to a struct in the caller's head (`%Brand{} = b`) or body
+  (`b = %Brand{…}`) and then passed bare (`f(b)`) is recognised as a
+  struct call site. Bindings are scoped per clause. On position-db this
+  added 2 lifts (`ItemImport.persist`/`valid_unique_rows` off a
+  `workbook = %Workbook{…}` body binding), bringing the running total to
+  16 (from the 3-lift spec+fields baseline).
 - `LiftUntypedParamToStructPattern` gains an **AST delegation** source and
   a **fixpoint loop**. A param the body proves nothing about but passes
   whole into a call (`f(arg), do: Shared.g(arg)`) borrows its type from the
