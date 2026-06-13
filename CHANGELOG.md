@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `LiftUntypedParamToStructPattern` now infers struct types from **two
+  more sources** beyond `@spec` + field-superset, strongest first:
+  **call sites** (a project-wide AST scan — a struct literal passed at a
+  call, `f(%Brand{})`, types the parameter by real data flow; overrides a
+  weaker field guess, declines on conflict, rescues a body that proved
+  nothing) and **Dialyzer success typing** (the project PLT is read
+  directly via `:dialyzer_cplt`/`:dialyzer_plt` — the only source that
+  sees through delegation, e.g. `f(arg), do: Shared.g(arg)` where `g/1`
+  matches `%Scope{}` back-propagates `arg :: %Scope{}`; opt out with
+  `dialyzer: false`, point at a PLT with `plt_path:`). Visible code always
+  wins over Dialyzer; the builder/projection decline is preserved by both.
+  When call sites pass **several** distinct structs, the single clause is
+  **duplicated** into one struct-typed head per target — but only when the
+  function has one clause and every field the body reads exists in every
+  target struct (else `:polymorphic_unsafe`). Calibrated against a real
+  Phoenix app: doubled the lift count (3 → 6), every new lift correct and
+  compiling under `--warnings-as-errors`.
 - `LiftUntypedParamToStructPattern`: lifts a bare untyped parameter to a
   struct-pattern match (`def f(r)` → `def f(%Position{} = r)`) when the
   body **proves** the type. Inference, strongest first: an existing

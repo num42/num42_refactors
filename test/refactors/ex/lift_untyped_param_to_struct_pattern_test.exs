@@ -10,6 +10,12 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPatternTest do
     end)
   end
 
+  # build_plan with the Dialyzer source OFF — these unit tests work on
+  # synthetic in-memory sources, not a compiled project with a PLT. The
+  # Dialyzer path is exercised separately against a real PLT.
+  defp bp(sources, opts \\ []),
+    do: Subject.build_plan(sources, Keyword.put(opts, :dialyzer, false))
+
   # Two structs the inference can resolve against, sharing the generic
   # `id`/`name` (so those alone are ambiguous AND don't count toward the
   # distinctive-field threshold) but each with two distinctive fields.
@@ -26,7 +32,11 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPatternTest do
      """}
   end
 
-  defp plan(modules), do: Subject.build_plan(sources([struct_defs() | modules]))
+  defp plan(modules), do: bp(sources([struct_defs() | modules]))
+
+  # The single lift / decline record for function `name` in a plan.
+  defp lift(plan, name), do: Enum.find(plan.lifts, &(&1.name == name))
+  defp declined(plan, name), do: Enum.find(plan.declined, &(&1.name == name))
 
   describe "struct index" do
     test "reads defstruct field lists project-wide" do
@@ -37,7 +47,7 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPatternTest do
 
     test "reads defstruct keyword form (a: 1, b: 2)" do
       idx =
-        Subject.build_plan(sources([{"K", "  defstruct foo: 1, bar: nil\n"}])).structs
+        bp(sources([{"K", "  defstruct foo: 1, bar: nil\n"}])).structs
 
       assert MapSet.equal?(idx[K], MapSet.new([:foo, :bar]))
     end
@@ -101,9 +111,7 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPatternTest do
 
     test "nested-alias structs resolve to their full name" do
       idx =
-        Subject.build_plan(
-          sources([{"Catalog.Widget", "  defstruct [:gadget_id, :widget_label]\n"}])
-        ).structs
+        bp(sources([{"Catalog.Widget", "  defstruct [:gadget_id, :widget_label]\n"}])).structs
 
       src = "defmodule R do\n  def f(r), do: {r.gadget_id, r.widget_label}\nend\n"
 
@@ -138,12 +146,12 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPatternTest do
         {"Beta", "  defstruct [:foo, :bar, :only_b]\n"}
       ]
 
-      idx = Subject.build_plan(sources(modules)).structs
+      idx = bp(sources(modules)).structs
       src = "defmodule R do\n  def f(r), do: {r.foo, r.bar}\nend\n"
       assert_unchanged(Subject, src, prepared: %{structs: idx})
 
       declined =
-        Subject.build_plan(sources(modules ++ [{"R", "  def f(r), do: {r.foo, r.bar}\n"}])).declined
+        bp(sources(modules ++ [{"R", "  def f(r), do: {r.foo, r.bar}\n"}])).declined
 
       assert %{reason: :ambiguous_struct} = Enum.find(declined, &(&1.name == :f))
     end
@@ -232,7 +240,7 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPatternTest do
   describe "consistency" do
     test "the lifted output compiles" do
       idx =
-        Subject.build_plan(sources([{"Widget", "  defstruct [:gizmo, :doohickey]\n"}])).structs
+        bp(sources([{"Widget", "  defstruct [:gizmo, :doohickey]\n"}])).structs
 
       lifted =
         Subject.transform(
@@ -248,6 +256,329 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPatternTest do
       idx = plan([]).structs
       src = "defmodule R do\n  def f(r), do: r.parent_id\nend\n"
       assert_idempotent(Subject, src, prepared: %{structs: idx})
+    end
+  end
+
+  describe "call-site inference" do
+    test "a struct literal at a call site rescues a body that proves nothing" do
+      # P.f(r) reads only r.id (generic, too thin) — body declines. But a
+      # caller passes %Position{}, so the call site reveals the type.
+      modules = [
+        {"P", "  def f(r), do: r.id\n"},
+        {"Caller", "  def go, do: P.f(%Position{id: 1})\n"}
+      ]
+
+      p = plan(modules)
+      assert %{struct: Position, via: :call_site} = lift(p, :f)
+    end
+
+    test "a call site overrides field inference to the same struct (via shifts)" do
+      # body fields uniquely fit Position; a caller confirms %Position{}
+      modules = [
+        {"P", "  def f(r), do: {r.parent_id, r.depth}\n"},
+        {"Caller", "  def go, do: P.f(%Position{})\n"}
+      ]
+
+      assert %{struct: Position, via: :call_site} = lift(plan(modules), :f)
+    end
+
+    test "a call site disagreeing with field inference declines as a conflict" do
+      # body fields say Position (parent_id+depth), caller passes %Item{}
+      modules = [
+        {"P", "  def f(r), do: {r.parent_id, r.depth}\n"},
+        {"Caller", "  def go, do: P.f(%Item{})\n"}
+      ]
+
+      assert %{reason: :call_site_field_conflict} = declined(plan(modules), :f)
+    end
+
+    test "an @spec wins over a contradicting call site" do
+      # spec says Item, caller passes %Position{} — the human-written spec binds
+      modules = [
+        {"P", "  @spec f(Item.t()) :: any()\n  def f(r), do: r.id\n"},
+        {"Caller", "  def go, do: P.f(%Position{})\n"}
+      ]
+
+      assert %{struct: Item, via: :spec} = lift(plan(modules), :f)
+    end
+
+    test "a builder decline is NOT rescued by a call site" do
+      # row_to_pos(row) builds %Position{...} from row — row is the source
+      # projection. A caller passing %Item{} must not retype the projection.
+      modules = [
+        {"P",
+         "  def row_to_pos(row), do: %Position{id: row.id, name: row.name, parent_id: row.parent_id}\n"},
+        {"Caller", "  def go, do: P.row_to_pos(%Item{})\n"}
+      ]
+
+      assert %{reason: :builds_struct_from_param} = declined(plan(modules), :row_to_pos)
+    end
+
+    test "a local call site (same module) is honoured" do
+      # f/1 is called locally with %Position{} in the same module
+      modules = [
+        {"P", "  def go, do: f(%Position{})\n  def f(r), do: r.id\n"}
+      ]
+
+      assert %{struct: Position, via: :call_site} = lift(plan(modules), :f)
+    end
+
+    test "a `%Struct{} = x` match directly in the argument counts as a call site" do
+      # the struct literal is at the call site itself (`P.f(%Position{} = p)`),
+      # not bound earlier — this slice reads literals, not variable bindings
+      modules = [
+        {"P", "  def f(r), do: r.id\n"},
+        {"Caller", "  def go(x), do: P.f(%Position{} = x)\n"}
+      ]
+
+      assert %{struct: Position, via: :call_site} = lift(plan(modules), :f)
+    end
+
+    test "a struct bound earlier in the caller is NOT yet tracked (declines)" do
+      # %Position{} = p in the head, then P.f(p): p is a bare var at the
+      # call site. Variable-binding tracking is a later refinement.
+      modules = [
+        {"P", "  def f(r), do: r.id\n"},
+        {"Caller", "  def go(%Position{} = p), do: P.f(p)\n"}
+      ]
+
+      assert %{reason: _} = declined(plan(modules), :f)
+    end
+
+    test "a bare variable argument carries no call-site signal (declines)" do
+      # P.f(x) with x untyped — no struct evident, body too thin → decline
+      modules = [
+        {"P", "  def f(r), do: r.id\n"},
+        {"Caller", "  def go(x), do: P.f(x)\n"}
+      ]
+
+      assert %{reason: reason} = declined(plan(modules), :f)
+      assert reason in [:too_few_distinctive_fields, :no_struct_fits]
+    end
+
+    test "the lifted head is patched even when only callers in other files prove it" do
+      modules = [
+        {"P", "  def f(r), do: r.id\n"},
+        {"Caller", "  def go, do: P.f(%Position{id: 1})\n"}
+      ]
+
+      {p_path, p_src} = Enum.find(sources(modules), fn {path, _} -> path == "lib/p.ex" end)
+      assert p_path == "lib/p.ex"
+
+      out = Subject.transform(p_src, prepared: plan(modules))
+      assert out =~ "def f(%Position{} = r)"
+    end
+  end
+
+  describe "polymorphism: duplicate the clause per struct" do
+    # Brand and Maker share id/name/slogan (the body reads name+slogan);
+    # each adds one distinctive field. A body reading only shared fields
+    # can be duplicated to both.
+    defp poly_struct_defs do
+      {"Schemas",
+       """
+         defmodule Brand do
+           defstruct [:id, :name, :slogan, :logo]
+         end
+
+         defmodule Maker do
+           defstruct [:id, :name, :slogan, :country]
+         end
+       """}
+    end
+
+    defp poly_plan(modules), do: bp(sources([poly_struct_defs() | modules]))
+
+    test "two struct call sites + field-compatible body lifts polymorphically" do
+      modules = [
+        {"P", "  def label(r), do: {r.name, r.slogan}\n"},
+        {"Caller", "  def a, do: P.label(%Brand{})\n  def b, do: P.label(%Maker{})\n"}
+      ]
+
+      l = lift(poly_plan(modules), :label)
+      assert l.via == :call_site_poly
+      assert l.struct == [Brand, Maker]
+    end
+
+    test "the clause is duplicated, one struct-typed head per target" do
+      modules = [
+        {"P", "  def label(r), do: {r.name, r.slogan}\n"},
+        {"Caller", "  def a, do: P.label(%Brand{})\n  def b, do: P.label(%Maker{})\n"}
+      ]
+
+      {_, p_src} = Enum.find(sources(modules), fn {path, _} -> path == "lib/p.ex" end)
+      out = Subject.transform(p_src, prepared: poly_plan(modules))
+
+      assert out =~ "def label(%Brand{} = r), do: {r.name, r.slogan}"
+      assert out =~ "def label(%Maker{} = r), do: {r.name, r.slogan}"
+    end
+
+    test "the duplicated output compiles" do
+      lifted =
+        Subject.transform(
+          "defmodule Brand do\n  defstruct [:id, :name, :slogan, :logo]\nend\n\ndefmodule Maker do\n  defstruct [:id, :name, :slogan, :country]\nend\n\ndefmodule P do\n  def label(r), do: {r.name, r.slogan}\nend\n",
+          prepared:
+            poly_plan([
+              {"P", "  def label(r), do: {r.name, r.slogan}\n"},
+              {"Caller", "  def a, do: P.label(%Brand{})\n  def b, do: P.label(%Maker{})\n"}
+            ])
+        )
+
+      assert lifted =~ "def label(%Brand{} = r)"
+      assert lifted =~ "def label(%Maker{} = r)"
+      assert_compiles(lifted)
+    end
+
+    test "a field the body reads but a target struct lacks declines (unsafe)" do
+      # Widget has no :slogan; duplicating to %Widget{} would break the body
+      modules = [
+        {"Schemas",
+         "  defmodule Brand do\n    defstruct [:id, :name, :slogan]\n  end\n  defmodule Widget do\n    defstruct [:id, :name, :gizmo]\n  end\n"},
+        {"P", "  def label(r), do: {r.name, r.slogan}\n"},
+        {"Caller", "  def a, do: P.label(%Brand{})\n  def b, do: P.label(%Widget{})\n"}
+      ]
+
+      plan = bp(sources(modules))
+      assert %{reason: :polymorphic_unsafe} = declined(plan, :label)
+    end
+
+    test "a multi-clause function never duplicates polymorphically" do
+      modules = [
+        {"P", "  def label(r) when is_nil(r.slogan), do: r.name\n  def label(r), do: r.slogan\n"},
+        {"Caller", "  def a, do: P.label(%Brand{})\n  def b, do: P.label(%Maker{})\n"}
+      ]
+
+      assert %{reason: :polymorphic_unsafe} = declined(poly_plan(modules), :label)
+    end
+
+    test "a param passed whole into a call declines even under polymorphism" do
+      modules = [
+        {"P", "  def label(r), do: render(r)\n"},
+        {"Caller", "  def a, do: P.label(%Brand{})\n  def b, do: P.label(%Maker{})\n"}
+      ]
+
+      assert %{reason: reason} = declined(poly_plan(modules), :label)
+      assert reason in [:polymorphic_unsafe, :param_passed_to_call]
+    end
+
+    test "the polymorphic lift is idempotent (already-typed heads don't re-lift)" do
+      modules = [
+        {"P", "  def label(r), do: {r.name, r.slogan}\n"},
+        {"Caller", "  def a, do: P.label(%Brand{})\n  def b, do: P.label(%Maker{})\n"}
+      ]
+
+      plan = poly_plan(modules)
+      {_, p_src} = Enum.find(sources(modules), fn {path, _} -> path == "lib/p.ex" end)
+
+      once = Subject.transform(p_src, prepared: plan)
+      # second pass: re-plan over the rewritten source; typed heads decline
+      replanned =
+        bp([
+          poly_struct_defs(),
+          {"lib/p.ex", once},
+          {"lib/caller.ex",
+           "defmodule Caller do\n  def a, do: P.label(%Brand{})\n  def b, do: P.label(%Maker{})\nend\n"}
+        ])
+
+      assert Subject.transform(once, prepared: replanned) == once
+    end
+  end
+
+  describe "Dialyzer source (injected index)" do
+    # Inject a pre-built Dialyzer index instead of reading a PLT, so these
+    # tests are deterministic and need no compiled project.
+    defp dz_plan(modules, index) do
+      Subject.build_plan(sources([struct_defs() | modules]),
+        dialyzer: false,
+        dialyzer_index: index
+      )
+    end
+
+    test "rescues a passed-whole decline the body can't prove" do
+      # f(r) delegates r to a helper — body sees no fields, so it declines.
+      # Dialyzer inferred %Position{} for the position; lift via :dialyzer.
+      modules = [{"P", "  def f(r), do: helper(r)\n"}]
+      index = %{{P, :f, 1} => %{0 => Position}}
+
+      l = lift(dz_plan(modules, index), :f)
+      assert l.struct == Position
+      assert l.via == :dialyzer
+    end
+
+    test "rescues a no-struct-fits decline" do
+      # body reads a field no struct carries -> :no_struct_fits; Dialyzer
+      # knows better.
+      modules = [{"P", "  def f(r), do: r.nonexistent_xyz\n"}]
+      index = %{{P, :f, 1} => %{0 => Item}}
+
+      assert %{struct: Item, via: :dialyzer} = lift(dz_plan(modules, index), :f)
+    end
+
+    test "does NOT override an existing field-inference lift" do
+      # body fields uniquely prove Position; Dialyzer says Item — the
+      # visible body wins, Dialyzer is the lowest-priority source.
+      modules = [{"P", "  def f(r), do: {r.parent_id, r.depth}\n"}]
+      index = %{{P, :f, 1} => %{0 => Item}}
+
+      assert %{struct: Position, via: :fields} = lift(dz_plan(modules, index), :f)
+    end
+
+    test "does NOT rescue a builder decline" do
+      # the param is the source projection feeding a struct build; a
+      # Dialyzer typing of it must not retype the projection.
+      modules = [
+        {"P",
+         "  def row_to_pos(row), do: %Position{id: row.id, name: row.name, parent_id: row.parent_id}\n"}
+      ]
+
+      index = %{{P, :row_to_pos, 1} => %{0 => Item}}
+      assert %{reason: :builds_struct_from_param} = declined(dz_plan(modules, index), :row_to_pos)
+    end
+
+    test "ignores a Dialyzer type for a struct that isn't in-project" do
+      # build_plan intersects against the struct index, so an injected
+      # index referencing an unknown struct simply doesn't apply — but a
+      # raw injected index bypasses that intersection, so here we assert
+      # the position with no entry is left declined.
+      modules = [{"P", "  def f(r), do: r.id\n"}]
+      index = %{{P, :other, 1} => %{0 => Position}}
+
+      assert %{reason: _} = declined(dz_plan(modules, index), :f)
+    end
+
+    test "patches the head for a Dialyzer-only lift" do
+      modules = [{"P", "  def f(r), do: helper(r)\n"}]
+      index = %{{P, :f, 1} => %{0 => Position}}
+      plan = dz_plan(modules, index)
+
+      {_, p_src} = Enum.find(sources(modules), fn {path, _} -> path == "lib/p.ex" end)
+      assert Subject.transform(p_src, prepared: plan) =~ "def f(%Position{} = r)"
+    end
+  end
+
+  describe "erl_type_struct/1 (format lock against real :erl_types)" do
+    test "extracts the module from a real Dialyzer struct map type" do
+      # Build the term the way Dialyzer does — if OTP changes the internal
+      # erl_types shape, this test breaks loudly instead of silently
+      # yielding an empty Dialyzer index.
+      key = :erl_types.t_atom(:__struct__)
+      val = :erl_types.t_atom(Position)
+      struct_type = :erl_types.t_map([{key, val}])
+
+      assert Subject.erl_type_struct(struct_type) == Position
+    end
+
+    test "returns nil for a non-struct map type" do
+      key = :erl_types.t_atom(:some_field)
+      val = :erl_types.t_atom(:whatever)
+      plain_map = :erl_types.t_map([{key, val}])
+
+      assert Subject.erl_type_struct(plain_map) == nil
+    end
+
+    test "returns nil for a non-map type" do
+      assert Subject.erl_type_struct(:erl_types.t_integer()) == nil
+      assert Subject.erl_type_struct(:any) == nil
     end
   end
 
