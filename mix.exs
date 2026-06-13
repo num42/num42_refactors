@@ -181,6 +181,7 @@ defmodule Number42.Refactors.MixProject do
           Number42.Refactors.Ex.UnusedVariable
         ],
         "Refactors – Cross-File Extraction": [
+          Number42.Refactors.Ex.ExtractBehaviourFromAdapterFamily,
           Number42.Refactors.Ex.ExtractCaseToHelper,
           Number42.Refactors.Ex.ExtractInlineBlock,
           Number42.Refactors.Ex.ExtractIntraModuleClone,
