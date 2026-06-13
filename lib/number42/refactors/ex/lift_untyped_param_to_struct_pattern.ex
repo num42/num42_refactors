@@ -19,7 +19,7 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPattern do
   (leaves the head untouched) otherwise. A wrong lift would insert a
   pattern that fails at runtime for the real value.
 
-  Inference draws on four sources, strongest signal first. A stronger
+  Inference draws on five sources, strongest signal first. A stronger
   source's verdict is never overturned by a weaker one:
 
   1. **An existing `@spec`** over the clause names the argument type
@@ -31,23 +31,40 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPattern do
      Overrides a weaker field guess to the same struct (and a *conflict*
      with the field guess declines); rescues a body that proved nothing.
      When callers pass **several** distinct structs, see Polymorphism.
-  3. **Dialyzer success typing.** When nothing visible decided, the
-     project PLT is read directly (`:dialyzer_cplt`/`:dialyzer_plt`) and
-     the inferred type for the position is taken if it is an in-project
-     struct. This is the only source that sees *through* delegation —
-     `f(arg), do: Shared.g(arg)` where `g/1` matches `%Scope{}` lets
-     Dialyzer back-propagate `arg :: %Scope{}`. Lowest priority: visible
-     code (spec/call-site/fields) always wins, and the builder decline is
-     preserved.
-  4. **A unique `defstruct` superset.** Collect the `var.field` accesses;
-     if exactly one in-project struct's field set is a superset of them
-     *and no other struct's is*, that is the type. Two or more fit →
-     ambiguous → decline. None fit → decline (the value is a map, not a
-     struct — e.g. a `select`-projection with join/compute fields no
-     struct carries).
+  3. **Field-superset.** Collect the `var.field` accesses; if exactly one
+     in-project struct's field set is a superset of them *and no other
+     struct's is*, that is the type. Two or more fit → ambiguous →
+     decline. None fit → decline (the value is a map, not a struct — e.g.
+     a `select`-projection with join/compute fields no struct carries).
+  4. **AST delegation.** A param the body proves nothing about but passes
+     **whole** into a call (`f(arg), do: Shared.g(arg)`) borrows its type
+     from the receiver's head: if `g/1` pattern-matches `%Scope{}` at that
+     position in *every* clause, `arg` must be a `%Scope{}`. Pure source,
+     no PLT. Combined with the **fixpoint loop** (see below) this is the
+     biggest single lever on real codebases, where most params are passed
+     through context functions rather than read field-by-field.
+  5. **Dialyzer success typing.** Last resort: the project PLT is read
+     directly (`:dialyzer_cplt`/`:dialyzer_plt`) and the inferred type for
+     the position is taken if it is an in-project struct. Catches
+     delegation through receivers whose own heads are untyped (the AST
+     source can't), at the cost of depending on a built PLT. Opt out with
+     `dialyzer: false`.
 
   The decline-on-ambiguity guard is the core of the design, not an
-  afterthought.
+  afterthought. The builder decline (a param fed *into* a struct build) is
+  preserved by every external source — none of them retypes the source
+  projection as its own output.
+
+  ## Fixpoint loop
+
+  Delegation has a chicken-and-egg limit: it can only borrow a type from a
+  receiver head that is *already* struct-typed, and on a fresh codebase
+  few are. So resolution **iterates to a fixpoint** — each round's lifts
+  type their own heads, which become new delegation receivers for the next
+  round. In `h(x), do: f(x)` / `f(arg), do: g(arg)` / `g(%Scope{} = s)`,
+  round 1 lifts `f` (off `g`), round 2 lifts `h` (off the now-typed `f`).
+  The receiver index grows monotonically and is finitely bounded, so it
+  terminates; a round cap guards against any non-monotone surprise.
 
   ## Polymorphism: duplicate the clause per struct
 
@@ -164,6 +181,12 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPattern do
   # option is given; none existing simply disables that source.
   @plt_globs ["priv/plts/*.plt", "_build/*/*.plt", "*.plt"]
 
+  # Belt-and-braces cap on the delegation fixpoint loop. The receiver
+  # index grows monotonically and is finitely bounded, so the loop
+  # terminates on its own (`enriched == receivers`); this only guards
+  # against a non-monotone surprise. Real chains are a handful deep.
+  @max_fixpoint_rounds 10
+
   # Forms that parse as `{atom, meta, args}` but aren't function calls
   # whose arguments we'd type at the call site — definitions, control
   # flow, operators. A local call `fun(args)` is attributed to its
@@ -208,6 +231,7 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPattern do
           structs: structs,
           call_sites: Map.get(plan, :call_sites, %{}),
           dialyzer: Map.get(plan, :dialyzer, %{}),
+          receivers: Map.get(plan, :receivers, %{}),
           min_fields: Map.get(plan, :min_fields, @default_min_fields)
         }
 
@@ -243,18 +267,27 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPattern do
       sources
       |> Enum.reject(fn {path, _src} -> excluded_path?(path) end)
 
+    clauses = Enum.flat_map(visible, &clauses_in_source/1)
+
     structs = struct_index(visible)
     call_sites = call_site_index(visible, structs)
     dialyzer = dialyzer_index(opts, structs)
-    ctx = %{structs: structs, call_sites: call_sites, dialyzer: dialyzer, min_fields: min_fields}
+    seed_receivers = receiver_index(clauses, structs)
 
-    {lifts, declined} =
-      visible |> Enum.flat_map(&clauses_in_source/1) |> resolve_lifts(ctx)
+    base_ctx = %{
+      structs: structs,
+      call_sites: call_sites,
+      dialyzer: dialyzer,
+      min_fields: min_fields
+    }
+
+    {lifts, declined, receivers} = resolve_to_fixpoint(clauses, base_ctx, seed_receivers)
 
     %{
       structs: structs,
       call_sites: call_sites,
       dialyzer: dialyzer,
+      receivers: receivers,
       min_fields: min_fields,
       lifts: lifts,
       declined: declined
@@ -498,6 +531,65 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPattern do
     |> Enum.find(&File.exists?/1)
   end
 
+  # --- receiver-head index (AST delegation) ---
+
+  # `%{ {module, name, arity} => %{pos => struct} }` — for each function,
+  # the argument positions that ALREADY carry an in-project struct pattern
+  # in the head (`def g(%Scope{} = s)`), and which struct. Only positions
+  # where EVERY clause agrees on the same struct are recorded: a position
+  # one clause leaves untyped (or types differently) is not a guaranteed
+  # contract, so a value flowing there isn't provably that struct.
+  #
+  # This is what lets a passed-whole param be typed without a PLT: if
+  # `f(arg), do: g(arg)` and `g/1` is recorded here as `%{0 => Scope}`,
+  # then `arg` must be a `%Scope{}`.
+  defp receiver_index(clauses, structs) do
+    clauses
+    |> Enum.group_by(fn c -> {c.module, c.name, c.arity} end)
+    |> Enum.flat_map(fn {key, group} -> receiver_entry(key, group, structs) end)
+    |> Map.new()
+  end
+
+  defp receiver_entry(key, [first | _] = group, structs) do
+    arg_map =
+      0..(first.arity - 1)//1
+      |> Enum.flat_map(fn pos -> agreed_struct(group, pos, structs) end)
+      |> Map.new()
+
+    if map_size(arg_map) == 0, do: [], else: [{key, arg_map}]
+  end
+
+  # The struct every clause carries at `pos` in its head, or [] if they
+  # disagree / any clause leaves it untyped / it isn't an in-project struct.
+  defp agreed_struct(group, pos, structs) do
+    structs_at =
+      group
+      |> Enum.map(fn c -> param_struct(Enum.at(c.params, pos), structs) end)
+      |> Enum.uniq()
+
+    case structs_at do
+      [struct] when not is_nil(struct) -> [{pos, struct}]
+      _ -> []
+    end
+  end
+
+  # The in-project struct a head param pattern pins: `%Scope{}`,
+  # `%Scope{} = s`, `%Scope{field: _}` -> Scope; anything else -> nil.
+  defp param_struct({:=, _, [lhs, rhs]}, structs) do
+    param_struct(lhs, structs) || param_struct(rhs, structs)
+  end
+
+  defp param_struct({:%, _, [alias_ast, {:%{}, _, _}]}, structs) do
+    with {:ok, module} <- alias_to_module(alias_ast),
+         true <- Map.has_key?(structs, module) do
+      module
+    else
+      _ -> nil
+    end
+  end
+
+  defp param_struct(_node, _structs), do: nil
+
   # --- project-wide struct index ---
 
   # `%{module => MapSet(field_atoms)}` for every `defstruct` in the
@@ -626,6 +718,45 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPattern do
   # Each clause yields a lift or a decline. A function lifts a given
   # parameter position only when every clause of that `{name, arity}`
   # agrees on the same struct for it — divergent clauses decline.
+  # Iterate resolution to a fixpoint: each round's lifts type their own
+  # heads, which become new delegation receivers for the next round. A
+  # `f(arg), do: g(arg)` lift makes `f` a typed receiver, so a caller
+  # `h(x), do: f(x)` can now resolve `x` in the next round. The receiver
+  # index grows monotonically and is finitely bounded, so this terminates;
+  # a round-count cap is a belt-and-braces guard against any non-monotone
+  # surprise. Returns the final lifts/declines plus the enriched receiver
+  # index (so the rewrite phase patches consistently with the last round).
+  defp resolve_to_fixpoint(clauses, base_ctx, receivers, round \\ 0) do
+    ctx = Map.put(base_ctx, :receivers, receivers)
+    {lifts, declined} = resolve_lifts(clauses, ctx)
+
+    enriched = merge_lift_receivers(receivers, lifts)
+
+    if enriched == receivers or round >= @max_fixpoint_rounds do
+      {lifts, declined, receivers}
+    else
+      resolve_to_fixpoint(clauses, base_ctx, enriched, round + 1)
+    end
+  end
+
+  # Fold this round's single-struct lifts into the receiver index: a lift
+  # of `{module, name, arity}` param P to struct S means that function now
+  # pattern-matches S at P's position. Polymorphic lifts (struct is a
+  # list) are NOT fed back — a head matching several structs is not a
+  # single guaranteed contract for a delegated value.
+  defp merge_lift_receivers(receivers, lifts) do
+    Enum.reduce(lifts, receivers, fn lift, acc ->
+      add_lift_receiver(acc, lift)
+    end)
+  end
+
+  defp add_lift_receiver(receivers, %{struct: struct}) when is_list(struct), do: receivers
+
+  defp add_lift_receiver(receivers, %{pos: pos, struct: struct} = lift) do
+    key = {lift.module, lift.name, lift.arity}
+    Map.update(receivers, key, %{pos => struct}, &Map.put_new(&1, pos, struct))
+  end
+
   defp resolve_lifts(clauses, ctx) do
     clauses
     |> Enum.group_by(fn c -> {c.module, c.name, c.arity} end)
@@ -649,16 +780,17 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPattern do
       inferences
       |> consensus()
       |> apply_call_sites(key, pos, group, ctx)
+      |> apply_delegation(key, pos, group, ctx)
       |> apply_dialyzer(key, pos, group, ctx)
 
     case decided do
       {:lift, struct, via, param} ->
-        [lift_record(ref, param, struct, via)]
+        [lift_record(ref, pos, param, struct, via)]
 
       {:poly, structs, param} ->
         # struct as a LIST + via :call_site_poly is the rewrite's signal to
         # duplicate the clause, one head per struct.
-        [lift_record(ref, param, structs, :call_site_poly)]
+        [lift_record(ref, pos, param, structs, :call_site_poly)]
 
       {:decline, reason, param} ->
         [%{module: ref.module, name: ref.name, arity: ref.arity, param: param, reason: reason}]
@@ -668,11 +800,12 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPattern do
     end
   end
 
-  defp lift_record(ref, param, struct, via) do
+  defp lift_record(ref, pos, param, struct, via) do
     %{
       module: ref.module,
       name: ref.name,
       arity: ref.arity,
+      pos: pos,
       param: param,
       struct: struct,
       via: via,
@@ -722,6 +855,114 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPattern do
       # provably safe to do so (see resolve_poly/4).
       {_, {:poly, structs}} ->
         resolve_poly(structs, group, pos, ctx) || {:decline, :polymorphic_unsafe, param}
+    end
+  end
+
+  # AST delegation: a passed-whole param that flows into a call whose
+  # receiver already pattern-matches a struct at that position. Runs after
+  # call-sites, before Dialyzer — it's visible source (stronger than the
+  # PLT), but weaker than @spec/call-site/fields. Only rescues a remaining
+  # decline; the builder decline is preserved (the param is the projection
+  # feeding a build, not a value flowing to a typed receiver).
+  defp apply_delegation({:lift, _, _, _} = lift, _key, _pos, _group, _ctx), do: lift
+  defp apply_delegation({:poly, _, _} = poly, _key, _pos, _group, _ctx), do: poly
+  defp apply_delegation(:skip, _key, _pos, _group, _ctx), do: :skip
+
+  defp apply_delegation({:decline, :builds_struct_from_param, _} = decline, _k, _p, _g, _c),
+    do: decline
+
+  defp apply_delegation({:decline, _reason, param} = decline, _key, _pos, group, ctx) do
+    case delegation_struct(group, param, ctx.receivers) do
+      {:ok, struct} -> {:lift, struct, :delegation, param}
+      :none -> decline
+    end
+  end
+
+  # The struct a passed-whole `param` must be, inferred by following it
+  # into a receiver call. Every clause of the group must agree: for each
+  # clause, the param flows into exactly one call position whose receiver
+  # is typed there, and all clauses resolve the same struct. Disagreement,
+  # ambiguity (the param flows to >1 distinct typed position), or any
+  # clause with no typed receiver -> :none.
+  defp delegation_struct(group, param, receivers) do
+    resolved =
+      group
+      |> Enum.map(fn clause -> clause_delegation_struct(clause, param, receivers) end)
+      |> Enum.uniq()
+
+    case resolved do
+      [struct] when not is_nil(struct) -> {:ok, struct}
+      _ -> :none
+    end
+  end
+
+  # Within one clause body: the distinct struct(s) the receivers of every
+  # call carrying `param` agree on. nil unless there's exactly one.
+  defp clause_delegation_struct(%{module: enclosing, body: body}, param, receivers) do
+    structs =
+      body
+      |> receiver_calls(param, enclosing)
+      |> Enum.flat_map(fn {key, arg_pos} -> receiver_struct_at(receivers, key, arg_pos) end)
+      |> Enum.uniq()
+
+    case structs do
+      [struct] -> struct
+      _ -> nil
+    end
+  end
+
+  defp receiver_struct_at(receivers, key, arg_pos) do
+    case receivers |> Map.get(key, %{}) |> Map.get(arg_pos) do
+      nil -> []
+      struct -> [struct]
+    end
+  end
+
+  # Every call under `body` that passes `param` as a bare argument, as
+  # `{receiver_key, arg_pos}`. Remote `Mod.g(..)` keys off the resolved
+  # module; local `g(..)` off the enclosing module. The dotted-access
+  # form (`param.field`) and operators are excluded — those aren't
+  # whole-param calls.
+  defp receiver_calls(nil, _param, _enclosing), do: []
+
+  defp receiver_calls(body, param, enclosing) do
+    body
+    |> Macro.prewalker()
+    |> Enum.flat_map(&call_receiver(&1, param, enclosing))
+  end
+
+  defp call_receiver({{:., _, [mod_ast, fun]}, _, args}, param, _enclosing)
+       when is_atom(fun) and is_list(args) do
+    case {alias_to_module(mod_ast), bare_arg_pos(args, param)} do
+      {{:ok, module}, {:ok, pos}} -> [{{module, fun, length(args)}, pos}]
+      _ -> []
+    end
+  end
+
+  defp call_receiver({fun, _, args}, param, enclosing)
+       when is_atom(fun) and is_list(args) and fun not in @non_call_forms do
+    case bare_arg_pos(args, param) do
+      {:ok, pos} -> [{{enclosing, fun, length(args)}, pos}]
+      :none -> []
+    end
+  end
+
+  defp call_receiver(_node, _param, _enclosing), do: []
+
+  # The position at which bare `param` appears in an arg list, if exactly
+  # once. Appearing more than once (or not at all) -> :none.
+  defp bare_arg_pos(args, param) do
+    positions =
+      args
+      |> Enum.with_index()
+      |> Enum.flat_map(fn
+        {{^param, _, ctx}, pos} when is_atom(ctx) -> [pos]
+        _ -> []
+      end)
+
+    case positions do
+      [pos] -> {:ok, pos}
+      _ -> :none
     end
   end
 

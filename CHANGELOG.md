@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `LiftUntypedParamToStructPattern` gains an **AST delegation** source and
+  a **fixpoint loop**. A param the body proves nothing about but passes
+  whole into a call (`f(arg), do: Shared.g(arg)`) borrows its type from the
+  receiver's head when `g/1` pattern-matches a struct at that position in
+  every clause — pure source, no PLT. Resolution then iterates to a
+  fixpoint: each round's lifts type their own heads, which become new
+  delegation receivers, so type info propagates up multi-hop chains
+  (`h → f → g`, leaf-typed `g` lifts `f` then `h`). The loop terminates
+  (monotone, bounded receiver index; round cap as a guard). On a real
+  Phoenix app this is the largest pure-AST lever — most params flow through
+  context functions rather than being read field-by-field; combined with
+  the existing sources the lift count rose 10 → 14 (3 → 14 vs. the original
+  spec+fields-only baseline), every new lift compiling under
+  `--warnings-as-errors`.
 - `LiftUntypedParamToStructPattern` now infers struct types from **two
   more sources** beyond `@spec` + field-superset, strongest first:
   **call sites** (a project-wide AST scan — a struct literal passed at a

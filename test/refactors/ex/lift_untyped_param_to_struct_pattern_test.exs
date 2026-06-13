@@ -582,6 +582,142 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPatternTest do
     end
   end
 
+  describe "AST delegation (no PLT)" do
+    test "a param delegated to a struct-matching receiver lifts" do
+      # f(arg) passes arg whole into Shared.run/1, whose head matches
+      # %Position{}. arg must therefore be a %Position{}.
+      modules = [
+        {"Shared", "  def run(%Position{} = p), do: p.parent_id\n"},
+        {"Api", "  def f(arg), do: Shared.run(arg)\n"}
+      ]
+
+      l = lift(plan(modules), :f)
+      assert l.struct == Position
+      assert l.via == :delegation
+    end
+
+    test "a locally-delegated param lifts off the local receiver" do
+      modules = [
+        {"M", "  def run(%Item{} = i), do: i.sku\n  def f(arg), do: run(arg)\n"}
+      ]
+
+      assert %{struct: Item, via: :delegation} = lift(plan(modules), :f)
+    end
+
+    test "delegation to an untyped receiver does not lift" do
+      # Shared.run/1 has a bare param — no struct contract to borrow
+      modules = [
+        {"Shared", "  def run(p), do: p\n"},
+        {"Api", "  def f(arg), do: Shared.run(arg)\n"}
+      ]
+
+      assert %{reason: :param_passed_to_call} = declined(plan(modules), :f)
+    end
+
+    test "a param flowing to two differently-typed receivers does not lift" do
+      # ambiguous: arg goes to a %Position{}-receiver AND an %Item{}-receiver
+      modules = [
+        {"A", "  def pa(%Position{} = p), do: p.parent_id\n"},
+        {"B", "  def ib(%Item{} = i), do: i.sku\n"},
+        {"Api", "  def f(arg), do: {A.pa(arg), B.ib(arg)}\n"}
+      ]
+
+      assert %{reason: :param_passed_to_call} = declined(plan(modules), :f)
+    end
+
+    test "@spec still wins over a delegation that would say otherwise" do
+      modules = [
+        {"Shared", "  def run(%Position{} = p), do: p.parent_id\n"},
+        {"Api", "  @spec f(Item.t()) :: any()\n  def f(arg), do: Shared.run(arg)\n"}
+      ]
+
+      assert %{struct: Item, via: :spec} = lift(plan(modules), :f)
+    end
+
+    test "a receiver typed in only some clauses is not a guaranteed contract" do
+      # run/1 has one %Position{} clause and one bare clause -> not guaranteed
+      modules = [
+        {"Shared", "  def run(%Position{} = p), do: p.parent_id\n  def run(other), do: other\n"},
+        {"Api", "  def f(arg), do: Shared.run(arg)\n"}
+      ]
+
+      assert %{reason: :param_passed_to_call} = declined(plan(modules), :f)
+    end
+
+    test "the delegated head is patched" do
+      modules = [
+        {"Shared", "  def run(%Position{} = p), do: p.parent_id\n"},
+        {"Api", "  def f(arg), do: Shared.run(arg)\n"}
+      ]
+
+      {_, src} = Enum.find(sources(modules), fn {path, _} -> path == "lib/api.ex" end)
+      assert Subject.transform(src, prepared: plan(modules)) =~ "def f(%Position{} = arg)"
+    end
+  end
+
+  describe "iterative fixpoint (delegation chains)" do
+    test "type info propagates up a multi-hop delegation chain" do
+      # h -> f -> g, only g is typed at the leaf. f resolves round 1
+      # (g is a typed receiver from the start), h resolves round 2
+      # (f became a typed receiver only after round 1 lifted it).
+      modules = [
+        {"G", "  def g(%Position{} = p), do: p.parent_id\n"},
+        {"F", "  def f(arg), do: G.g(arg)\n"},
+        {"H", "  def h(x), do: F.f(x)\n"}
+      ]
+
+      p = plan(modules)
+      assert %{struct: Position, via: :delegation} = lift(p, :f)
+      assert %{struct: Position, via: :delegation} = lift(p, :h)
+    end
+
+    test "the enriched receiver index includes the lifted heads" do
+      modules = [
+        {"G", "  def g(%Position{} = p), do: p.parent_id\n"},
+        {"F", "  def f(arg), do: G.g(arg)\n"}
+      ]
+
+      receivers = plan(modules).receivers
+      # F.f/1 was untyped in source but is a typed receiver after the loop
+      assert receivers[{F, :f, 1}] == %{0 => Position}
+      assert receivers[{G, :g, 1}] == %{0 => Position}
+    end
+
+    test "a delegation cycle terminates without lifting (no leaf type)" do
+      # f -> g -> f, neither typed: the loop converges with no new lift
+      modules = [
+        {"M", "  def f(a), do: g(a)\n  def g(b), do: f(b)\n"}
+      ]
+
+      p = plan(modules)
+      assert lift(p, :f) == nil
+      assert lift(p, :g) == nil
+    end
+
+    test "the multi-hop lifted heads all compile" do
+      lifted_g =
+        "defmodule Position do\n  defstruct [:id, :name, :parent_id, :depth]\nend\n\n" <>
+          "defmodule G do\n  def g(%Position{} = p), do: p.parent_id\nend\n"
+
+      f_src = "defmodule F do\n  def f(arg), do: G.g(arg)\nend\n"
+      h_src = "defmodule H do\n  def h(x), do: F.f(x)\nend\n"
+
+      modules = [
+        {"G", "  def g(%Position{} = p), do: p.parent_id\n"},
+        {"F", "  def f(arg), do: G.g(arg)\n"},
+        {"H", "  def h(x), do: F.f(x)\n"}
+      ]
+
+      p = plan(modules)
+      out_f = Subject.transform(f_src, prepared: p)
+      out_h = Subject.transform(h_src, prepared: p)
+
+      assert out_f =~ "def f(%Position{} = arg)"
+      assert out_h =~ "def h(%Position{} = x)"
+      assert_compiles(lifted_g <> "\n" <> out_f <> "\n" <> out_h)
+    end
+  end
+
   describe "transform/2" do
     test "is a no-op without a prepared plan" do
       src = "defmodule R do\n  def f(r), do: r.parent_id\nend\n"
