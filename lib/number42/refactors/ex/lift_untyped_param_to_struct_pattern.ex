@@ -28,12 +28,17 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPattern do
   2. **Call sites (AST).** A project-wide scan of every call to the
      function: an argument that is a struct literal (`f(%Brand{})`,
      `f(%Brand{} = x)`) — or a **variable bound to a struct** earlier in
-     the caller clause (`%Brand{} = b` in the head, or `b = %Brand{…}` in
-     the body, then `f(b)`) — reveals the parameter's type by real data
-     flow. Overrides a weaker field guess to the same struct (and a
-     *conflict* with the field guess declines); rescues a body that proved
-     nothing. When callers pass **several** distinct structs, see
-     Polymorphism.
+     the caller clause (`%Brand{} = b` in the head, `b = %Brand{…}` in the
+     body, or `b = Catalog.get_brand!(id)` calling a **struct-returning
+     getter**, then `f(b)`) — reveals the parameter's type by real data
+     flow. A getter is any project function whose every clause returns one
+     in-project struct via Ecto's get-family (`Repo.get!(Schema, _)`,
+     `Repo.get_by`, `Repo.one`, `Repo.reload`, the pipe form `Schema |>
+     Repo.get!(id)`) or a `%Struct{}` literal — `Repo.all` (a list) and
+     getters whose clauses disagree are excluded. Overrides a weaker field
+     guess to the same struct (and a *conflict* with the field guess
+     declines); rescues a body that proved nothing. When callers pass
+     **several** distinct structs, see Polymorphism.
   3. **Field-superset.** Collect the `var.field` accesses; if exactly one
      in-project struct's field set is a superset of them *and no other
      struct's is*, that is the type. Two or more fit → ambiguous →
@@ -273,7 +278,8 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPattern do
     clauses = Enum.flat_map(visible, &clauses_in_source/1)
 
     structs = struct_index(visible)
-    call_sites = call_site_index(visible, structs)
+    getters = getter_return_index(clauses, structs)
+    call_sites = call_site_index(visible, structs, getters)
     dialyzer = dialyzer_index(opts, structs)
     seed_receivers = receiver_index(clauses, structs)
 
@@ -331,51 +337,58 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPattern do
   # later refinement). Remote calls (`Mod.f(..)`) key off the resolved
   # module; local calls (`f(..)`) key off the enclosing module. A key
   # that doesn't match a real clause is harmless — it's never looked up.
-  defp call_site_index(sources, structs) do
+  defp call_site_index(sources, structs, getters) do
     sources
-    |> Enum.flat_map(&call_sites_in_source(&1, structs))
+    |> Enum.flat_map(&call_sites_in_source(&1, structs, getters))
     |> Enum.group_by(fn {key, _arg_map} -> key end, fn {_key, arg_map} -> arg_map end)
   end
 
-  defp call_sites_in_source({_path, src}, structs) do
+  defp call_sites_in_source({_path, src}, structs, getters) do
     case Sourceror.parse_string(src) do
-      {:ok, ast} -> ast |> Macro.prewalker() |> Enum.flat_map(&module_call_sites(&1, structs))
-      {:error, _} -> []
+      {:ok, ast} ->
+        ast |> Macro.prewalker() |> Enum.flat_map(&module_call_sites(&1, structs, getters))
+
+      {:error, _} ->
+        []
     end
   end
 
-  defp module_call_sites({:defmodule, _, [name_ast, [{_do, body}]]}, structs) do
+  defp module_call_sites({:defmodule, _, [name_ast, [{_do, body}]]}, structs, getters) do
     case alias_to_module(name_ast) do
       {:ok, module} ->
         body
         |> body_to_exprs()
-        |> Enum.flat_map(&clause_call_sites(&1, module, structs))
+        |> Enum.flat_map(&clause_call_sites(&1, module, structs, getters))
 
       :error ->
         []
     end
   end
 
-  defp module_call_sites(_node, _structs), do: []
+  defp module_call_sites(_node, _structs, _getters), do: []
 
   # Call sites within one function clause, with the clause's struct-bound
   # variables in scope. A var bound to a struct in the head (`%Brand{} =
-  # b`) or body (`b = %Brand{}`) and then passed as a bare arg counts as a
-  # struct call site — the literal-only scan would miss it.
-  defp clause_call_sites({kind, _, [head | rest]}, enclosing, structs)
+  # b`) or body (`b = %Brand{}`, or `b = Catalog.get_brand!(id)` where the
+  # callee is a known struct-returning getter) and then passed as a bare
+  # arg counts as a struct call site — the literal-only scan would miss it.
+  defp clause_call_sites({kind, _, [head | rest]}, enclosing, structs, getters)
        when kind in [:def, :defp] do
-    bindings = clause_struct_bindings(strip_when(head), clause_body(rest), structs)
+    bindings = clause_struct_bindings(strip_when(head), clause_body(rest), structs, getters)
     calls_in_ast(clause_body(rest), enclosing, structs, bindings)
   end
 
-  defp clause_call_sites(_expr, _enclosing, _structs), do: []
+  defp clause_call_sites(_expr, _enclosing, _structs, _getters), do: []
 
   # `%{var => struct}` for variables provably bound to an in-project
   # struct within the clause: head params (`%Brand{} = b`) and top-level
-  # body matches (`b = %Brand{...}`, `%Brand{} = b = expr`).
-  defp clause_struct_bindings(head, body, structs) do
+  # body matches (`b = %Brand{...}`, `%Brand{} = b = expr`, or
+  # `b = Catalog.get_brand!(id)` calling a known struct-returning getter).
+  defp clause_struct_bindings(head, body, structs, getters) do
     head_bindings = head |> head_args() |> Enum.flat_map(&binding_from_pattern(&1, structs))
-    body_bindings = body |> body_to_exprs() |> Enum.flat_map(&binding_from_match(&1, structs))
+
+    body_bindings =
+      body |> body_to_exprs() |> Enum.flat_map(&binding_from_match(&1, structs, getters))
 
     Map.new(head_bindings ++ body_bindings)
   end
@@ -398,8 +411,54 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPattern do
 
   defp binding_from_pattern(_node, _structs), do: []
 
-  defp binding_from_match({:=, _, _} = match, structs), do: binding_from_pattern(match, structs)
-  defp binding_from_match(_expr, _structs), do: []
+  # `var = <expr>`: bind `var` when the rhs is a struct literal (handled by
+  # `binding_from_pattern`) OR a call to a known struct-returning getter
+  # (`var = Catalog.get_brand!(id)` -> {var, Brand}). The getter case only
+  # fires for a bare-var lhs; `%Pat{} = call` is left to the pattern path.
+  defp binding_from_match({:=, _, [lhs, rhs]} = match, structs, getters) do
+    case binding_from_pattern(match, structs) do
+      [] -> getter_binding(lhs, rhs, getters)
+      bindings -> bindings
+    end
+  end
+
+  defp binding_from_match(_expr, _structs, _getters), do: []
+
+  defp getter_binding(lhs, rhs, getters) do
+    with var when not is_nil(var) <- pattern_var(lhs),
+         struct when not is_nil(struct) <- getter_call_struct(rhs, getters) do
+      [{var, struct}]
+    else
+      _ -> []
+    end
+  end
+
+  # The struct a call to a known getter returns, or nil. Both remote
+  # (`Mod.get_x!(id)`) and local (`get_x!(id)`) calls are resolved; the
+  # local case can't disambiguate the module, so it matches any getter of
+  # that name/arity (a getter index keyed by `{name, arity}` regardless of
+  # module). Remote calls match the resolved module exactly.
+  defp getter_call_struct({{:., _, [mod_ast, fun]}, _, args}, getters)
+       when is_atom(fun) and is_list(args) do
+    case alias_to_module(mod_ast) do
+      {:ok, module} -> Map.get(getters, {module, fun, length(args)})
+      :error -> nil
+    end
+  end
+
+  defp getter_call_struct({fun, _, args}, getters)
+       when is_atom(fun) and is_list(args) and fun not in @non_call_forms do
+    getters
+    |> Enum.filter(fn {{_m, n, a}, _s} -> n == fun and a == length(args) end)
+    |> Enum.map(fn {_key, struct} -> struct end)
+    |> Enum.uniq()
+    |> case do
+      [struct] -> struct
+      _ -> nil
+    end
+  end
+
+  defp getter_call_struct(_node, _getters), do: nil
 
   defp pattern_var({var, _meta, ctx}) when is_atom(var) and is_atom(ctx), do: var
   defp pattern_var(_node), do: nil
@@ -708,6 +767,89 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPattern do
   defp field_key({:__block__, _, [atom]}) when is_atom(atom), do: atom
   defp field_key(atom) when is_atom(atom), do: atom
   defp field_key(_), do: nil
+
+  # --- getter-return index (transitive struct returns) ---
+
+  # `%{ {module, name, arity} => struct }` — every project function whose
+  # body provably returns a single in-project struct, so a binding to its
+  # result (`x = Catalog.get_brand!(id)`) is known to be that struct. A
+  # function qualifies when EVERY clause's last expression returns the SAME
+  # struct, via one of:
+  #
+  #   - `Repo.get!(Schema, _)` / `Repo.get(..)` / `Repo.get_by(..)` /
+  #     `Repo.one(..)` / `Repo.reload(..)` etc. — the schema-module argument
+  #     IS the returned struct (Ecto's get-family returns `%Schema{}` or
+  #     nil; nil is irrelevant to the struct identity),
+  #   - the pipe form `Schema |> Repo.get!(_)`,
+  #   - a bare `%Schema{...}` literal as the last expression.
+  #
+  # Clauses that disagree, or whose tail isn't one of these, disqualify the
+  # whole function (a getter must be unconditional about its type). Only
+  # in-project structs (present in `structs`) are recorded.
+  defp getter_return_index(clauses, structs) do
+    clauses
+    |> Enum.group_by(fn c -> {c.module, c.name, c.arity} end)
+    |> Enum.flat_map(fn {key, group} -> getter_entry(key, group, structs) end)
+    |> Map.new()
+  end
+
+  defp getter_entry(key, group, structs) do
+    returns =
+      group
+      |> Enum.map(fn c -> clause_return_struct(c.body, structs) end)
+      |> Enum.uniq()
+
+    case returns do
+      [struct] when not is_nil(struct) -> [{key, struct}]
+      _ -> []
+    end
+  end
+
+  # The in-project struct a clause body returns, or nil. Reads the LAST
+  # expression of the body (the clause's return value).
+  defp clause_return_struct(nil, _structs), do: nil
+
+  defp clause_return_struct(body, structs) do
+    body
+    |> body_to_exprs()
+    |> List.last()
+    |> return_struct(structs)
+  end
+
+  # `Repo.get!(Schema, id)` / `Repo.get(Schema, id)` / `Repo.get_by(Schema,
+  # …)` / `Repo.one(Schema, …)` / `Repo.reload(Schema, …)` — first arg is
+  # the schema module.
+  defp return_struct({{:., _, [{:__aliases__, _, _} = repo, fun]}, _, [schema_ast | _]}, structs)
+       when fun in [:get, :get!, :get_by, :get_by!, :one, :one!, :reload, :reload!] do
+    if repo_module?(repo), do: alias_struct(schema_ast, structs), else: nil
+  end
+
+  # Pipe form `Schema |> Repo.get!(id)`: the schema flows in as the first
+  # arg, so the whole pipe still returns `%Schema{}`.
+  defp return_struct({:|>, _, [schema_ast, {{:., _, [repo, fun]}, _, _}]}, structs)
+       when fun in [:get, :get!, :get_by, :get_by!, :one, :one!, :reload, :reload!] do
+    if repo_module?(repo), do: alias_struct(schema_ast, structs), else: nil
+  end
+
+  # A bare `%Schema{...}` literal as the last expression.
+  defp return_struct({:%, _, [_alias, {:%{}, _, _}]} = lit, structs),
+    do: literal_struct(lit, structs)
+
+  defp return_struct(_node, _structs), do: nil
+
+  # The tail of the receiver alias is `Repo` (`Repo`, `MyApp.Repo`, …) — we
+  # don't resolve the full alias, the conventional last segment is enough
+  # to recognise an Ecto repo without a project-specific config.
+  defp repo_module?({:__aliases__, _, segments}), do: List.last(segments) == :Repo
+  defp repo_module?(_), do: false
+
+  # The in-project struct an alias names as a schema argument, or nil.
+  defp alias_struct(alias_ast, structs) do
+    case alias_to_module(alias_ast) do
+      {:ok, module} -> if Map.has_key?(structs, module), do: module, else: nil
+      :error -> nil
+    end
+  end
 
   # --- clause collection ---
 
@@ -1340,6 +1482,12 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPattern do
 
   defp name_and_args({name, _, args}) when is_atom(name) and is_list(args),
     do: {:ok, name, args}
+
+  # A zero-arity def has `args == nil` (`def go do … end`), not `[]`. It has
+  # no parameters to lift, but it can be a struct-returning getter
+  # (`def blank, do: %Item{}`) and its body can bind+pass getter results, so
+  # collect it as a clause with an empty arg list rather than dropping it.
+  defp name_and_args({name, _, nil}) when is_atom(name), do: {:ok, name, []}
 
   defp name_and_args(_), do: :error
 

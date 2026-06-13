@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `LiftUntypedParamToStructPattern`'s call-site source now reads
+  **transitive struct returns**. A project function whose every clause
+  provably returns a single in-project struct — through Ecto's get-family
+  (`Repo.get!(Schema, _)`, `Repo.get_by`, `Repo.one`, `Repo.reload`, and
+  the pipe form `Schema |> Repo.get!(id)`) or a bare `%Struct{}` literal as
+  the last expression — is recorded as a getter. A variable bound to such a
+  getter's result (`item = Catalog.get_item!(id)`) is then known to be that
+  struct, so passing it bare (`f(item)`) types `f`'s parameter — the same
+  data-flow lift the binding tracker already does for struct literals,
+  extended one hop through the getter. `Repo.all` (returns a list) and
+  getters whose clauses disagree on the struct are deliberately excluded;
+  only an unconditional single-struct return qualifies. Zero-arity defs
+  (`def blank, do: %Item{}`, and `def go do … end` callers) are now
+  collected as clauses so they participate as getters and as binding
+  sources. On position-db this added 0 lifts — every getter result there
+  flows into context functions that already pattern-match the struct — but
+  it is a clean general source that fires on codebases where getter results
+  reach untyped helpers.
 - `LiftUntypedParamToStructPattern`'s call-site source now tracks
   **variable bindings**, not just struct literals at the call. A var
   bound to a struct in the caller's head (`%Brand{} = b`) or body

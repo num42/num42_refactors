@@ -729,6 +729,102 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPatternTest do
     end
   end
 
+  describe "getter-return source (transitive Repo.get / struct-literal returns)" do
+    test "a var bound to a Repo.get! getter result is tracked as that struct" do
+      # Repo.get!(Item, id) returns %Item{}, so `item = Catalog.get_item!(id)`
+      # binds item to %Item{}; passing it bare to P.f types f's param.
+      modules = [
+        {"Catalog", "  def get_item!(id), do: Repo.get!(Item, id)\n"},
+        {"P", "  def f(r), do: r.id\n"},
+        {"Caller", "  def go(id) do\n    item = Catalog.get_item!(id)\n    P.f(item)\n  end\n"}
+      ]
+
+      assert %{struct: Item, via: :call_site} = lift(plan(modules), :f)
+    end
+
+    test "the pipe form Schema |> Repo.get!(id) is recognised" do
+      modules = [
+        {"Catalog", "  def get_pos!(id), do: Position |> Repo.get!(id)\n"},
+        {"P", "  def f(r), do: r.id\n"},
+        {"Caller", "  def go(id) do\n    p = Catalog.get_pos!(id)\n    P.f(p)\n  end\n"}
+      ]
+
+      assert %{struct: Position, via: :call_site} = lift(plan(modules), :f)
+    end
+
+    test "Repo.get_by and Repo.one getters are recognised" do
+      modules = [
+        {"Catalog",
+         "  def by_sku(sku), do: Repo.get_by(Item, sku: sku)\n  def first_pos, do: Repo.one(Position)\n"},
+        {"P", "  def f(r), do: r.id\n  def g(r), do: r.id\n"},
+        {"Caller",
+         "  def go(sku) do\n    i = Catalog.by_sku(sku)\n    P.f(i)\n  end\n\n  def go2 do\n    p = Catalog.first_pos()\n    P.g(p)\n  end\n"}
+      ]
+
+      p = plan(modules)
+      assert %{struct: Item, via: :call_site} = lift(p, :f)
+      assert %{struct: Position, via: :call_site} = lift(p, :g)
+    end
+
+    test "a getter returning a bare %Struct{} literal is recognised" do
+      modules = [
+        {"Catalog", "  def blank, do: %Item{id: 0, sku: \"\", price: 0}\n"},
+        {"P", "  def f(r), do: r.id\n"},
+        {"Caller", "  def go do\n    i = Catalog.blank()\n    P.f(i)\n  end\n"}
+      ]
+
+      assert %{struct: Item, via: :call_site} = lift(plan(modules), :f)
+    end
+
+    test "a local getter call (same module, unqualified) is recognised" do
+      modules = [
+        {"Catalog",
+         "  def get_item!(id), do: Repo.get!(Item, id)\n  def f(r), do: r.id\n  def go(id) do\n    i = get_item!(id)\n    f(i)\n  end\n"}
+      ]
+
+      assert %{struct: Item, via: :call_site} = lift(plan(modules), :f)
+    end
+
+    test "a non-Repo call binding is NOT treated as a struct (declines)" do
+      # build_thing/1 has no struct-returning tail — its result is unknown,
+      # so passing it bare reveals nothing.
+      modules = [
+        {"Helper", "  def build_thing(x), do: %{wrapped: x}\n"},
+        {"P", "  def f(r), do: r.id\n"},
+        {"Caller", "  def go(x) do\n    t = Helper.build_thing(x)\n    P.f(t)\n  end\n"}
+      ]
+
+      assert %{reason: reason} = declined(plan(modules), :f)
+      assert reason in [:too_few_distinctive_fields, :no_struct_fits]
+    end
+
+    test "a Repo.all getter (returns a list, not a struct) is NOT recognised" do
+      # Repo.all returns [%Item{}], not %Item{} — binding to it must not
+      # type a param as %Item{}.
+      modules = [
+        {"Catalog", "  def all_items, do: Repo.all(Item)\n"},
+        {"P", "  def f(r), do: r.id\n"},
+        {"Caller", "  def go do\n    items = Catalog.all_items()\n    P.f(items)\n  end\n"}
+      ]
+
+      assert %{reason: reason} = declined(plan(modules), :f)
+      assert reason in [:too_few_distinctive_fields, :no_struct_fits]
+    end
+
+    test "a getter whose clauses disagree on the struct is NOT recognised" do
+      # two clauses return different structs → not unconditional → disqualified
+      modules = [
+        {"Catalog",
+         "  def fetch(:item, id), do: Repo.get!(Item, id)\n  def fetch(:pos, id), do: Repo.get!(Position, id)\n"},
+        {"P", "  def f(r), do: r.id\n"},
+        {"Caller", "  def go(id) do\n    x = Catalog.fetch(:item, id)\n    P.f(x)\n  end\n"}
+      ]
+
+      assert %{reason: reason} = declined(plan(modules), :f)
+      assert reason in [:too_few_distinctive_fields, :no_struct_fits]
+    end
+  end
+
   describe "transform/2" do
     test "is a no-op without a prepared plan" do
       src = "defmodule R do\n  def f(r), do: r.parent_id\nend\n"
