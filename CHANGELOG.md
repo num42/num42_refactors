@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ExtractBehaviourFromAdapterFamily`: detects module families with a
+  shared public API via BEAM introspection (`__info__(:functions)` +
+  implemented behaviours), scores candidate pairs (sibling/same-depth
+  namespace bonus), synthesizes a behaviour module with spec-derived
+  callbacks, and inserts `@behaviour`/`@impl true` into the members.
+  The surface counts genuine `def`s only — `defdelegate`s (unrewritten
+  call sites) and `use`-injected functions (`child_spec/1`, `start_link`
+  from `GenServer`/`Supervisor`/`Ecto.Repo`, …) are intersected out.
+  Optional `:require_dispatch` keeps only families with a polymorphic
+  call site (`var.fun(..)`/`apply(var, :fun, ..)`, framework receivers
+  like `repo`/`conn` ignored); when on, families seed from the smallest
+  dispatched core and majority-shared functions become
+  `@optional_callbacks`. **Default off** (opt in via `.refactor.exs`):
+  shape-based matching tends to surface coincidences over genuine
+  abstractions. See num42/num42_refactors#158 for the protocol sibling.
 - `MemberToInOperator`: `Enum.member?(coll, x)` → `x in coll`, negated
   calls fold to `not in`; guard context gated on literal collections.
 - `MapSumToSumBy`: `Enum.map(coll, fun) |> Enum.sum()` →

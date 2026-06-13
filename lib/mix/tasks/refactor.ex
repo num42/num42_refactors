@@ -361,6 +361,7 @@ defmodule Mix.Tasks.Refactor do
   # so each refactor's `prepare/1` receives `paths: <files>` without
   # adding a top-level engine concept.
   @cross_file_refactors [
+    Number42.Refactors.Ex.ExtractBehaviourFromAdapterFamily,
     Number42.Refactors.Ex.ExtractHeexExactClone
   ]
 
