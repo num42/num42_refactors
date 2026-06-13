@@ -45,6 +45,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `@optional_callbacks`. **Default off** (opt in via `.refactor.exs`):
   shape-based matching tends to surface coincidences over genuine
   abstractions. See num42/num42_refactors#158 for the protocol sibling.
+- `ExtractProtocolFromStructFamily`: the data-polymorphism sibling of
+  the behaviour refactor. Detects functions defined over several
+  **distinct** struct types at the dispatch arg (`def label(%Brand{})`
+  / `def label(%Item{})` / …, deduped to distinct types, `:min_structs`
+  floor of 3), and rewrites a single-module family into a real
+  `defprotocol` + one `defimpl` per struct in a new `-able`-named file
+  (`label` → `Catalog.Labelable`), migrating each clause and its
+  `@spec` (lifted to the protocol with the dispatch type as `t()`).
+  Static call sites shift to the protocol only when the name moves
+  (`Catalog.Labeling.label(x)` → `Catalog.Labelable.label(x)`);
+  otherwise dispatch is transparent. A second **name-family** axis
+  reports near-misses where dispatch is hand-rolled through the
+  function name instead (`*_to_result`, `subscribe_*`) as hints, gated
+  by body-convergence + specific-operation + subsumption filters — a
+  pointer, never a rewrite (the values are often maps, not structs).
+  Cross-module families are reported but not rewritten. **Default off**
+  (opt in via `.refactor.exs`): idiomatic Elixir rarely hand-rolls
+  struct-type dispatch, so the honest first result is often "none".
 - `MemberToInOperator`: `Enum.member?(coll, x)` → `x in coll`, negated
   calls fold to `not in`; guard context gated on literal collections.
 - `MapSumToSumBy`: `Enum.map(coll, fun) |> Enum.sum()` →
