@@ -9,6 +9,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `LiftUntypedParamToStructPattern`'s call-site source now reads
+  **transitive struct returns**. A project function whose every clause
+  provably returns a single in-project struct — through Ecto's get-family
+  (`Repo.get!(Schema, _)`, `Repo.get_by`, `Repo.one`, `Repo.reload`, and
+  the pipe form `Schema |> Repo.get!(id)`) or a bare `%Struct{}` literal as
+  the last expression — is recorded as a getter. A variable bound to such a
+  getter's result (`item = Catalog.get_item!(id)`) is then known to be that
+  struct, so passing it bare (`f(item)`) types `f`'s parameter — the same
+  data-flow lift the binding tracker already does for struct literals,
+  extended one hop through the getter. `Repo.all` (returns a list) and
+  getters whose clauses disagree on the struct are deliberately excluded;
+  only an unconditional single-struct return qualifies. Zero-arity defs
+  (`def blank, do: %Item{}`, and `def go do … end` callers) are now
+  collected as clauses so they participate as getters and as binding
+  sources. On position-db this added 0 lifts — every getter result there
+  flows into context functions that already pattern-match the struct — but
+  it is a clean general source that fires on codebases where getter results
+  reach untyped helpers.
+- `LiftUntypedParamToStructPattern`'s call-site source now tracks
+  **variable bindings**, not just struct literals at the call. A var
+  bound to a struct in the caller's head (`%Brand{} = b`) or body
+  (`b = %Brand{…}`) and then passed bare (`f(b)`) is recognised as a
+  struct call site. Bindings are scoped per clause. On position-db this
+  added 2 lifts (`ItemImport.persist`/`valid_unique_rows` off a
+  `workbook = %Workbook{…}` body binding), bringing the running total to
+  16 (from the 3-lift spec+fields baseline).
+- `LiftUntypedParamToStructPattern` gains an **AST delegation** source and
+  a **fixpoint loop**. A param the body proves nothing about but passes
+  whole into a call (`f(arg), do: Shared.g(arg)`) borrows its type from the
+  receiver's head when `g/1` pattern-matches a struct at that position in
+  every clause — pure source, no PLT. Resolution then iterates to a
+  fixpoint: each round's lifts type their own heads, which become new
+  delegation receivers, so type info propagates up multi-hop chains
+  (`h → f → g`, leaf-typed `g` lifts `f` then `h`). The loop terminates
+  (monotone, bounded receiver index; round cap as a guard). On a real
+  Phoenix app this is the largest pure-AST lever — most params flow through
+  context functions rather than being read field-by-field; combined with
+  the existing sources the lift count rose 10 → 14 (3 → 14 vs. the original
+  spec+fields-only baseline), every new lift compiling under
+  `--warnings-as-errors`.
+- `LiftUntypedParamToStructPattern` now infers struct types from **two
+  more sources** beyond `@spec` + field-superset, strongest first:
+  **call sites** (a project-wide AST scan — a struct literal passed at a
+  call, `f(%Brand{})`, types the parameter by real data flow; overrides a
+  weaker field guess, declines on conflict, rescues a body that proved
+  nothing) and **Dialyzer success typing** (the project PLT is read
+  directly via `:dialyzer_cplt`/`:dialyzer_plt` — the only source that
+  sees through delegation, e.g. `f(arg), do: Shared.g(arg)` where `g/1`
+  matches `%Scope{}` back-propagates `arg :: %Scope{}`; opt out with
+  `dialyzer: false`, point at a PLT with `plt_path:`). Visible code always
+  wins over Dialyzer; the builder/projection decline is preserved by both.
+  When call sites pass **several** distinct structs, the single clause is
+  **duplicated** into one struct-typed head per target — but only when the
+  function has one clause and every field the body reads exists in every
+  target struct (else `:polymorphic_unsafe`). Calibrated against a real
+  Phoenix app: doubled the lift count (3 → 6), every new lift correct and
+  compiling under `--warnings-as-errors`.
 - `LiftUntypedParamToStructPattern`: lifts a bare untyped parameter to a
   struct-pattern match (`def f(r)` → `def f(%Position{} = r)`) when the
   body **proves** the type. Inference, strongest first: an existing
