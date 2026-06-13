@@ -177,6 +177,7 @@ defmodule Number42.Refactors.MixProject do
           Number42.Refactors.Ex.ExpandShortFormParams,
           Number42.Refactors.Ex.IdentityPassthrough,
           Number42.Refactors.Ex.InlineSingleExpressionDef,
+          Number42.Refactors.Ex.LiftUntypedParamToStructPattern,
           Number42.Refactors.Ex.ResolveImplTrue,
           Number42.Refactors.Ex.UnusedVariable
         ],

@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `LiftUntypedParamToStructPattern`: lifts a bare untyped parameter to a
+  struct-pattern match (`def f(r)` → `def f(%Position{} = r)`) when the
+  body **proves** the type. Inference, strongest first: an existing
+  `@spec` naming the arg type wins; otherwise the `var.field` accesses
+  must be a superset of exactly one project `defstruct` (scanned from
+  source AST, cross-file) and no other. Declines (leaves the head alone)
+  on any ambiguity — two structs fit, none fit (the value is a map, e.g.
+  a `select`-projection with join/compute fields no struct carries),
+  fewer than `:min_fields` (default 2) **distinctive** accesses (generic
+  fields like `id`/`name`/`type` still match but don't count toward the
+  threshold — reading only `var.type`/`var.name` proves nothing), the
+  param is passed whole into another call (fields we can't see), the body
+  is a **builder** (`X_to_Y(arg)` constructing `%Y{… arg.field …}` —
+  `arg` is the source projection, not `%Y{}`), or clauses would infer
+  divergent structs. Field counting excludes zero-arg calls (`var.fun()`)
+  so a module isn't mistaken for a struct. **Default on** — calibrated
+  against a real Phoenix app (every surviving lift correct, the library's
+  own source yields zero); a wrong lift inserts a runtime-breaking
+  pattern, so the layered decline guards are the core of the design.
+  Review the dry-run on an unfamiliar codebase or opt out via
+  `skipped_modules`.
 - `ExtractBehaviourFromAdapterFamily`: detects module families with a
   shared public API via BEAM introspection (`__info__(:functions)` +
   implemented behaviours), scores candidate pairs (sibling/same-depth
