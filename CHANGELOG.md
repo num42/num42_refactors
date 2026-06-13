@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `LiftUntypedParamToStructPattern`: lifts a bare untyped parameter to a
+  struct-pattern match (`def f(r)` → `def f(%Position{} = r)`) when the
+  body **proves** the type. Inference, strongest first: an existing
+  `@spec` naming the arg type wins; otherwise the `var.field` accesses
+  must be a superset of exactly one project `defstruct` (scanned from
+  source AST, cross-file) and no other. Declines (leaves the head alone)
+  on any ambiguity — two structs fit, none fit (the value is a map, e.g.
+  a `select`-projection with join/compute fields no struct carries),
+  fewer than `:min_fields` distinct accesses (default 2 — one generic
+  field is too thin), the param is passed whole into another call (fields
+  we can't see), the body is a **builder** (`X_to_Y(arg)` constructing
+  `%Y{… arg.field …}` — `arg` is the source projection, not `%Y{}`), or
+  clauses would infer divergent structs. Field counting excludes zero-arg
+  calls (`var.fun()`) so a module isn't mistaken for a struct. **Default
+  off** (opt in via `.refactor.exs`): a wrong lift inserts a
+  runtime-breaking pattern, so the decline-on-ambiguity guard is the core
+  of the design.
 - `ExtractBehaviourFromAdapterFamily`: detects module families with a
   shared public API via BEAM introspection (`__info__(:functions)` +
   implemented behaviours), scores candidate pairs (sibling/same-depth
