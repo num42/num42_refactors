@@ -212,6 +212,52 @@ defmodule Number42.Refactors.Ex.ExtractHeexExactCloneTest do
       assert result =~ "body={@body}"
       refute result =~ "<article class=\"post\">"
     end
+
+    test "splices an indented, multi-line clone without leaving dangling markup" do
+      source_a = """
+      defmodule A do
+        def render(assigns) do
+          ~H\"\"\"
+          <section class="wrap">
+            <article class="post">
+              <h2>{@title}</h2>
+              <p>{@body}</p>
+              <footer>{@author}</footer>
+            </article>
+          </section>
+          \"\"\"
+        end
+      end
+      """
+
+      source_b = String.replace(source_a, "defmodule A", "defmodule B")
+
+      sources = %{"lib/a.ex" => source_a, "lib/b.ex" => source_b}
+      [plan] = ExtractHeexExactClone.build_plan(sources, min_mass: 4)
+
+      result =
+        ExtractHeexExactClone.transform(source_a,
+          prepared: %{plans: [plan]},
+          file: "lib/a.ex",
+          project_config: @project_config
+        )
+
+      assert result =~ "<.#{plan.name}"
+      assert result =~ "author={@author}"
+      assert result =~ "body={@body}"
+      assert result =~ "title={@title}"
+
+      # The whole `<section>…</section>` clone must be replaced — none of
+      # the original markup may survive. With the offset-desync bug the
+      # splice ends too early and leaves dangling close tags behind.
+      refute result =~ "<section"
+      refute result =~ "</section>"
+      refute result =~ "<article"
+      refute result =~ "</article>"
+
+      # The rewritten source must still parse as valid Elixir.
+      assert {:ok, _ast} = Code.string_to_quoted(result)
+    end
   end
 
   describe "prepare/1 + end-to-end source matching" do
