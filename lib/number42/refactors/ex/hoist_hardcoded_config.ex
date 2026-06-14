@@ -36,15 +36,34 @@ defmodule Number42.Refactors.Ex.HoistHardcodedConfig do
   *distinct* literals that derive the *same* name don't get suffixed —
   the first is hoisted, the rest stay inline.
 
+  ## cond / case branches
+
+  The collection walk descends into the *bodies* of `cond`/`case` (and
+  `with`/`fn`/`for`) clauses. A config string in a single branch body
+  hoists on its own; the *same* config string appearing in the bodies of
+  multiple branches collapses to **one** shared `@attribute` with every
+  branch use-site rewritten — the module-wide value grouping handles
+  both. The clause *head* (the `->` left-hand side) is a pattern or
+  guard, so a literal there is left inline — a `@attribute` cannot stand
+  in a match position.
+
+      def classify(x) do
+        case x do
+          :prod -> push(@api_example_url)
+          :staging -> push(@api_example_url)
+        end
+      end
+
   ## What it deliberately does not do
 
   - It only hoists into a module attribute. It never generates
     `Application.get_env/2` runtime config — that's an architectural
     choice, not a mechanical rewrite.
   - It skips literals where a `@attribute` is not a valid substitution:
-    guard expressions, function-head patterns, and the value of an
-    existing module-attribute definition (so an already-hoisted literal
-    is not hoisted again — the idempotence guarantee).
+    guard expressions, function-head patterns, `->` clause-head patterns
+    (`case`/`cond`/`with`/`fn`/`for`), and the value of an existing
+    module-attribute definition (so an already-hoisted literal is not
+    hoisted again — the idempotence guarantee).
   """
 
   use Number42.Refactors.Refactor
@@ -154,6 +173,14 @@ defmodule Number42.Refactors.Ex.HoistHardcodedConfig do
 
   # Quoted code targets another module; leave it alone.
   defp walk({:quote, _, _}, _key), do: []
+
+  # `->` clause (`case`/`cond`/`with`/`fn`/`for` arm): the LHS is a
+  # pattern or guard, never a hoist site — a `@attr` there is a match
+  # position. Walk only the RHS body. A config string appearing in the
+  # bodies of *every* branch collapses to one shared `@attr` via the
+  # module-wide value grouping in `assign_names`; one in a single branch
+  # body still hoists on its own.
+  defp walk({:->, _, [_head, body]}, _key), do: walk(body, nil)
 
   # Hoistable config literal.
   defp walk({:__block__, meta, [value]} = node, key) when is_binary(value) do
