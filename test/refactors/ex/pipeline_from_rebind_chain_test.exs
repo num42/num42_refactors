@@ -114,6 +114,92 @@ defmodule Number42.Refactors.Ex.PipelineFromRebindChainTest do
     end
   end
 
+  describe "nested head seeds" do
+    test "decomposes a nested-call head seed into pipe stages" do
+      before_source = """
+      defmodule M do
+        def f(input) do
+          x = transform_c(transform_b(transform_a(input)))
+          x = step(x)
+        end
+      end
+      """
+
+      expected = """
+      defmodule M do
+        def f(input) do
+          transform_a(input) |> transform_b() |> transform_c() |> step()
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, expected)
+    end
+
+    test "keeps sibling arguments on each unwrapped head stage" do
+      before_source = """
+      defmodule M do
+        def f(input, opt, other) do
+          x = wrap(inner(input, opt), other)
+          x = step(x)
+        end
+      end
+      """
+
+      expected = """
+      defmodule M do
+        def f(input, opt, other) do
+          inner(input, opt) |> wrap(other) |> step()
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, expected)
+    end
+
+    test "decomposes a module-qualified nested head seed" do
+      before_source = """
+      defmodule M do
+        def f(input) do
+          x = String.upcase(String.trim(input))
+          x = wrap(x)
+        end
+      end
+      """
+
+      expected = """
+      defmodule M do
+        def f(input) do
+          String.trim(input) |> String.upcase() |> wrap()
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, expected)
+    end
+
+    test "leaves a single-call head seed whole (seeds from its leading arg)" do
+      before_source = """
+      defmodule M do
+        def f(input) do
+          x = transform_a(fetch(input))
+          x = transform_b(x)
+        end
+      end
+      """
+
+      expected = """
+      defmodule M do
+        def f(input) do
+          fetch(input) |> transform_a() |> transform_b()
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, expected)
+    end
+  end
+
   describe "idempotence" do
     test "applying twice equals applying once" do
       before_source = """
@@ -147,6 +233,32 @@ defmodule Number42.Refactors.Ex.PipelineFromRebindChainTest do
         def f(input) do
           x = abs(input)
           x = to_string(x)
+        end
+      end
+      """
+
+      before_source |> then(&apply_refactor(@subject, &1)) |> assert_compiles()
+    end
+
+    test "a nested-seed chain is idempotent" do
+      before_source = """
+      defmodule M do
+        def f(input) do
+          x = transform_c(transform_b(transform_a(input)))
+          x = step(x)
+        end
+      end
+      """
+
+      assert_idempotent(@subject, before_source)
+    end
+
+    test "the rewritten nested-seed chain compiles" do
+      before_source = """
+      defmodule PipelineRebindNestedCompileCheck do
+        def f(input) do
+          x = to_string(abs(trunc(input)))
+          x = String.length(x)
         end
       end
       """
@@ -242,6 +354,19 @@ defmodule Number42.Refactors.Ex.PipelineFromRebindChainTest do
         def f(input) do
           x = transform_a(input)
           x = x + 1
+        end
+      end
+      """
+
+      assert_unchanged(@subject, source)
+    end
+
+    test "skips a lone nested-seed rebind with no chain" do
+      source = """
+      defmodule M do
+        def f(input) do
+          x = transform_b(transform_a(input))
+          x
         end
       end
       """
