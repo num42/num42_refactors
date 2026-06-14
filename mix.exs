@@ -144,6 +144,7 @@ defmodule Number42.Refactors.MixProject do
           Number42.Refactors.Ex.FlatMapToFilter,
           Number42.Refactors.Ex.MapNewLambdaToForComprehension,
           Number42.Refactors.Ex.MapNewToPipe,
+          Number42.Refactors.Ex.MapPutChainToLiteral,
           Number42.Refactors.Ex.MapSumToSumBy,
           Number42.Refactors.Ex.MemberToInOperator,
           Number42.Refactors.Ex.MergePipelineIntoComprehension,
