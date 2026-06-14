@@ -91,7 +91,7 @@ defmodule Number42.Refactors.Ex.ExtractCommonPrologTest do
       assert_rewrites(@subject, before_source, after_source)
     end
 
-    test "binding live in only one caller is still returned; both destructure uniformly" do
+    test "binding live in only one caller is still returned; the unread site underscores it" do
       before_source = """
       defmodule M do
         def first(socket) do
@@ -108,8 +108,10 @@ defmodule Number42.Refactors.Ex.ExtractCommonPrologTest do
       end
       """
 
-      # `user` is read only by `first`, but both sites destructure the
-      # same `{socket, user}` tuple — the helper stays monomorphic.
+      # `user` is read only by `first`, so the helper still returns the
+      # same `{socket, user}` tuple (monomorphic), but `second` — which
+      # never reads `user` in its tail — binds it as `_user` so it is not
+      # an unused variable under `--warnings-as-errors`.
       after_source = """
       defmodule M do
         def first(socket) do
@@ -118,7 +120,7 @@ defmodule Number42.Refactors.Ex.ExtractCommonPrologTest do
         end
 
         def second(socket) do
-          {socket, user} = prepare_common_prolog(socket)
+          {socket, _user} = prepare_common_prolog(socket)
           render(socket)
         end
 
@@ -374,6 +376,105 @@ defmodule Number42.Refactors.Ex.ExtractCommonPrologTest do
       """
 
       assert_unchanged(@subject, source)
+    end
+  end
+
+  describe "underscores per-call-site unread bindings" do
+    # The live set is the UNION over all tails, so a site that reads only
+    # one of two live bindings would otherwise bind the other unused. Each
+    # site underscores the tuple positions its own tail never reads, so the
+    # helper stays monomorphic (same tuple shape returned) while the call
+    # site compiles clean under --warnings-as-errors.
+    test "site reading only one of two live bindings underscores the other" do
+      before_source = """
+      defmodule M do
+        def handle_event("validate", params, socket) do
+          combined = combine_params(params)
+          changeset = build_changeset(socket, combined)
+          render(changeset)
+        end
+
+        def handle_event("save", params, socket) do
+          combined = combine_params(params)
+          changeset = build_changeset(socket, combined)
+          persist(changeset, combined)
+        end
+      end
+      """
+
+      after_source = """
+      defmodule M do
+        def handle_event("validate", params, socket) do
+          {changeset, _combined} = prepare_handle_event(params, socket)
+          render(changeset)
+        end
+
+        def handle_event("save", params, socket) do
+          {changeset, combined} = prepare_handle_event(params, socket)
+          persist(changeset, combined)
+        end
+
+        defp prepare_handle_event(params, socket) do
+          combined = combine_params(params)
+          changeset = build_changeset(socket, combined)
+          {changeset, combined}
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, after_source)
+    end
+
+    test "per-site underscored output compiles clean (no unused-variable)" do
+      before_source = """
+      defmodule M do
+        def a(state) do
+          combined = Map.put(state, :a, 1)
+          count = map_size(combined)
+          {:a, count}
+        end
+
+        def b(state) do
+          combined = Map.put(state, :a, 1)
+          count = map_size(combined)
+          {:b, count, combined}
+        end
+      end
+      """
+
+      rewritten = apply_refactor(@subject, before_source)
+
+      # `a`'s tail reads only `count`; `combined` is underscored there.
+      assert rewritten =~ "{_combined, count} = prepare_common_prolog(state)"
+      # `b`'s tail reads both, so neither position is underscored.
+      assert rewritten =~ "{combined, count} = prepare_common_prolog(state)"
+      assert_compiles(rewritten)
+    end
+
+    test "single bare live binding underscored at a site that does not read it" do
+      # `b` reads `state` again in its tail; `a` does not, so `a` binds
+      # `_state` to avoid an unused variable on the bare (non-tuple) return.
+      before_source = """
+      defmodule M do
+        def a(state) do
+          state = Map.put(state, :loading, true)
+          state = Map.put(state, :error, nil)
+          {:a, :done}
+        end
+
+        def b(state) do
+          state = Map.put(state, :loading, true)
+          state = Map.put(state, :error, nil)
+          {:b, state}
+        end
+      end
+      """
+
+      rewritten = apply_refactor(@subject, before_source)
+
+      assert rewritten =~ "_state = prepare_common_prolog(state)"
+      assert rewritten =~ "\n      state = prepare_common_prolog(state)"
+      assert_compiles(rewritten)
     end
   end
 

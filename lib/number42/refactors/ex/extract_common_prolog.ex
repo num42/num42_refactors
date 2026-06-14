@@ -77,10 +77,17 @@ defmodule Number42.Refactors.Ex.ExtractCommonProlog do
   - **0 live bindings** → nothing to thread back; the prolog is a pure
     side-effect run, out of scope here, so the group is skipped.
   - **1 live binding** → returned bare; the call site binds `x = helper(…)`.
-  - **≥ 2 live bindings** → returned as a sorted tuple; every call site
-    destructures it **uniformly** (`{a, b} = helper(…)`), even a site
-    that reads only one of them — a single shared shape keeps the helper
-    monomorphic.
+  - **≥ 2 live bindings** → returned as a sorted tuple. The helper's
+    returned shape is identical at every call site — a single shared
+    shape keeps it monomorphic — but each call site's *binding pattern*
+    underscores the positions its own tail never reads. A site that
+    reads only `a` binds `{a, _b} = helper(…)`; a site that reads both
+    binds `{a, b} = helper(…)`. Without this, a returned-but-unread
+    binding would be an unused variable, rejected under
+    `--warnings-as-errors`.
+
+  The same applies to the single-binding case: a site that does not read
+  the returned binding in its tail binds `_x = helper(…)`.
 
   ## Side-effect ordering
 
@@ -421,13 +428,22 @@ defmodule Number42.Refactors.Ex.ExtractCommonProlog do
   defp same_signature?(_, _, _), do: false
 
   defp render_call_site(%{kind: kind, head: head, stmts: stmts}, plan) do
-    binding = render_destructure(plan)
+    tail_stmts = Enum.drop(stmts, plan.prolog_len)
+    binding = render_destructure(plan, read_live_vars(tail_stmts, plan.live))
     call = "#{plan.helper_name}(#{Enum.map_join(plan.params, ", ", &Atom.to_string/1)})"
-    tail = stmts |> Enum.drop(plan.prolog_len) |> Enum.map_join("\n", &Sourceror.to_string/1)
+    tail = Enum.map_join(tail_stmts, "\n", &Sourceror.to_string/1)
 
     "  #{kind} #{Sourceror.to_string(head)} do\n" <>
       indent("#{binding} = #{call}\n#{tail}") <>
       "\n  end"
+  end
+
+  # The live vars this site actually reads in its own tail. The helper
+  # returns the full live tuple (monomorphic), but a site that never
+  # reads a returned position would bind it unused — rejected under
+  # `--warnings-as-errors`. We underscore exactly those positions here.
+  defp read_live_vars(tail_stmts, live) do
+    free_vars_in_order(tail_stmts, MapSet.new(live)) |> MapSet.new()
   end
 
   defp render_helper(group, plan) do
@@ -444,8 +460,20 @@ defmodule Number42.Refactors.Ex.ExtractCommonProlog do
       "\n  end"
   end
 
-  defp render_destructure(%{live: [one]}), do: Atom.to_string(one)
-  defp render_destructure(%{live: many}), do: "{#{Enum.map_join(many, ", ", &Atom.to_string/1)}}"
+  # Pattern for one call site. Positions keep `plan.live` order (the
+  # helper's returned tuple shape, identical everywhere); a position this
+  # site does not read is underscored so it isn't bound unused.
+  defp render_destructure(%{live: [one]}, read) do
+    bind_name(one, read)
+  end
+
+  defp render_destructure(%{live: many}, read) do
+    "{#{Enum.map_join(many, ", ", &bind_name(&1, read))}}"
+  end
+
+  defp bind_name(var, read) do
+    if MapSet.member?(read, var), do: Atom.to_string(var), else: "_#{var}"
+  end
 
   defp render_return(%{live: [one]}), do: Atom.to_string(one)
   defp render_return(%{live: many}), do: "{#{Enum.map_join(many, ", ", &Atom.to_string/1)}}"
