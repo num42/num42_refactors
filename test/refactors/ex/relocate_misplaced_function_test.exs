@@ -151,6 +151,138 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunctionTest do
     end
   end
 
+  describe "rewrites — pipe and capture call sites" do
+    # An envious function in A that B can host, plus callers using the
+    # pipe / capture shapes. Reused across the shape tests below.
+    defp shape_sources do
+      a = """
+      defmodule MyApp.A do
+        alias MyApp.B
+
+        def brand_label(%B{} = brand) do
+          B.name(brand) <> " (" <> B.code(brand) <> ")"
+        end
+      end
+      """
+
+      b = """
+      defmodule MyApp.B do
+        defstruct [:name, :code]
+
+        def name(%__MODULE__{name: n}), do: n
+        def code(%__MODULE__{code: c}), do: c
+      end
+      """
+
+      {a, b}
+    end
+
+    test "pipe-form call site is qualified to the target module", %{tmp: tmp} do
+      {a, b} = shape_sources()
+
+      caller = """
+      defmodule MyApp.Caller do
+        alias MyApp.A
+
+        def render(brand), do: brand |> A.brand_label()
+      end
+      """
+
+      paths =
+        materialize(
+          [{"lib/my_app/a.ex", a}, {"lib/my_app/b.ex", b}, {"lib/my_app/caller.ex", caller}],
+          tmp
+        )
+
+      plan = prepared(paths, write_root: tmp)
+
+      result_caller = apply_refactor(@subject, caller, prepared: plan, enabled: true)
+      assert result_caller =~ "brand |> MyApp.B.brand_label()"
+      refute result_caller =~ "A.brand_label"
+    end
+
+    test "capture-with-arity call site (&A.fn/1) is qualified", %{tmp: tmp} do
+      {a, b} = shape_sources()
+
+      caller = """
+      defmodule MyApp.Caller do
+        alias MyApp.A
+
+        def labels(brands), do: Enum.map(brands, &A.brand_label/1)
+      end
+      """
+
+      paths =
+        materialize(
+          [{"lib/my_app/a.ex", a}, {"lib/my_app/b.ex", b}, {"lib/my_app/caller.ex", caller}],
+          tmp
+        )
+
+      plan = prepared(paths, write_root: tmp)
+
+      result_caller = apply_refactor(@subject, caller, prepared: plan, enabled: true)
+      assert result_caller =~ "&MyApp.B.brand_label/1"
+      refute result_caller =~ "&A.brand_label"
+    end
+
+    test "capture-body call site (&A.fn(&1)) is qualified", %{tmp: tmp} do
+      {a, b} = shape_sources()
+
+      caller = """
+      defmodule MyApp.Caller do
+        alias MyApp.A
+
+        def labels(brands), do: Enum.map(brands, &A.brand_label(&1))
+      end
+      """
+
+      paths =
+        materialize(
+          [{"lib/my_app/a.ex", a}, {"lib/my_app/b.ex", b}, {"lib/my_app/caller.ex", caller}],
+          tmp
+        )
+
+      plan = prepared(paths, write_root: tmp)
+
+      result_caller = apply_refactor(@subject, caller, prepared: plan, enabled: true)
+      assert result_caller =~ "&MyApp.B.brand_label(&1)"
+      refute result_caller =~ "&A.brand_label"
+    end
+
+    test "all three shapes in one file are rewritten and the corpus compiles", %{tmp: tmp} do
+      {a, b} = shape_sources()
+
+      caller = """
+      defmodule MyApp.Caller do
+        alias MyApp.A
+
+        def via_pipe(brand), do: brand |> A.brand_label()
+        def via_capture(brands), do: Enum.map(brands, &A.brand_label/1)
+        def via_capture_body(brands), do: Enum.map(brands, &A.brand_label(&1))
+      end
+      """
+
+      paths =
+        materialize(
+          [{"lib/my_app/a.ex", a}, {"lib/my_app/b.ex", b}, {"lib/my_app/caller.ex", caller}],
+          tmp
+        )
+
+      plan = prepared(paths, write_root: tmp)
+
+      result_a = apply_refactor(@subject, a, prepared: plan, enabled: true)
+      result_caller = apply_refactor(@subject, caller, prepared: plan, enabled: true)
+      target_source = File.read!(Path.join(tmp, "lib/my_app/b.ex"))
+
+      assert result_caller =~ "brand |> MyApp.B.brand_label()"
+      assert result_caller =~ "&MyApp.B.brand_label/1"
+      assert result_caller =~ "&MyApp.B.brand_label(&1)"
+      refute result_caller =~ "A.brand_label"
+
+      assert_compiles(result_a <> "\n" <> target_source <> "\n" <> result_caller)
+    end
+  end
+
   describe "idempotence" do
     test "second pass after move is a no-op", %{tmp: tmp} do
       # The host already delegates; the target already owns the function.
