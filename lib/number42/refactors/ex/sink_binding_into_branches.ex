@@ -1,7 +1,7 @@
 defmodule Number42.Refactors.Ex.SinkBindingIntoBranches do
   @moduledoc """
   Sinks a binding read in exactly one branch of the immediately
-  following `case`/`if` down into that branch.
+  following `case`/`if`/`cond` down into that branch.
 
       # before
       config = load_config()
@@ -40,10 +40,12 @@ defmodule Number42.Refactors.Ex.SinkBindingIntoBranches do
     on the always-runs schedule.
   - The RHS is **pure** in the strong sense (`AstHelpers.pure?/1`):
     total, exception-free, eager.
-  - The **immediately following** statement is a `case` or `if`.
+  - The **immediately following** statement is a `case`, `if` or `cond`.
   - The scrutinee/condition does **not** read `var` — otherwise the
     branch the value would be sunk into can't even be reached without it
-    (a cycle).
+    (a cycle). For `cond`, **none** of the arm conditions may read `var`:
+    every condition is evaluated top-down before the matching arm runs,
+    so a condition reading `var` needs it live before any arm executes.
   - `var` is read in **exactly one** branch
     (`AstHelpers.live_in_single_branch?/2`). Two branches would mean
     duplicating the evaluation; zero branches is a dead binding, not a
@@ -56,31 +58,33 @@ defmodule Number42.Refactors.Ex.SinkBindingIntoBranches do
 
   - Pattern-match LHS.
   - Impure / side-effecting / possibly-raising RHS.
-  - A following statement that is not a `case`/`if`.
-  - A scrutinee/condition that depends on the binding (cycle).
+  - A following statement that is not a `case`/`if`/`cond`.
+  - A scrutinee/condition that depends on the binding (cycle) — for
+    `cond`, any arm condition reading the binding.
   - A binding read in zero or in two-plus branches.
-  - A binding still read after the `case`/`if`.
+  - A binding still read after the `case`/`if`/`cond`.
 
   ## Idempotence & determinism
 
   At most **one** binding is sunk per pass — the first eligible in
   source order. After the rewrite the binding lives inside the branch
   and the pre-block binding is gone, so a re-run finds no `var = rhs`
-  immediately followed by a `case`/`if` that reads it in one branch; the
-  engine's fixpoint loop picks up any remaining bindings on later
-  passes.
+  immediately followed by a `case`/`if`/`cond` that reads it in one
+  branch; the engine's fixpoint loop picks up any remaining bindings on
+  later passes.
   """
 
   use Number42.Refactors.Refactor
 
   @impl Number42.Refactors.Refactor
-  def description, do: "Sink a single-branch binding down into that branch of a following case/if"
+  def description,
+    do: "Sink a single-branch binding down into that branch of a following case/if/cond"
 
   @impl Number42.Refactors.Refactor
   def explanation do
     """
-    A binding consumed in only one arm of the next `case`/`if` runs
-    eagerly for arms that never use it. Sinking it into the one arm that
+    A binding consumed in only one arm of the next `case`/`if`/`cond`
+    runs eagerly for arms that never use it. Sinking it into the one arm that
     reads it makes the cost pay only when needed and puts the value next
     to its use. Gated on strong purity so the strictness change the sink
     introduces stays unobservable: no side effect is suppressed, no
@@ -141,8 +145,11 @@ defmodule Number42.Refactors.Ex.SinkBindingIntoBranches do
   defp bare_lhs_var({name, _, ctx}) when is_atom(name) and is_atom(ctx), do: {:ok, name}
   defp bare_lhs_var(_), do: :skip
 
-  # The statement after the binding, when it is a `case`/`if`. Returns
-  # the node, its scrutinee/condition, and the list of branch bodies.
+  # The statement after the binding, when it is a `case`/`if`/`cond`.
+  # Returns the node, the AST guarding entry into the branches (a
+  # scrutinee, an `if` condition, or all `cond` conditions together), and
+  # the list of branch bodies. The guard AST is only used for the cycle
+  # check via `reads_var?/2`.
   defp next_branchy(exprs, idx), do: Enum.at(exprs, idx + 1) |> branchy()
 
   defp branchy({:case, _, [scrutinee, [{_do, clauses}]]}) when is_list(clauses) do
@@ -153,9 +160,21 @@ defmodule Number42.Refactors.Ex.SinkBindingIntoBranches do
     {:branchy, condition, if_branch_bodies(kw)}
   end
 
+  defp branchy({:cond, _, [[{_do, clauses}]]}) when is_list(clauses) do
+    {:branchy, cond_conditions(clauses), Enum.map(clauses, &clause_body/1)}
+  end
+
   defp branchy(_), do: :skip
 
   defp clause_body({:->, _, [_pattern, body]}), do: body
+
+  # Every `cond` arm condition wrapped in one node, so the single-AST
+  # cycle check sees a read of `var` in *any* condition. All conditions
+  # are evaluated top-down before the matching arm runs, so a binding read
+  # by a condition must stay live before the block — it can't be sunk.
+  defp cond_conditions(clauses) do
+    {:__block__, [], Enum.map(clauses, fn {:->, _, [[condition], _body]} -> condition end)}
+  end
 
   defp if_branch_bodies(kw) do
     kw

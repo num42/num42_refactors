@@ -142,6 +142,72 @@ defmodule Number42.Refactors.Ex.SinkBindingIntoBranchesTest do
     end
   end
 
+  describe "rewrites — sink into cond clause" do
+    test "sinks a binding read in exactly one cond clause into that clause" do
+      before_source = """
+      defmodule M do
+        def f(fast?, full?, opts) do
+          config = Map.get(opts, :config)
+
+          cond do
+            fast? -> run_fast()
+            full? -> run_full(config)
+          end
+        end
+      end
+      """
+
+      after_source = """
+      defmodule M do
+        def f(fast?, full?, opts) do
+          cond do
+            fast? ->
+              run_fast()
+
+            full? ->
+              config = Map.get(opts, :config)
+              run_full(config)
+          end
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, after_source)
+    end
+
+    test "sinks into the first cond clause when only it reads the binding" do
+      before_source = """
+      defmodule M do
+        def f(fast?, full?, opts) do
+          config = Map.get(opts, :config)
+
+          cond do
+            fast? -> run_fast(config)
+            full? -> run_full()
+          end
+        end
+      end
+      """
+
+      after_source = """
+      defmodule M do
+        def f(fast?, full?, opts) do
+          cond do
+            fast? ->
+              config = Map.get(opts, :config)
+              run_fast(config)
+
+            full? ->
+              run_full()
+          end
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, after_source)
+    end
+  end
+
   describe "skips unsafe sinks" do
     test "skips when the binding is read in more than one branch" do
       assert_unchanged(@subject, """
@@ -281,12 +347,57 @@ defmodule Number42.Refactors.Ex.SinkBindingIntoBranchesTest do
       """)
     end
 
-    test "skips when the next statement is not a case/if" do
+    test "skips when the next statement is not a case/if/cond" do
       assert_unchanged(@subject, """
       defmodule M do
         def f(opts) do
           config = Map.get(opts, :config)
           run_full(config)
+        end
+      end
+      """)
+    end
+
+    test "skips when the binding is read in more than one cond clause" do
+      assert_unchanged(@subject, """
+      defmodule M do
+        def f(fast?, full?, opts) do
+          config = Map.get(opts, :config)
+
+          cond do
+            fast? -> run_fast(config)
+            full? -> run_full(config)
+          end
+        end
+      end
+      """)
+    end
+
+    test "skips when a cond condition depends on the binding (cycle)" do
+      assert_unchanged(@subject, """
+      defmodule M do
+        def f(opts) do
+          flag = Map.get(opts, :flag)
+
+          cond do
+            flag -> run_fast()
+            true -> run_full(flag)
+          end
+        end
+      end
+      """)
+    end
+
+    test "skips when the RHS is impure (could raise) before a cond" do
+      assert_unchanged(@subject, """
+      defmodule M do
+        def f(fast?, full?, s) do
+          n = String.to_integer(s)
+
+          cond do
+            fast? -> run_fast()
+            full? -> run_full(n)
+          end
         end
       end
       """)
@@ -309,6 +420,21 @@ defmodule Number42.Refactors.Ex.SinkBindingIntoBranchesTest do
       """)
     end
 
+    test "stable after one sink into a cond clause" do
+      assert_idempotent(@subject, """
+      defmodule M do
+        def f(fast?, full?, opts) do
+          config = Map.get(opts, :config)
+
+          cond do
+            fast? -> run_fast()
+            full? -> run_full(config)
+          end
+        end
+      end
+      """)
+    end
+
     test "output compiles" do
       source = """
       defmodule SinkBindingIntoBranchesCompileCheck do
@@ -318,6 +444,26 @@ defmodule Number42.Refactors.Ex.SinkBindingIntoBranchesTest do
           case mode do
             :fast -> run_fast()
             :full -> run_full(config)
+          end
+        end
+
+        defp run_fast, do: :fast
+        defp run_full(c), do: {:full, c}
+      end
+      """
+
+      assert_compiles(apply_refactor(@subject, source))
+    end
+
+    test "cond output compiles" do
+      source = """
+      defmodule SinkBindingIntoBranchesCondCompileCheck do
+        def f(fast?, full?, opts) do
+          config = Map.get(opts, :config)
+
+          cond do
+            fast? -> run_fast()
+            full? -> run_full(config)
           end
         end
 

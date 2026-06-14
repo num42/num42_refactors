@@ -277,3 +277,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `--dry-run` modes.
 - `Number42.Refactors.Refactor` behaviour for authoring custom refactors.
 - `.refactor.exs` project-level configuration.
+
+### Changed
+
+- `SinkBindingIntoBranches` now also sinks into `cond` arms. A pure,
+  bare-variable binding read in **exactly one** arm body of the
+  immediately following `cond` is sunk into that arm; arms that don't
+  read it stay untouched. The cycle guard extends to `cond`: if **any**
+  arm condition reads the binding it can't be sunk (every condition is
+  evaluated top-down before the matching arm runs, so the value must
+  stay live before the block). The existing purity, single-branch
+  liveness, and read-after gates carry over unchanged, so the
+  strictness shift stays unobservable. `case`/`if` behaviour is
+  unaffected.
