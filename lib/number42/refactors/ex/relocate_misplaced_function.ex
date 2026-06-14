@@ -870,7 +870,13 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunction do
     end
   end
 
-  defp unwrap_keyword([{_, _} | _] = kw), do: kw
+  # Sourceror wraps keyword keys (and atom/literal values) as
+  # `{:__block__, _, [atom]}`, so `alias MyApp.A, as: Host` carries an
+  # `:as` key that `Keyword.get/2` never matches against the bare atom.
+  # Unwrap both sides into a plain keyword list before lookup.
+  defp unwrap_keyword([{_, _} | _] = kw),
+    do: Enum.map(kw, fn {k, v} -> {unwrap_block(k), unwrap_block(v)} end)
+
   defp unwrap_keyword(_), do: []
 
   defp find_module_body(ast, target) do
