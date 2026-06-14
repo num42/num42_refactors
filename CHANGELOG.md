@@ -19,6 +19,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   value, is identity-only, has a multi/destructuring param, or **rebinds
   the param before the final `x`** (the returned value would no longer
   be the original).
+- `DropTrailingReturnBinding` — drops a trailing binding that exists only
+  to be returned. When a block's last statement is a bare variable `v`
+  and the statement immediately before it is `v = rhs` (bare-variable
+  LHS), the binding is removed and `rhs` becomes the block's final
+  expression. Unlike `InlineSingleUseBinding` (#37), there is no use site
+  the RHS moves to — it stays in the exact same tail position — so no
+  purity check is needed and a side-effecting or possibly-raising RHS
+  (`Repo.insert!(...)`, `do_thing!()`) still de-binds safely. Skips
+  pattern-match LHS (`{:ok, v} = …; v` — the match carries semantics), a
+  binding read earlier in the block, and a binding whose variable appears
+  in its own RHS. Applies to any block tail: `def`/`defp`/`fn` bodies and
+  `case`/`with`/`if` arm bodies. One shim per pass for determinism;
+  idempotent.
 - `LiftUntypedParamToStructPattern`'s call-site source now reads
   **transitive struct returns**. A project function whose every clause
   provably returns a single in-project struct — through Ecto's get-family

@@ -177,6 +177,7 @@ defmodule Number42.Refactors.MixProject do
         ],
         "Refactors – Definition Hygiene": [
           Number42.Refactors.Ex.DelegateExactDuplicates,
+          Number42.Refactors.Ex.DropTrailingReturnBinding,
           Number42.Refactors.Ex.ExpandShortFormBindings,
           Number42.Refactors.Ex.ExpandShortFormFunctions,
           Number42.Refactors.Ex.ExpandShortFormParams,
