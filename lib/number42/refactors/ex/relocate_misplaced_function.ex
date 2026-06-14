@@ -2,7 +2,8 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunction do
   @moduledoc """
   Move a function that almost exclusively touches *another* module
   (Fowler's "Feature Envy") into that module, and rewrite every call
-  site.
+  site — direct (`A.f(x)`), pipe (`x |> A.f()`), and capture
+  (`&A.f/1`, `&A.f(&1)`) forms alike.
 
       # before — MyApp.A
       defmodule MyApp.A do
@@ -632,7 +633,8 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunction do
   end
 
   # Caller side: rewrite `Host.name(...)` (and `host_alias.name(...)`)
-  # into `Target.name(...)`. The current module is never its own caller
+  # into `Target.name(...)`, across direct, pipe, and capture call
+  # shapes. The current module is never its own caller
   # for the delegate it owns, but it may call its own delegate — that
   # delegate already points at the target, so a rewrite there is a
   # harmless no-op we skip by excluding the host module.
@@ -658,9 +660,49 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunction do
     |> Enum.flat_map(&call_node_patch(&1, reloc, aliases))
   end
 
-  defp call_node_patch({{:., _, [mod_ast, fun]}, _, args}, reloc, aliases)
+  # Pipe form `lhs |> Host.name(args)`: the left operand becomes the
+  # implicit first argument, so the effective arity is one more than the
+  # explicit `args`. Rewrite only the module of the right-hand call.
+  defp call_node_patch(
+         {:|>, _, [_lhs, {{:., _, [mod_ast, fun]}, _, args}]},
+         reloc,
+         aliases
+       )
        when is_atom(fun) and is_list(args) do
-    if fun == reloc.name and length(args) == reloc.arity and
+    qualify_if_host(mod_ast, fun, length(args) + 1, reloc, aliases)
+  end
+
+  # Capture-with-arity form `&Host.name/arity`: the inner `Host.name`
+  # carries empty `no_parens` args; the real arity is the `/` operand.
+  defp call_node_patch(
+         {:&, _, [{:/, _, [{{:., _, [mod_ast, fun]}, _, []}, arity_ast]}]},
+         reloc,
+         aliases
+       )
+       when is_atom(fun) do
+    case literal_arity(arity_ast) do
+      {:ok, arity} -> qualify_if_host(mod_ast, fun, arity, reloc, aliases)
+      :error -> []
+    end
+  end
+
+  # Direct form `Host.name(args)` (also the inner call of a capture body
+  # `&Host.name(&1)`, which has matching arity). A `no_parens` zero-arg
+  # node is the inner reference of a `&Host.name/arity` capture — handled
+  # by the capture-with-arity clause above, so skip it here.
+  defp call_node_patch({{:., _, [mod_ast, fun]}, meta, args}, reloc, aliases)
+       when is_atom(fun) and is_list(args) do
+    if Keyword.get(meta, :no_parens, false) and args == [] do
+      []
+    else
+      qualify_if_host(mod_ast, fun, length(args), reloc, aliases)
+    end
+  end
+
+  defp call_node_patch(_node, _reloc, _aliases), do: []
+
+  defp qualify_if_host(mod_ast, fun, arity, reloc, aliases) do
+    if fun == reloc.name and arity == reloc.arity and
          resolved_module(mod_ast, aliases) == reloc.host do
       replace_call_target(mod_ast, reloc.target)
     else
@@ -668,7 +710,9 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunction do
     end
   end
 
-  defp call_node_patch(_node, _reloc, _aliases), do: []
+  defp literal_arity({:__block__, _, [n]}) when is_integer(n), do: {:ok, n}
+  defp literal_arity(n) when is_integer(n), do: {:ok, n}
+  defp literal_arity(_), do: :error
 
   defp resolved_module(mod_ast, aliases) do
     case resolve_alias(mod_ast, aliases) do
