@@ -228,6 +228,10 @@ Refactors that clean up redundant or unhelpful `def` shapes.
 
 > Cross-file: replace exact duplicates with `defdelegate`.
 
+### `Number42.Refactors.Ex.DropTrailingReturnBinding`
+
+> Drop a trailing `v = rhs; v` shim, returning `rhs` directly.
+
 ### `Number42.Refactors.Ex.ExpandShortFormBindings`
 
 > Expand short-form local bindings to long forms.
