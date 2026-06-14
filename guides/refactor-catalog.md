@@ -251,6 +251,14 @@ Refactors that fix correctness or performance bugs hidden inside
 > `List.wrap(nil)` is `[]` while the conditional yields `[nil]`, so the
 > rewrite only preserves behaviour when `x` is never `nil`.
 
+### `Number42.Refactors.Ex.RangeLiteralToRangeNew`
+
+> **Opinionated, DEFAULT-OFF** (opt in with `enabled: true`).
+> `a..b` → `Range.new(a, b)`, `a..b//step` → `Range.new(a, b, step)`.
+> Inverts the usual short-form preference; use only where the explicit
+> call reads better (named step arg, dynamic bounds). Skips full-slice
+> `..` and ranges in guards/patterns.
+
 ### `Number42.Refactors.Ex.SortForTopK`
 
 > `Enum.sort + take(1)` / `hd` → `Enum.min` / `Enum.max`.

@@ -144,6 +144,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Map.get(@attr, key, default)` default. Guards on any clause,
   non-literal heads, multi-arg heads, and non-constant bodies leave the
   group untouched.
+- `RangeLiteralToRangeNew` — opinionated, **DEFAULT-OFF** style-inversion
+  that rewrites range literals to explicit calls: `a..b` → `Range.new(a, b)`
+  and `a..b//step` → `Range.new(a, b, step)`. It runs against the library's
+  usual `verbose -> idiomatic-short` direction and the common Elixir style
+  guide (which prefers the `..` literal), so it only fires with
+  `enabled: true` — the in-module gate is the default-off convention, no
+  `skipped_modules` entry needed. Exists for cases where the call form is
+  clearer: named step argument (vs the easy-to-misread `a..b//step`) and
+  dynamic bounds. Skips full-slice `..` (no operands) and ranges in guards
+  and patterns (`x in 1..10`, `case n do 1..10 -> … end`, `1..10 = r`)
+  where `Range.new` is illegal syntax. Idempotent.
 - `LiftUntypedParamToStructPattern`'s call-site source now reads
   **transitive struct returns**. A project function whose every clause
   provably returns a single in-project struct — through Ecto's get-family

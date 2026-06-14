@@ -178,6 +178,7 @@ defmodule Number42.Refactors.MixProject do
           Number42.Refactors.Ex.LengthZeroToEmpty,
           Number42.Refactors.Ex.ListLastOfReverse,
           Number42.Refactors.Ex.ListWrapConditional,
+          Number42.Refactors.Ex.RangeLiteralToRangeNew,
           Number42.Refactors.Ex.SortForTopK
         ],
         "Refactors – Definition Hygiene": [
