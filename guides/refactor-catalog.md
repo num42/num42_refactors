@@ -333,6 +333,12 @@ Refactors that reach across files to consolidate duplication.
 > `case <call>(...) do ... end` at tail of `fn` → extract
 > `handle_<host>_<call>`.
 
+### `Number42.Refactors.Ex.ExtractCommonProlog`
+
+> A setup prolog shared by several functions → one private helper that
+> returns the still-needed bindings (liveness) as a tuple; each call
+> site destructures it.
+
 ### `Number42.Refactors.Ex.ExtractInlineBlock`
 
 > Extract duplicated function bodies into a shared private helper.

@@ -1,0 +1,460 @@
+defmodule Number42.Refactors.Ex.ExtractCommonProlog do
+  @moduledoc """
+  Extracts a setup prolog shared by several functions into one private
+  helper, lifting the bindings the callers still need through a tuple
+  return.
+
+      # before
+      def handle_event("save", params, socket) do
+        socket = assign(socket, :loading, true)
+        socket = assign(socket, :error, nil)
+        current_user = socket.assigns.current_user
+        finish(socket, save(params, current_user))
+      end
+
+      def handle_event("delete", params, socket) do
+        socket = assign(socket, :loading, true)
+        socket = assign(socket, :error, nil)
+        current_user = socket.assigns.current_user
+        finish(socket, delete(params, current_user))
+      end
+
+      # after
+      def handle_event("save", params, socket) do
+        {current_user, socket} = prepare_handle_event(socket)
+        finish(socket, save(params, current_user))
+      end
+
+      def handle_event("delete", params, socket) do
+        {current_user, socket} = prepare_handle_event(socket)
+        finish(socket, delete(params, current_user))
+      end
+
+      defp prepare_handle_event(socket) do
+        socket = assign(socket, :loading, true)
+        socket = assign(socket, :error, nil)
+        current_user = socket.assigns.current_user
+        {current_user, socket}
+      end
+
+  This is the **cross-function** counterpart to extracting a block out of
+  one function (`ExtractFunctionFromBlock`) and to lifting a shared
+  prologue across the *clauses* of one function
+  (`DedupeClausePrologue`): here the same leading statements appear at
+  the top of several distinct functions and collapse into a single
+  shared helper.
+
+  ## How a group qualifies
+
+  - **≥ `:min_functions` definitions** (default `2`) that are
+    **contiguous** in the source — the rewrite replaces one source range,
+    so a group split by an unrelated definition is skipped.
+  - **Identical prolog.** Their leading run of AST-identical statements
+    (ignoring metadata) is at least `:min_prolog_statements` long
+    (default `2`). A prefix that diverges in a literal
+    (`assign(:loading, true)` vs `assign(:loading, :spinner)`) is a
+    *parametric* clone — left for that family, not force-merged here.
+  - **Divergent tail.** Every function must have at least one statement
+    after the prolog. A function whose whole body *is* the prolog is a
+    full-body duplicate, a different refactor's concern.
+  - **Free vars are parameters everywhere.** Every variable the prolog
+    reads but does not itself bind must be a bare parameter in *every*
+    function of the group (so the helper can take it as an argument and
+    each call site can pass it). If a needed input is pattern-matched or
+    absent in some function, the group is skipped.
+  - **No control flow in the prolog.** A prolog containing `case`/`with`/
+    `if`/`fn`/… is left alone — its bindings can be conditional and the
+    liveness/tuple lift would be unsound.
+
+  ## Liveness & the tuple return
+
+  Of the variables the prolog **binds** (including a parameter rebound
+  in place, `socket = assign(socket, …)`), only those still **read** in
+  the remaining body of *some* function are live. The live set —
+  computed flow-sensitively so a self-rebind counts as a read — becomes
+  the helper's return:
+
+  - **0 live bindings** → nothing to thread back; the prolog is a pure
+    side-effect run, out of scope here, so the group is skipped.
+  - **1 live binding** → returned bare; the call site binds `x = helper(…)`.
+  - **≥ 2 live bindings** → returned as a sorted tuple; every call site
+    destructures it **uniformly** (`{a, b} = helper(…)`), even a site
+    that reads only one of them — a single shared shape keeps the helper
+    monomorphic.
+
+  ## Side-effect ordering
+
+  The prolog statements move verbatim, in order, into the helper, and
+  the helper is called at exactly the point the prolog occupied. No
+  statement is duplicated. So the observable order of side effects per
+  call site is preserved.
+
+  ## Pass scope & idempotence
+
+  One eligible group is rewritten per pass (the first found, in source
+  order). After the rewrite each former call site opens with a helper
+  call, not the shared statements, so a second pass finds no shared
+  prolog to lift — the rewrite is idempotent.
+  """
+
+  use Number42.Refactors.Refactor
+
+  @control_flow_forms ~w(raise throw exit with case cond if unless try for fn receive)a
+
+  @impl Number42.Refactors.Refactor
+  def description,
+    do: "Extract a setup prolog shared across functions into a tuple-returning private helper"
+
+  @impl Number42.Refactors.Refactor
+  def explanation do
+    """
+    When several functions open with the same run of setup statements,
+    that prolog is duplicated work spread across definitions. Lifting it
+    into one shared private helper that returns the still-needed bindings
+    as a tuple removes the duplication while preserving side-effect
+    order: the statements run once, in place, at each call site. Only
+    bindings read after the prolog are returned (liveness), and prologs
+    that diverge in a literal or contain control flow are left alone.
+    """
+  end
+
+  @impl Number42.Refactors.Refactor
+  def reformat_after?, do: true
+
+  @impl Number42.Refactors.Refactor
+  def transform(source, opts),
+    do: Sourceror.parse_string(source) |> apply_to_parse_result(source, opts)
+
+  defp apply_to_parse_result({:ok, ast}, source, opts), do: apply_to_ast(ast, source, opts)
+  defp apply_to_parse_result({:error, _}, source, _opts), do: source
+
+  defp apply_to_ast(ast, source, opts) do
+    ast
+    |> Macro.prewalker()
+    |> Enum.find_value(source, fn
+      {:defmodule, _, [_name, [{_do, _body}]]} = mod_ast ->
+        extract_in_module(mod_ast, source, opts)
+
+      _ ->
+        nil
+    end)
+  end
+
+  defp extract_in_module(mod_ast, source, opts) do
+    case module_body_exprs(mod_ast) do
+      [_ | _] = body_exprs -> first_eligible_patch(body_exprs, source, opts)
+      _ -> nil
+    end
+  end
+
+  defp first_eligible_patch(body_exprs, source, opts) do
+    min_prolog = Keyword.get(opts, :min_prolog_statements, 2)
+    min_funcs = Keyword.get(opts, :min_functions, 2)
+    existing = def_names(body_exprs)
+
+    body_exprs
+    |> candidate_groups(min_funcs)
+    |> Enum.find_value(nil, fn group ->
+      with {:ok, plan} <- plan_group(group, existing, min_prolog),
+           {:ok, patch} <- build_group_patch(group, plan) do
+        Sourceror.patch_string(source, [patch])
+      else
+        _ -> nil
+      end
+    end)
+  end
+
+  # --- grouping: contiguous runs sharing the same first statement ---
+
+  # Defs sharing an identical leading statement are candidates for a
+  # shared prolog. We chunk the body by that first-statement key so a
+  # group is always a contiguous source run (the patch replaces one
+  # range). Non-def nodes and bodyless heads break a run.
+  defp candidate_groups(body_exprs, min_funcs) do
+    body_exprs
+    |> Enum.map(&parse_def/1)
+    |> Enum.chunk_by(&first_stmt_key/1)
+    |> Enum.filter(fn
+      [first | _] = chunk ->
+        first_stmt_key(first) != nil and length(chunk) >= min_funcs
+
+      _ ->
+        false
+    end)
+  end
+
+  defp first_stmt_key(%{stmts: [first | _]}), do: strip_meta(first)
+  defp first_stmt_key(_), do: nil
+
+  defp parse_def({kind, _, [head, body_kw]} = node) when kind in [:def, :defp] do
+    {bare_head, guard} = split_guard(head)
+
+    with {name, params} <- extract_fn_signature(bare_head),
+         {:ok, body} <- do_body(body_kw) do
+      %{
+        kind: kind,
+        name: name,
+        params: params,
+        guard: guard,
+        head: head,
+        stmts: body_to_exprs(body),
+        node: node
+      }
+    else
+      _ -> :other
+    end
+  end
+
+  defp parse_def(_), do: :other
+
+  # --- per-group analysis ---
+
+  defp plan_group(group, existing, min_prolog) do
+    with {:ok, prolog_len} <- shared_prolog_length(group, min_prolog),
+         :ok <- ensure_no_control_flow(group, prolog_len),
+         :ok <- ensure_divergent_tail(group, prolog_len),
+         {:ok, params} <- helper_params(group, prolog_len),
+         {:ok, live} <- live_bindings(group, prolog_len),
+         {:ok, helper_name} <- helper_name(group, existing) do
+      {:ok,
+       %{
+         prolog_len: prolog_len,
+         params: params,
+         live: live,
+         helper_name: helper_name
+       }}
+    end
+  end
+
+  # Longest leading run of AST-identical (metadata-stripped) statements
+  # across every def in the group.
+  defp shared_prolog_length(group, min_prolog) do
+    max_len = group |> Enum.map(&length(&1.stmts)) |> Enum.min()
+
+    len =
+      Enum.reduce_while(0..(max_len - 1)//1, 0, fn i, acc ->
+        if all_agree_at?(group, i), do: {:cont, acc + 1}, else: {:halt, acc}
+      end)
+
+    if len >= min_prolog, do: {:ok, len}, else: :skip
+  end
+
+  defp all_agree_at?([%{stmts: first} | _] = group, i) do
+    ref = first |> Enum.at(i) |> strip_meta()
+    Enum.all?(group, fn %{stmts: s} -> strip_meta(Enum.at(s, i)) == ref end)
+  end
+
+  defp ensure_no_control_flow(group, prolog_len) do
+    [%{stmts: first} | _] = group
+    prolog = Enum.take(first, prolog_len)
+
+    if Enum.any?(prolog, &has_control_flow?/1), do: :skip, else: :ok
+  end
+
+  defp ensure_divergent_tail(group, prolog_len) do
+    if Enum.all?(group, fn %{stmts: s} -> length(s) > prolog_len end), do: :ok, else: :skip
+  end
+
+  # Free vars of the prolog → helper params. Each must be a bare
+  # parameter in every def of the group, else a call site can't pass it.
+  # Flow-sensitive so a self-rebind (`socket = assign(socket, …)`) reads
+  # `socket` as an input before binding it.
+  defp helper_params(group, prolog_len) do
+    [%{stmts: first} | _] = group
+    reads = first |> Enum.take(prolog_len) |> prolog_input_reads()
+
+    if Enum.all?(group, fn def -> MapSet.subset?(reads, bare_param_names(def)) end) do
+      {:ok, reads |> MapSet.to_list() |> Enum.sort()}
+    else
+      :skip
+    end
+  end
+
+  # Names a prolog reads before binding them — its inputs. Per statement
+  # the reads are the RHS of an assignment (the LHS bare name is a
+  # binding, not a read) or the whole statement otherwise; a name already
+  # bound by an earlier statement is not an input. A self-rebind
+  # (`socket = f(socket)`) keeps `socket` an input because its RHS read
+  # is gathered before this statement's own binding joins the accumulator.
+  defp prolog_input_reads(prolog) do
+    {reads, _bound} =
+      Enum.reduce(prolog, {MapSet.new(), MapSet.new()}, fn stmt, {reads, bound} ->
+        stmt_reads = stmt |> stmt_read_names() |> MapSet.difference(bound)
+        {MapSet.union(reads, stmt_reads), MapSet.union(bound, bound_in(stmt))}
+      end)
+
+    reads
+  end
+
+  defp stmt_read_names({:=, _, [_lhs, rhs]}), do: used_var_names(rhs)
+  defp stmt_read_names(stmt), do: used_var_names(stmt)
+
+  # Prolog-bound names still read in some def's tail. Flow-sensitive so a
+  # self-rebind (`socket = assign(socket, …)`) followed by a later read
+  # keeps the name live.
+  defp live_bindings(group, prolog_len) do
+    bound = group |> hd() |> prolog_binds(prolog_len)
+
+    read_after =
+      group
+      |> Enum.flat_map(fn %{stmts: stmts} ->
+        stmts |> Enum.drop(prolog_len) |> free_vars_in_order(bound)
+      end)
+      |> MapSet.new()
+
+    case bound |> MapSet.intersection(read_after) |> MapSet.to_list() |> Enum.sort() do
+      [] -> :skip
+      live -> {:ok, live}
+    end
+  end
+
+  defp prolog_binds(%{stmts: stmts}, prolog_len) do
+    stmts
+    |> Enum.take(prolog_len)
+    |> Enum.reduce(MapSet.new(), fn s, acc -> MapSet.union(acc, bound_in(s)) end)
+  end
+
+  # Derive a non-colliding helper name. Prefer `prepare_<name>` when the
+  # group shares one function name; else a documented placeholder.
+  defp helper_name(group, existing) do
+    base =
+      case group |> Enum.map(& &1.name) |> Enum.uniq() do
+        [single] -> :"prepare_#{single}"
+        _ -> :prepare_common_prolog
+      end
+
+    {:ok, dedupe_name(base, existing)}
+  end
+
+  defp dedupe_name(base, existing) do
+    if MapSet.member?(existing, base), do: dedupe_name_n(base, 1, existing), else: base
+  end
+
+  defp dedupe_name_n(base, n, existing) do
+    candidate = :"#{base}_#{n}"
+
+    if MapSet.member?(existing, candidate),
+      do: dedupe_name_n(base, n + 1, existing),
+      else: candidate
+  end
+
+  # --- patch construction ---
+
+  defp build_group_patch(group, plan) do
+    case group_range(group) do
+      %{} = range ->
+        rewritten = Enum.map_join(group, "\n\n", &render_call_site(&1, plan))
+        helper = render_helper(group, plan)
+        {:ok, %{change: rewritten <> "\n\n" <> helper, range: range}}
+
+      _ ->
+        :skip
+    end
+  end
+
+  defp render_call_site(%{kind: kind, head: head, stmts: stmts}, plan) do
+    binding = render_destructure(plan)
+    call = "#{plan.helper_name}(#{Enum.map_join(plan.params, ", ", &Atom.to_string/1)})"
+    tail = stmts |> Enum.drop(plan.prolog_len) |> Enum.map_join("\n", &Sourceror.to_string/1)
+
+    "  #{kind} #{Sourceror.to_string(head)} do\n" <>
+      indent("#{binding} = #{call}\n#{tail}") <>
+      "\n  end"
+  end
+
+  defp render_helper(group, plan) do
+    [first | _] = group
+
+    prolog =
+      first.stmts |> Enum.take(plan.prolog_len) |> Enum.map_join("\n", &Sourceror.to_string/1)
+
+    ret = render_return(plan)
+    params = Enum.map_join(plan.params, ", ", &Atom.to_string/1)
+
+    "  defp #{plan.helper_name}(#{params}) do\n" <>
+      indent("#{prolog}\n#{ret}") <>
+      "\n  end"
+  end
+
+  defp render_destructure(%{live: [one]}), do: Atom.to_string(one)
+  defp render_destructure(%{live: many}), do: "{#{Enum.map_join(many, ", ", &Atom.to_string/1)}}"
+
+  defp render_return(%{live: [one]}), do: Atom.to_string(one)
+  defp render_return(%{live: many}), do: "{#{Enum.map_join(many, ", ", &Atom.to_string/1)}}"
+
+  # --- helpers ---
+
+  defp bare_param_names(%{params: params}) do
+    params
+    |> Enum.flat_map(fn
+      {name, _, ctx} when is_atom(name) and is_atom(ctx) -> [name]
+      _ -> []
+    end)
+    |> MapSet.new()
+  end
+
+  defp split_guard({:when, _, [inner, guard]}), do: {inner, guard}
+  defp split_guard(head), do: {head, nil}
+
+  defp has_control_flow?(ast) do
+    ast
+    |> Macro.prewalker()
+    |> Enum.any?(fn
+      {form, _, _} when form in @control_flow_forms -> true
+      _ -> false
+    end)
+  end
+
+  defp strip_meta(ast) do
+    Macro.prewalk(ast, fn
+      {form, _meta, args} -> {form, [], args}
+      other -> other
+    end)
+  end
+
+  defp group_range(group) do
+    with %{start: start} <- Sourceror.get_range(List.first(group).node),
+         %{end: stop} <- Sourceror.get_range(List.last(group).node) do
+      %{start: start, end: stop}
+    else
+      _ -> nil
+    end
+  end
+
+  defp def_names(body_exprs) do
+    body_exprs
+    |> Enum.flat_map(fn
+      {kind, _, [head | _]} when kind in [:def, :defp] ->
+        case extract_fn_signature(strip_when(head)) do
+          {name, _args} -> [name]
+          _ -> []
+        end
+
+      _ ->
+        []
+    end)
+    |> MapSet.new()
+  end
+
+  defp do_body(body_kw) when is_list(body_kw) do
+    Enum.find_value(body_kw, :skip, fn
+      {{:__block__, _, [:do]}, value} -> {:ok, value}
+      {:do, value} -> {:ok, value}
+      _ -> nil
+    end)
+  end
+
+  defp do_body(_), do: :skip
+
+  defp strip_when({:when, _, [inner | _]}), do: inner
+  defp strip_when(other), do: other
+
+  defp indent(text) do
+    text
+    |> String.split("\n")
+    |> Enum.map_join("\n", fn
+      "" -> ""
+      line -> "    " <> line
+    end)
+  end
+end

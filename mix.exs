@@ -200,6 +200,7 @@ defmodule Number42.Refactors.MixProject do
         "Refactors – Cross-File Extraction": [
           Number42.Refactors.Ex.ExtractBehaviourFromAdapterFamily,
           Number42.Refactors.Ex.ExtractCaseToHelper,
+          Number42.Refactors.Ex.ExtractCommonProlog,
           Number42.Refactors.Ex.ExtractInlineBlock,
           Number42.Refactors.Ex.ExtractIntraModuleClone,
           Number42.Refactors.Ex.ExtractLambdaBlock,
