@@ -204,6 +204,7 @@ defmodule Number42.Refactors.MixProject do
           Number42.Refactors.Ex.ExtractLambdaBlock,
           Number42.Refactors.Ex.ExtractNestedBlock,
           Number42.Refactors.Ex.ExtractParametricClone,
+          Number42.Refactors.Ex.ExtractPrimitiveToStruct,
           Number42.Refactors.Ex.ExtractProtocolFromStructFamily,
           Number42.Refactors.Ex.ExtractRenamedClone,
           Number42.Refactors.Ex.ExtractSharedModule

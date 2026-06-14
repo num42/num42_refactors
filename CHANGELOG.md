@@ -24,6 +24,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ExtractPrimitiveToStruct` (#118): detects a recurring primitive shape
+  — the same bare tuple or bare map threaded through many function heads
+  — and extracts it into a named struct, rewriting the heads and the
+  provable construction sites. **Default-OFF** (`enabled: true` to opt
+  in): a wrong positional mapping compiles-but-corrupts, the highest-risk
+  class in the catalog. Detection: a tuple shape qualifies only when it
+  appears in `>= K` heads (default `K = 3`) binding each position to a
+  bare variable whose name-stem is **consistent across every occurrence**
+  — `{lat, lng}` and `{lng, lat}` disagree and decline the whole shape
+  (the anti-swap guard); the position→field map must also be injective.
+  Maps match on an **exact key set** (`%{name, age}` ≠ `%{name, age,
+  email}`; subset/superset is a follow-up slice). Naming: a small
+  field-name dictionary (`lat`+`lng` → `Coord`, `x`+`y` → `Point`, …),
+  falling back to `ExtractedStruct<N>` plus an inline rename reminder when
+  it misses (documented weakness). False-positive guards: tagged tuples
+  (`{:ok, _}`/`{:error, _}`), one-off transients (the `K` threshold),
+  tuples flowing into stdlib tuple consumers (`List.keyfind`, `:ets`,
+  `Keyword`, `Tuple`), and shapes already backed by a `defstruct`.
+  Construction sites are rewritten only by **provable dataflow** — a
+  literal tuple at a call position whose head this pass struct-typed —
+  never by arity-guessing. Every ambiguous case declines and is recorded
+  for `--log` review.
 - `ReduceToNamedAggregate`: classifies a multi-line `Enum.reduce/3`
   whose accumulator follows a known aggregation shape and rewrites it to
   the named idiom. `Map.update(acc, key, [v], &[v | &1])` with seed `%{}`
