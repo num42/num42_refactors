@@ -113,6 +113,11 @@ function that already does the same thing.
 
 > `Enum.member?(coll, x)` → `x in coll` (negated calls → `not in`).
 
+### `Number42.Refactors.Ex.MergeSequentialReduces`
+
+> A run of 2+ adjacent `Enum.reduce/3` over the same collection →
+> one pass with an n-tuple accumulator (pure, independent reduces only).
+
 ### `Number42.Refactors.Ex.MergePipelineIntoComprehension`
 
 > `coll |> Enum.filter/reject(pred) |> Enum.map(f)` →
