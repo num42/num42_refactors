@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `CondToCase`: a `cond` whose every non-default arm is `var == literal`
+  (or the symmetric `literal == var`) over the **same** bare variable →
+  a `case` on that variable, one `literal -> body` clause per arm, with a
+  trailing `true ->` mapped to `_ ->`. Arm bodies are kept verbatim. A
+  `cond` with no `true ->` arm is still rewritten — `CondClauseError` and
+  `CaseClauseError` are equivalent "no match" behaviour. Right-hand sides
+  are limited to scalar literals (atom, number, binary, `nil`, boolean)
+  that are valid `case` patterns as-is. Skips when arms test different
+  variables, any arm is relational (`x > 5`), the RHS is a non-literal
+  (another variable, a call, `@attr`, `Mod.const`, `^pin`), the RHS is a
+  composite literal (tuple/list/map — could embed a bare variable that
+  would become a binding pattern), any test is a function call
+  (evaluation-order/short-circuit hazard), a literal repeats across arms
+  (`case` clause shadowing), or a `true ->` arm is not the final clause.
+  The multi-clause-`def` target (#38) is produced downstream by
+  `CaseToFunctionClauses`; this is the upstream `cond -> case` half.
 - `ManualTapToTap`: a hand-rolled "run a side effect, return the
   original value" lambda in a pipe → `Kernel.tap/2`. Matches
   `value |> then(fn x -> eff; x end)` and the immediately-applied

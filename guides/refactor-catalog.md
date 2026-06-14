@@ -153,6 +153,11 @@ nested conditionals.
 
 > Collapse nested `{:ok, _}` / `{:error, _}` cases into a `with` chain.
 
+### `Number42.Refactors.Ex.CondToCase`
+
+> Rewrite a `cond` whose arms all test the same variable with `==`
+> against literals as a `case` on that variable (`true ->` → `_ ->`).
+
 ### `Number42.Refactors.Ex.IfLiftToClauses`
 
 > Lift `def f(p) do if ... else ... end end` to pattern-matched
