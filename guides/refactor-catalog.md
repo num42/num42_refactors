@@ -198,6 +198,10 @@ nested conditionals.
 
 Refactors that reshape data-flow expressions into pipe form.
 
+### `Number42.Refactors.Ex.ExtractPipelineToFunction`
+
+> Long inline `|>` pipeline → named `defp` (free vars → params). _(opt-in)_
+
 ### `Number42.Refactors.Ex.ExtractSocketToPipe`
 
 > `any_function(socket, ...)` → `socket |> any_function(...)`.
