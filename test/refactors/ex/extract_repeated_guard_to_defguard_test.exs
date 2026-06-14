@@ -108,6 +108,92 @@ defmodule Number42.Refactors.Ex.ExtractRepeatedGuardToDefguardTest do
     end
   end
 
+  describe "preserves rescue/after/else blocks when swapping the guard" do
+    test "a rescue block survives the guard swap" do
+      before_source = """
+      defmodule M do
+        defp safe_to_integer(s) when is_binary(s) do
+          String.to_integer(s)
+        rescue
+          ArgumentError -> nil
+        end
+
+        defp normalize(s) when is_binary(s) do
+          String.trim(s)
+        end
+
+        defp echo(s) when is_binary(s) do
+          s
+        end
+      end
+      """
+
+      actual = apply_refactor(@subject, before_source)
+
+      assert actual =~ "defguardp is_valid_s(s) when is_binary(s)"
+      assert actual =~ "defp safe_to_integer(s) when is_valid_s(s)"
+      assert actual =~ "rescue"
+      assert actual =~ "ArgumentError -> nil"
+      assert_compiles(actual)
+    end
+
+    test "an after block survives the guard swap" do
+      before_source = """
+      defmodule M do
+        def a(s) when is_binary(s) do
+          String.length(s)
+        after
+          :ok
+        end
+
+        def b(s) when is_binary(s) do
+          s
+        end
+
+        def c(s) when is_binary(s) do
+          s
+        end
+      end
+      """
+
+      actual = apply_refactor(@subject, before_source)
+
+      assert actual =~ "def a(s) when is_valid_s(s)"
+      assert actual =~ "after"
+      assert_compiles(actual)
+    end
+
+    test "an else block (try/rescue/else) survives the guard swap" do
+      before_source = """
+      defmodule M do
+        def a(s) when is_binary(s) do
+          String.to_integer(s)
+        rescue
+          ArgumentError -> :error
+        else
+          n -> {:ok, n}
+        end
+
+        def b(s) when is_binary(s) do
+          s
+        end
+
+        def c(s) when is_binary(s) do
+          s
+        end
+      end
+      """
+
+      actual = apply_refactor(@subject, before_source)
+
+      assert actual =~ "def a(s) when is_valid_s(s)"
+      assert actual =~ "rescue"
+      assert actual =~ "else"
+      assert actual =~ "{:ok, n}"
+      assert_compiles(actual)
+    end
+  end
+
   describe "leaves alone" do
     test "a guard used only twice (below the default threshold)" do
       source = """

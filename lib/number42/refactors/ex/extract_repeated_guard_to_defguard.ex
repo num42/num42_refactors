@@ -217,44 +217,12 @@ defmodule Number42.Refactors.Ex.ExtractRepeatedGuardToDefguard do
       nil
     else
       head_replacements =
-        Enum.map(group, fn %{node: node, var: var} ->
-          Patch.replace(node, rewrite_head(node, name, var))
+        Enum.map(group, fn %{guard: guard, var: var} ->
+          Patch.replace(guard, "#{name}(#{var})")
         end)
 
       [defguardp_patch(first, name, exprs) | head_replacements]
     end
-  end
-
-  # Replace the clause's `when <expr>` with `when <name>(<var>)`, keeping
-  # the head and body source verbatim around it.
-  defp rewrite_head({kind, _, [{:when, _, [head, _guard]}, body_kw]}, name, var) do
-    head_text = Sourceror.to_string(head)
-    "#{kind} #{head_text} when #{name}(#{var})#{body_text(body_kw)}"
-  end
-
-  defp body_text(body_kw) do
-    case do_body(body_kw) |> rendered_body() do
-      {:single, text} -> ", do: #{text}"
-      {:multi, text} -> " do\n#{indent(text)}\nend"
-    end
-  end
-
-  defp do_body(body_kw) do
-    Enum.find_value(body_kw, fn
-      {{:__block__, _, [:do]}, body} -> body
-      {:do, body} -> body
-      _ -> nil
-    end)
-  end
-
-  # A multi-statement block renders as `do/end`; a single expression
-  # renders inline unless `to_string` itself spans lines.
-  defp rendered_body({:__block__, _, exprs}) when length(exprs) > 1,
-    do: {:multi, Enum.map_join(exprs, "\n", &Sourceror.to_string/1)}
-
-  defp rendered_body(body) do
-    text = Sourceror.to_string(body)
-    if String.contains?(text, "\n"), do: {:multi, text}, else: {:single, text}
   end
 
   # One line-anchored insertion of the `defguardp ... when ...` line,
@@ -298,13 +266,4 @@ defmodule Number42.Refactors.Ex.ExtractRepeatedGuardToDefguard do
         {f, _m, a} -> {f, [], a}
         other -> other
       end)
-
-  defp indent(text) do
-    text
-    |> String.split("\n")
-    |> Enum.map_join("\n", fn
-      "" -> ""
-      line -> "  " <> line
-    end)
-  end
 end
