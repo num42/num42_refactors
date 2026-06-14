@@ -67,6 +67,19 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunction do
 
   `write_root` defaults to `File.cwd!/0`; tests pass a per-test tmp dir.
 
+  ## Configuring `min_envy_refs`
+
+  How many references to a single other module `B` a body must make
+  before it counts as feature envy. Defaults to `2`; raise it to demand
+  stronger envy (fewer, more confident moves) or lower it to `1` to catch
+  thin forwarders. A non-positive or non-integer value is ignored and the
+  default applies.
+
+      configured_modules: [
+        {Number42.Refactors.Ex.RelocateMisplacedFunction,
+         enabled: true, min_envy_refs: 3}
+      ]
+
   ## Default-OFF (opt-in only)
 
   Disabled by default — both `prepare/1` and `transform/2` are no-ops
@@ -94,6 +107,15 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunction do
   use Number42.Refactors.Refactor
 
   @excluded_path_prefixes ["test/", "dev/"]
+
+  # Minimum number of references to a single other module before the
+  # body counts as "envious". One reference is mere delegation
+  # (`def f(x), do: B.g(x)`), not Feature Envy — and treating it as a
+  # move would break idempotence (the delegate we leave behind is itself
+  # a one-ref forwarder). The default requires at least two references so
+  # only bodies that genuinely *work with* B's data qualify; teams can
+  # tune it via `min_envy_refs:` in opts.
+  @default_min_envy_refs 2
 
   @type relocation :: %{
           aliases: %{atom() => module()},
@@ -123,9 +145,21 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunction do
   def build_plan(sources, opts \\ []) do
     write_root = Keyword.get(opts, :write_root, File.cwd!())
     dry_run? = Keyword.get(opts, :dry_run, false)
+    min_envy_refs = min_envy_refs(opts)
 
     relevant = sources |> Enum.reject(fn {path, _src} -> excluded_path?(path) end)
-    do_build_plan(relevant, sources, write_root, dry_run?)
+    do_build_plan(relevant, sources, write_root, dry_run?, min_envy_refs)
+  end
+
+  # `min_envy_refs` must be a positive integer; anything else (zero,
+  # negative, non-integer) is a misconfiguration that would silently
+  # change which functions move, so fall back to the conservative
+  # default rather than honour a nonsensical threshold.
+  defp min_envy_refs(opts) do
+    case Keyword.get(opts, :min_envy_refs, @default_min_envy_refs) do
+      n when is_integer(n) and n > 0 -> n
+      _ -> @default_min_envy_refs
+    end
   end
 
   @impl Number42.Refactors.Refactor
@@ -172,13 +206,13 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunction do
 
   # ── Plan construction ────────────────────────────────────────────
 
-  defp do_build_plan(relevant, all_sources, write_root, dry_run?) do
+  defp do_build_plan(relevant, all_sources, write_root, dry_run?, min_envy_refs) do
     modules = collect_modules(relevant)
     paths = source_paths(all_sources)
 
     relocations =
       relevant
-      |> Enum.flat_map(&candidate_relocations(&1, modules))
+      |> Enum.flat_map(&candidate_relocations(&1, modules, min_envy_refs))
       |> Enum.filter(&safe_relocation?(&1, modules, all_sources))
 
     unless dry_run? do
@@ -233,39 +267,44 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunction do
 
   # ── Candidate detection (the envy metric) ────────────────────────
 
-  defp candidate_relocations({_path, source}, modules) do
+  defp candidate_relocations({_path, source}, modules, min_envy_refs) do
     case Sourceror.parse_string(source) do
-      {:ok, ast} -> ast |> Macro.prewalker() |> Enum.flat_map(&relocations_in_node(&1, modules))
-      {:error, _} -> []
+      {:ok, ast} ->
+        ast
+        |> Macro.prewalker()
+        |> Enum.flat_map(&relocations_in_node(&1, modules, min_envy_refs))
+
+      {:error, _} ->
+        []
     end
   end
 
-  defp relocations_in_node({:defmodule, _, [name_ast, [{_do, body}]]}, modules) do
+  defp relocations_in_node({:defmodule, _, [name_ast, [{_do, body}]]}, modules, min_envy_refs) do
     case alias_to_module(name_ast) do
-      {:ok, host} -> relocations_in_module(host, body_to_exprs(body), modules)
+      {:ok, host} -> relocations_in_module(host, body_to_exprs(body), modules, min_envy_refs)
       :error -> []
     end
   end
 
-  defp relocations_in_node(_, _modules), do: []
+  defp relocations_in_node(_, _modules, _min_envy_refs), do: []
 
-  defp relocations_in_module(host, body_exprs, modules) do
+  defp relocations_in_module(host, body_exprs, modules, min_envy_refs) do
     host_info = Map.get(modules, host)
     sibling_keys = function_keys(body_exprs)
 
     body_exprs
     |> collect_definitions()
     |> Enum.filter(&(&1.kind == :def))
-    |> Enum.flat_map(&relocation_for_def(&1, host, host_info, sibling_keys))
+    |> Enum.flat_map(&relocation_for_def(&1, host, host_info, sibling_keys, min_envy_refs))
   end
 
-  defp relocation_for_def(def_info, host, host_info, sibling_keys) do
+  defp relocation_for_def(def_info, host, host_info, sibling_keys, min_envy_refs) do
     aliases = host_info.aliases
     host_attrs = host_info.attr_names
 
     with :ok <- references_only_other_modules(def_info, sibling_keys),
          :ok <- no_host_internals(def_info, host_attrs),
-         {:ok, target} <- envied_target(def_info, aliases, host),
+         {:ok, target} <- envied_target(def_info, aliases, host, min_envy_refs),
          {:ok, delegate_args} <- plain_delegate_args(def_info) do
       [
         %{
@@ -305,18 +344,10 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunction do
     end
   end
 
-  # Minimum number of references to a single other module before the
-  # body counts as "envious". One reference is mere delegation
-  # (`def f(x), do: B.g(x)`), not Feature Envy — and treating it as a
-  # move would break idempotence (the delegate we leave behind is itself
-  # a one-ref forwarder). Require at least two references so only bodies
-  # that genuinely *work with* B's data qualify.
-  @min_envy_refs 2
-
   # The single envied module, resolved through the host's aliases.
   # Returns `:skip` for too-little envy, ambiguous (two equally-envied
   # modules), or a target that is the host itself.
-  defp envied_target(def_info, aliases, host) do
+  defp envied_target(def_info, aliases, host, min_envy_refs) do
     counts =
       def_info.clauses
       |> Enum.flat_map(&module_refs_in_clause(&1, aliases))
@@ -324,13 +355,13 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunction do
       |> Enum.frequencies()
 
     case counts |> Enum.sort_by(fn {_mod, n} -> -n end) do
-      [{target, n} | _] = sorted -> target_or_skip(target, n, sorted)
+      [{target, n} | _] = sorted -> target_or_skip(target, n, sorted, min_envy_refs)
       [] -> :skip
     end
   end
 
-  defp target_or_skip(target, n, sorted) do
-    if n >= @min_envy_refs and not ambiguous?(sorted, n), do: {:ok, target}, else: :skip
+  defp target_or_skip(target, n, sorted, min_envy_refs) do
+    if n >= min_envy_refs and not ambiguous?(sorted, n), do: {:ok, target}, else: :skip
   end
 
   # Two modules envied an equal, maximal amount → cannot pick one.

@@ -341,6 +341,79 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunctionTest do
     end
   end
 
+  describe "configurable min_envy_refs" do
+    test "min_envy_refs: 1 relocates a thin forwarder the default leaves alone", %{tmp: tmp} do
+      # A single reference to B: at the default threshold of 2 this is
+      # mere delegation and stays put; lowering the threshold to 1 makes
+      # it a relocation candidate.
+      a = """
+      defmodule MyApp.A do
+        alias MyApp.B
+
+        def forward(brand), do: B.name(brand)
+      end
+      """
+
+      b = struct_b()
+      paths = materialize([{"lib/my_app/a.ex", a}, {"lib/my_app/b.ex", b}], tmp)
+
+      # Default threshold (2): no move.
+      default_plan = prepared(paths, write_root: tmp)
+      assert_unchanged(@subject, a, prepared: default_plan, enabled: true)
+      refute File.read!(Path.join(tmp, "lib/my_app/b.ex")) =~ "def forward"
+
+      # Lowered threshold (1): the forwarder relocates.
+      plan = prepared(paths, write_root: tmp, min_envy_refs: 1)
+      result_a = apply_refactor(@subject, a, prepared: plan, enabled: true)
+      assert result_a =~ "defdelegate forward(brand), to: MyApp.B"
+
+      target_source = File.read!(Path.join(tmp, "lib/my_app/b.ex"))
+      assert target_source =~ "def forward(brand), do: MyApp.B.name(brand)"
+    end
+
+    test "min_envy_refs: 3 leaves a two-reference body the default relocates", %{tmp: tmp} do
+      # Two references to B: relocated at the default threshold of 2, but
+      # raising the threshold to 3 keeps it in place.
+      a = """
+      defmodule MyApp.A do
+        alias MyApp.B
+
+        def describe(%B{} = b) do
+          B.name(b) <> B.code(b)
+        end
+      end
+      """
+
+      b = struct_b()
+      paths = materialize([{"lib/my_app/a.ex", a}, {"lib/my_app/b.ex", b}], tmp)
+
+      # Raised threshold (3): no move.
+      plan = prepared(paths, write_root: tmp, min_envy_refs: 3)
+      assert_unchanged(@subject, a, prepared: plan, enabled: true)
+      refute File.read!(Path.join(tmp, "lib/my_app/b.ex")) =~ "def describe"
+    end
+
+    test "non-positive min_envy_refs falls back to the default", %{tmp: tmp} do
+      # A single reference: with the default of 2 it stays. A bogus
+      # threshold (0) must not silently lower the bar — it falls back to
+      # the default, so the forwarder is still left alone.
+      a = """
+      defmodule MyApp.A do
+        alias MyApp.B
+
+        def forward(brand), do: B.name(brand)
+      end
+      """
+
+      b = struct_b()
+      paths = materialize([{"lib/my_app/a.ex", a}, {"lib/my_app/b.ex", b}], tmp)
+
+      plan = prepared(paths, write_root: tmp, min_envy_refs: 0)
+      assert_unchanged(@subject, a, prepared: plan, enabled: true)
+      refute File.read!(Path.join(tmp, "lib/my_app/b.ex")) =~ "def forward"
+    end
+  end
+
   describe "idempotence" do
     test "second pass after move is a no-op", %{tmp: tmp} do
       # The host already delegates; the target already owns the function.
