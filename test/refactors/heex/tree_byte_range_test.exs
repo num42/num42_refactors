@@ -29,6 +29,37 @@ defmodule Number42.Refactors.Heex.TreeByteRangeTest do
       assert String.starts_with?(slice, "<div>")
       assert String.ends_with?(slice, "</div>")
     end
+
+    test "nested element sharing a line with its ancestor (issue #212)" do
+      body = ~s|<h1><span class="title">Dashboard</span></h1>\n|
+      {:ok, [{:element, "h1", _attrs, [span], _} = h1]} = Tree.parse_body(body)
+
+      {hs, he} = Tree.node_byte_range(h1, body)
+      assert binary_part(body, hs, he - hs) == ~s|<h1><span class="title">Dashboard</span></h1>|
+
+      {ss, se} = Tree.node_byte_range(span, body)
+
+      assert binary_part(body, ss, se - ss) == ~s|<span class="title">Dashboard</span>|
+    end
+
+    test "two sibling elements of the same kind on one line" do
+      body = ~s|<p><span>a</span><span>b</span></p>\n|
+      {:ok, [{:element, "p", _, [first, second], _}]} = Tree.parse_body(body)
+
+      {fs, fe} = Tree.node_byte_range(first, body)
+      assert binary_part(body, fs, fe - fs) == "<span>a</span>"
+
+      {ss, se} = Tree.node_byte_range(second, body)
+      assert binary_part(body, ss, se - ss) == "<span>b</span>"
+    end
+
+    test "nested eex_expr sharing a line with its element" do
+      body = ~s|<button>{@label}</button>\n|
+      {:ok, [{:element, "button", _, [expr], _}]} = Tree.parse_body(body)
+
+      {s, e} = Tree.node_byte_range(expr, body)
+      assert binary_part(body, s, e - s) == "{@label}"
+    end
   end
 
   describe "node_byte_range/2 for eex nodes" do

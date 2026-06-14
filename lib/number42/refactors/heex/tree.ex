@@ -39,7 +39,7 @@ defmodule Number42.Refactors.Heex.Tree do
           | {:eex_expr, String.t(), meta}
           | {:text, String.t(), meta}
 
-  @type meta :: %{line: pos_integer()}
+  @type meta :: %{optional(:byte_offset) => non_neg_integer(), line: pos_integer()}
 
   @type sigil :: %{
           body: String.t(),
@@ -69,16 +69,39 @@ defmodule Number42.Refactors.Heex.Tree do
   `:eex_expr` it spans `{` through the matching `}`. For `:eex_block`
   it spans the opening `<%=` through the closing `<% end %>`. For
   `:text` it spans the literal characters.
+
+  The node's start byte is taken from `meta.byte_offset`, threaded
+  through the parser as a monotonic cursor over `body` (see
+  `assign_event_offsets/2`). This pins each node to its *actual*
+  structural position, so a nested element that shares a source line
+  with an ancestor or sibling resolves correctly rather than to the
+  first marker of its kind on the line.
   """
   @spec node_byte_range(node_t(), String.t()) ::
           {non_neg_integer(), non_neg_integer()}
   def node_byte_range(node, body) do
-    line = node_line(node)
-    line_offset = byte_offset_of_line(body, line)
-    start_byte = line_offset + leading_offset_to_marker(node, body, line_offset)
+    start_byte = node_start_byte(node, body)
     end_byte = scan_node_end(node, body, start_byte)
     {start_byte, end_byte}
   end
+
+  # Prefer the offset threaded through parsing; fall back to the legacy
+  # line + first-marker heuristic only for nodes built without one.
+  defp node_start_byte(node, body) do
+    case node_byte_offset(node) do
+      nil ->
+        line_offset = byte_offset_of_line(body, node_line(node))
+        line_offset + leading_offset_to_marker(node, body, line_offset)
+
+      offset ->
+        offset
+    end
+  end
+
+  defp node_byte_offset({:element, _, _, _, meta}), do: Map.get(meta, :byte_offset)
+  defp node_byte_offset({:eex_block, _, _, meta}), do: Map.get(meta, :byte_offset)
+  defp node_byte_offset({:eex_expr, _, meta}), do: Map.get(meta, :byte_offset)
+  defp node_byte_offset({:text, _, meta}), do: Map.get(meta, :byte_offset)
 
   @doc """
   Parse a HEEx body string into a list of top-level nodes.
@@ -87,7 +110,7 @@ defmodule Number42.Refactors.Heex.Tree do
   @spec parse_body(String.t()) :: {:ok, [node_t]} | :error
   def parse_body(body) when is_binary(body) do
     EEx.tokenize(body, line: 1, column: 1, trim: false, indentation: 0)
-    |> parse_tokens_or_error()
+    |> parse_tokens_or_error(body)
   end
 
   @doc """
@@ -174,7 +197,7 @@ defmodule Number42.Refactors.Heex.Tree do
   defp close_eex_block(acc, stack) do
     case stack do
       [{:eex_block_frame, header, parent_acc, meta} | rest] ->
-        node = {:eex_block, header, acc |> Enum.reverse(), %{line: meta.line}}
+        node = {:eex_block, header, acc |> Enum.reverse(), node_meta(meta)}
         {[node | parent_acc], rest}
 
       [{:opaque_frame} | rest] ->
@@ -207,16 +230,16 @@ defmodule Number42.Refactors.Heex.Tree do
           |> Enum.reverse()
           |> Enum.reduce(children, fn
             {:elem_frame, dn, dattrs, _dparent, dmeta}, kids ->
-              [{:element, dn, dattrs, kids, %{line: dmeta.line}}]
+              [{:element, dn, dattrs, kids, node_meta(dmeta)}]
 
             {:eex_block_frame, dheader, _dparent, dmeta}, kids ->
-              [{:eex_block, dheader, kids, %{line: dmeta.line}}]
+              [{:eex_block, dheader, kids, node_meta(dmeta)}]
 
             {:opaque_frame}, kids ->
               kids
           end)
 
-        node = {:element, open_name, attrs, children, %{line: meta.line}}
+        node = {:element, open_name, attrs, children, node_meta(meta)}
         {[node | parent_acc], rest}
     end
   end
@@ -346,7 +369,7 @@ defmodule Number42.Refactors.Heex.Tree do
           {split_text_with_curlies(raw, meta) ++ acc, stack}
 
         {:self, name, attrs, meta}, {acc, stack} ->
-          {[{:element, name, normalize_attrs(attrs), [], %{line: meta.line}} | acc], stack}
+          {[{:element, name, normalize_attrs(attrs), [], node_meta(meta)} | acc], stack}
 
         {:open, name, attrs, meta}, {acc, stack} ->
           {[], [{:elem_frame, name, normalize_attrs(attrs), acc, meta} | stack]}
@@ -355,7 +378,7 @@ defmodule Number42.Refactors.Heex.Tree do
           close_element(name, acc, stack)
 
         {:eex_expr_evt, code, meta}, {acc, stack} ->
-          {[{:eex_expr, code, %{line: meta.line}} | acc], stack}
+          {[{:eex_expr, code, node_meta(meta)} | acc], stack}
 
         {:eex_block_open, header, meta}, {acc, stack} ->
           {[], [{:eex_block_frame, header, acc, meta} | stack]}
@@ -375,6 +398,15 @@ defmodule Number42.Refactors.Heex.Tree do
   defp node_line({:eex_expr, _, %{line: l}}), do: l
   defp node_line({:text, _, %{line: l}}), do: l
 
+  # Build a node meta from an event meta, carrying the threaded
+  # `byte_offset` when present so `node_byte_range/2` can pin the node.
+  defp node_meta(%{line: line} = meta) do
+    case Map.get(meta, :byte_offset) do
+      nil -> %{line: line}
+      offset -> %{line: line, byte_offset: offset}
+    end
+  end
+
   defp normalize_attrs(normalized_attrs) do
     normalized_attrs |> Enum.map(fn {name, value} -> {name, value} end)
   end
@@ -388,10 +420,10 @@ defmodule Number42.Refactors.Heex.Tree do
   defp parse_sigil_or_skip(%{body: body} = sigil),
     do: parse_body(body) |> attach_tree_or_skip(sigil)
 
-  defp parse_tokens_or_error({:ok, tokens}),
-    do: tokens_to_html(tokens) |> parse_html_or_error()
+  defp parse_tokens_or_error({:ok, tokens}, body),
+    do: tokens_to_html(tokens, body) |> parse_html_or_error()
 
-  defp parse_tokens_or_error(_), do: :error
+  defp parse_tokens_or_error(_, _body), do: :error
 
   defp push_text(piece, _line, [{:text, prev, t_meta} | rest]),
     do: [{:text, prev <> piece, t_meta} | rest]
@@ -655,21 +687,43 @@ defmodule Number42.Refactors.Heex.Tree do
     do: body |> do_find_tag_end(pos + 1, in_quote, depth)
 
   defp split_text_with_curlies(raw, meta) do
-    raw
-    |> scan_curlies(0, [], meta.line, meta.line, [])
-    |> Enum.flat_map(fn
-      {:lit, "", _} ->
-        []
+    base = Map.get(meta, :byte_offset, 0)
 
-      {:lit, str, line} ->
-        trimmed = String.trim(str)
-        if trimmed == "", do: [], else: [{:text, trimmed, %{line: line}}]
+    {nodes, _pos} =
+      raw
+      |> scan_curlies(0, [], meta.line, meta.line, [])
+      |> Enum.reduce({[], base}, fn chunk, {acc, pos} ->
+        split_chunk_to_node(chunk, acc, pos)
+      end)
 
-      {:expr, code, line} ->
-        [{:eex_expr, String.trim(code), %{line: line}}]
-    end)
-    |> Enum.reverse()
+    nodes |> Enum.reverse()
   end
+
+  # `pos` is the byte offset of this chunk's first byte in `body`. A
+  # `:lit` chunk spans its own bytes; an `:expr` chunk spans `{` + code +
+  # `}` (two extra braces). Text offsets skip leading whitespace so they
+  # point at the trimmed content; expr offsets point at the `{`.
+  defp split_chunk_to_node({:lit, str, line}, acc, pos) do
+    trimmed = String.trim(str)
+    next = pos + byte_size(str)
+
+    if trimmed == "" do
+      {acc, next}
+    else
+      lead = leading_ws_bytes(str)
+      {[{:text, trimmed, %{line: line, byte_offset: pos + lead}} | acc], next}
+    end
+  end
+
+  defp split_chunk_to_node({:expr, code, line}, acc, pos) do
+    next = pos + byte_size(code) + 2
+    {[{:eex_expr, String.trim(code), %{line: line, byte_offset: pos}} | acc], next}
+  end
+
+  defp leading_ws_bytes(<<c, rest::binary>>) when c in [?\s, ?\t, ?\n, ?\r],
+    do: 1 + leading_ws_bytes(rest)
+
+  defp leading_ws_bytes(_), do: 0
 
   defp starts_with_at?(body, pos, prefix) do
     plen = byte_size(prefix)
@@ -730,7 +784,7 @@ defmodule Number42.Refactors.Heex.Tree do
   defp tokenize_char(_, body, depth, in_quote, pos),
     do: body |> do_find_tag_end(pos + 1, in_quote, depth)
 
-  defp tokens_to_html(tokens) do
+  defp tokens_to_html(tokens, body) do
     # Convert each EEx token into one or more uniform stream events and
     # interleave them with HTML tokens scanned out of `:text` chunks.
     # The single combined stream is then fed to one reducer in
@@ -766,5 +820,103 @@ defmodule Number42.Refactors.Heex.Tree do
       _ ->
         []
     end)
+    |> assign_event_offsets(body)
   end
+
+  # Stamp every event with the byte offset of its leading marker by
+  # threading a single monotonic cursor through `body`. Events are in
+  # document order, so each marker is found at or after the previous
+  # cursor — this disambiguates same-line siblings and nested elements
+  # that the old line + first-marker lookup could not tell apart.
+  defp assign_event_offsets(events, body) do
+    {events, _cursor} =
+      events
+      |> Enum.map_reduce(0, fn event, cursor ->
+        {offset, next} = locate_event(event, body, cursor)
+        {put_event_offset(event, offset), next}
+      end)
+
+    events
+  end
+
+  # `{offset, next_cursor}` for an event: `offset` is where the node's
+  # range starts; `next_cursor` is just past the marker that ends this
+  # event's leading token, so following events (and text) keep advancing
+  # forward without re-reading bytes this event already owns.
+  defp locate_event({:open, _name, _attrs, _meta}, body, cursor),
+    do: tag_at(body, cursor, "<")
+
+  defp locate_event({:self, _name, _attrs, _meta}, body, cursor),
+    do: tag_at(body, cursor, "<")
+
+  defp locate_event({:close, _name, _meta}, body, cursor),
+    do: tag_at(body, cursor, "</")
+
+  defp locate_event({:text, raw, _meta}, _body, cursor),
+    do: {cursor, cursor + byte_size(raw)}
+
+  defp locate_event({:eex_expr_evt, _code, _meta}, body, cursor),
+    do: eex_at(body, cursor)
+
+  defp locate_event({:eex_block_open, _header, _meta}, body, cursor),
+    do: eex_at(body, cursor)
+
+  defp locate_event({:eex_block_close, _meta}, body, cursor),
+    do: eex_at(body, cursor)
+
+  defp locate_event({:eex_opaque_open, _meta}, body, cursor),
+    do: eex_at(body, cursor)
+
+  # Find the tag's `<`/`</` at or after `cursor`; advance the cursor just
+  # past the tag's terminating `>` (quote- and `{...}`-aware) so following
+  # events start after it.
+  defp tag_at(body, cursor, marker) do
+    case :binary.match(body, marker, scope: {cursor, byte_size(body) - cursor}) do
+      {pos, _len} -> {pos, tag_end_pos(body, pos)}
+      :nomatch -> {cursor, cursor}
+    end
+  end
+
+  defp tag_end_pos(body, lt_pos) do
+    case find_tag_end(body, lt_pos + 1) do
+      {:self, after_self} -> after_self
+      {:open, after_open} -> after_open
+    end
+  end
+
+  # Find an EEx `<%` at or after `cursor`; advance past its closing `%>`.
+  defp eex_at(body, cursor) do
+    case :binary.match(body, "<%", scope: {cursor, byte_size(body) - cursor}) do
+      {pos, _len} -> {pos, find_eex_close(body, pos)}
+      :nomatch -> {cursor, cursor}
+    end
+  end
+
+  defp put_event_offset({:open, name, attrs, meta}, off),
+    do: {:open, name, attrs, Map.put(meta_map(meta), :byte_offset, off)}
+
+  defp put_event_offset({:self, name, attrs, meta}, off),
+    do: {:self, name, attrs, Map.put(meta_map(meta), :byte_offset, off)}
+
+  defp put_event_offset({:close, name, meta}, off),
+    do: {:close, name, Map.put(meta_map(meta), :byte_offset, off)}
+
+  defp put_event_offset({:text, raw, meta}, off),
+    do: {:text, raw, Map.put(meta_map(meta), :byte_offset, off)}
+
+  defp put_event_offset({:eex_expr_evt, code, meta}, off),
+    do: {:eex_expr_evt, code, Map.put(meta_map(meta), :byte_offset, off)}
+
+  defp put_event_offset({:eex_block_open, header, meta}, off),
+    do: {:eex_block_open, header, Map.put(meta_map(meta), :byte_offset, off)}
+
+  defp put_event_offset({:eex_block_close, meta}, off),
+    do: {:eex_block_close, Map.put(meta_map(meta), :byte_offset, off)}
+
+  defp put_event_offset({:eex_opaque_open, meta}, off),
+    do: {:eex_opaque_open, Map.put(meta_map(meta), :byte_offset, off)}
+
+  # EEx token metas arrive as bare maps; HTML-scan metas already are.
+  defp meta_map(meta) when is_map(meta), do: meta
+  defp meta_map(meta) when is_list(meta), do: Map.new(meta)
 end
