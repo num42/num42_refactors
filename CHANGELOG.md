@@ -215,6 +215,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   clone), or needs an input that isn't a bare parameter everywhere. The
   cross-function counterpart to `DedupeClausePrologue` (shared prolog
   across the *clauses* of one function).
+- `CollapseRichCaseToWithElse`: collapses a nested `case` pyramid whose
+  error arms do real work (transform, log, re-tag — not just propagate
+  `{:error, e}`) into a `with` chain plus an `else` block. The rich-arm
+  counterpart to `CollapseNestedCaseToWith`, which only fires when every
+  error arm is a trivial pass-through and the `with` needs no `else`.
+  Each level's single success arm (`{:ok, _}` / `:ok`) becomes a `<-`
+  clause; every non-success arm from every level is collected, outer
+  level first, into one flat `else` block. Refuses to fire when an error
+  arm references a variable bound by an earlier success arm (the binding
+  is out of scope in `else` → uncompilable), when two levels share an
+  error pattern (the flat `else` would mis-route one of them →
+  behaviour change), when a level has more than one success-shaped arm
+  (ambiguous spine), or when every arm is a trivial pass-through (that's
+  `CollapseNestedCaseToWith`'s job).
 - `ManualTapToTap`: a hand-rolled "run a side effect, return the
   original value" lambda in a pipe → `Kernel.tap/2`. Matches
   `value |> then(fn x -> eff; x end)` and the immediately-applied
