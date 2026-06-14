@@ -431,3 +431,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   implicit-branch SKIP rule that guards a non-exhaustive `case` and an
   `else`-less `if`; a `cond` without it raises when no arm matches and so
   carries an implicit branch that would not run the tail.
+- `HoistHardcodedConfig` now hoists config-shaped strings out of
+  `cond`/`case` branch *bodies*: a URL/path literal appearing in the
+  bodies of multiple branches collapses to one shared `@module_attribute`
+  with every branch use-site rewritten; one in a single branch still
+  hoists on its own. The clause *head* (the `->` left-hand side, also for
+  `with`/`fn`/`for`) is a pattern/guard position, so a literal there is
+  left inline — a `@attribute` cannot stand in a match. Same shape
+  predicates and idempotence guarantee as before.

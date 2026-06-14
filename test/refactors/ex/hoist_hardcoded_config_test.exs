@@ -209,6 +209,100 @@ defmodule Number42.Refactors.Ex.HoistHardcodedConfigTest do
     end
   end
 
+  describe "cond / case branches" do
+    test "hoists a config string shared across all case branch bodies into one attribute" do
+      before_source = """
+      defmodule Client do
+        def call(env) do
+          case env do
+            :prod -> String.upcase("https://api.example.com/v1")
+            :staging -> String.downcase("https://api.example.com/v1")
+          end
+        end
+      end
+      """
+
+      result = apply_refactor(@subject, before_source)
+
+      assert length(String.split(result, ~s(@api_example_v1_url "https://api.example.com/v1"))) ==
+               2
+
+      assert result =~ "String.upcase(@api_example_v1_url)"
+      assert result =~ "String.downcase(@api_example_v1_url)"
+      refute result =~ ~s|String.upcase("https://api.example.com/v1")|
+      assert_compiles(result)
+    end
+
+    test "hoists a config string shared across all cond arms into one attribute" do
+      before_source = """
+      defmodule Client do
+        def call(x) do
+          cond do
+            x > 0 -> String.upcase("https://api.example.com/v1")
+            x < 0 -> String.downcase("https://api.example.com/v1")
+            true -> String.trim("https://api.example.com/v1")
+          end
+        end
+      end
+      """
+
+      result = apply_refactor(@subject, before_source)
+
+      assert length(String.split(result, ~s(@api_example_v1_url "https://api.example.com/v1"))) ==
+               2
+
+      assert result =~ "String.upcase(@api_example_v1_url)"
+      assert result =~ "String.downcase(@api_example_v1_url)"
+      assert result =~ "String.trim(@api_example_v1_url)"
+      assert_compiles(result)
+    end
+
+    test "still hoists a config string present in only one branch body" do
+      before_source = """
+      defmodule Client do
+        def call(x) do
+          case x do
+            :a -> String.upcase("https://api.example.com/v1")
+            :b -> :noop
+          end
+        end
+      end
+      """
+
+      result = apply_refactor(@subject, before_source)
+
+      assert result =~ ~s(@api_example_v1_url "https://api.example.com/v1")
+      assert result =~ "String.upcase(@api_example_v1_url)"
+      assert_compiles(result)
+    end
+
+    test "leaves a config string used as a case clause-head pattern inline" do
+      assert_unchanged(@subject, """
+      defmodule M do
+        def call(x) do
+          case x do
+            "https://api.example.com/a" -> 1
+            "https://api.example.com/b" -> 2
+          end
+        end
+      end
+      """)
+    end
+
+    test "leaves a non-config string shared across all branches inline" do
+      assert_unchanged(@subject, """
+      defmodule M do
+        def call(x) do
+          case x do
+            :a -> log("hello world")
+            :b -> warn("hello world")
+          end
+        end
+      end
+      """)
+    end
+  end
+
   describe "idempotent" do
     test "running twice equals running once for a URL literal" do
       assert_idempotent(@subject, """
@@ -231,6 +325,19 @@ defmodule Number42.Refactors.Ex.HoistHardcodedConfigTest do
       assert_idempotent(@subject, """
       defmodule Loader do
         def read, do: File.read("/etc/myapp/config.toml")
+      end
+      """)
+    end
+
+    test "running twice equals running once for a string shared across all branches" do
+      assert_idempotent(@subject, """
+      defmodule Client do
+        def call(x) do
+          case x do
+            :a -> fetch("https://api.example.com/v1")
+            :b -> log("https://api.example.com/v1")
+          end
+        end
       end
       """)
     end
