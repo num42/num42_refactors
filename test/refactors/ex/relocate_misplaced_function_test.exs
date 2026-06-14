@@ -283,6 +283,64 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunctionTest do
     end
   end
 
+  describe "alias with :as resolves at the call site" do
+    # Regression for #198: `alias MyApp.A, as: Host` wraps the `:as`
+    # keyword key as `{:__block__, _, [:as]}`. `collect_aliases/1` must
+    # unwrap that, otherwise the alias is never recorded and every
+    # call-site rewrite shape (direct, pipe, capture) misses the host.
+    test "direct call via :as alias is qualified to the target", %{tmp: tmp} do
+      {a, b} = shape_sources()
+
+      caller = """
+      defmodule MyApp.Caller do
+        alias MyApp.A, as: Host
+
+        def render(brand), do: Host.brand_label(brand)
+      end
+      """
+
+      paths =
+        materialize(
+          [{"lib/my_app/a.ex", a}, {"lib/my_app/b.ex", b}, {"lib/my_app/caller.ex", caller}],
+          tmp
+        )
+
+      plan = prepared(paths, write_root: tmp)
+
+      result_caller = apply_refactor(@subject, caller, prepared: plan, enabled: true)
+      assert result_caller =~ "MyApp.B.brand_label(brand)"
+      refute result_caller =~ "Host.brand_label"
+    end
+
+    test "pipe and capture call sites via :as alias are qualified", %{tmp: tmp} do
+      {a, b} = shape_sources()
+
+      caller = """
+      defmodule MyApp.Caller do
+        alias MyApp.A, as: Host
+
+        def via_pipe(brand), do: brand |> Host.brand_label()
+        def via_capture(brands), do: Enum.map(brands, &Host.brand_label/1)
+        def via_capture_body(brands), do: Enum.map(brands, &Host.brand_label(&1))
+      end
+      """
+
+      paths =
+        materialize(
+          [{"lib/my_app/a.ex", a}, {"lib/my_app/b.ex", b}, {"lib/my_app/caller.ex", caller}],
+          tmp
+        )
+
+      plan = prepared(paths, write_root: tmp)
+
+      result_caller = apply_refactor(@subject, caller, prepared: plan, enabled: true)
+      assert result_caller =~ "brand |> MyApp.B.brand_label()"
+      assert result_caller =~ "&MyApp.B.brand_label/1"
+      assert result_caller =~ "&MyApp.B.brand_label(&1)"
+      refute result_caller =~ "Host.brand_label"
+    end
+  end
+
   describe "idempotence" do
     test "second pass after move is a no-op", %{tmp: tmp} do
       # The host already delegates; the target already owns the function.
