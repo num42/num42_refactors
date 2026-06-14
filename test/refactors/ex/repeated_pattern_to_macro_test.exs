@@ -119,6 +119,73 @@ defmodule Number42.Refactors.Ex.RepeatedPatternToMacroTest do
       assert rewritten =~ ~s|{:green, "green"}|
       assert rewritten =~ ~s|{:blue, "blue"}|
     end
+
+    test "single bare-var-param defs collapse, threading the param through" do
+      source = """
+      defmodule Colors do
+        def red(mode), do: Color.new("red", mode)
+        def green(mode), do: Color.new("green", mode)
+        def blue(mode), do: Color.new("blue", mode)
+      end
+      """
+
+      rewritten = apply_refactor(@subject, source, @on)
+
+      # Param `mode` is reproduced verbatim in the head; only the literal
+      # is unquoted from the value table.
+      assert rewritten =~ "def unquote(fun)(mode), do: Color.new(unquote(arg1), mode)"
+      assert rewritten =~ ~s|{:red, "red"}|
+      assert rewritten =~ ~s|{:green, "green"}|
+      assert rewritten =~ ~s|{:blue, "blue"}|
+      refute rewritten =~ "def red("
+      refute rewritten =~ "def green("
+      refute rewritten =~ "def blue("
+    end
+
+    test "single-param generated module compiles and threads the param correctly" do
+      source = """
+      defmodule SingleParamGen do
+        def red(n), do: {:color, "red", n}
+        def green(n), do: {:color, "green", n}
+        def blue(n), do: {:color, "blue", n}
+      end
+      """
+
+      rewritten = apply_refactor(@subject, source, @on)
+
+      # The generated macro must compile AND expand so the param is in
+      # scope inside the body (hygiene: param head var and body read share
+      # one quote scope).
+      assert_compiles(rewritten)
+
+      [{mod, _}] = Code.compile_string(rewritten)
+      assert mod.red(7) == {:color, "red", 7}
+      assert mod.green(8) == {:color, "green", 8}
+      assert mod.blue(9) == {:color, "blue", 9}
+      :code.purge(mod)
+      :code.delete(mod)
+    end
+
+    test "single-param body using the param twice still binds correctly" do
+      source = """
+      defmodule TwiceParamGen do
+        def red(n), do: {"red", n, n + 1}
+        def green(n), do: {"green", n, n + 1}
+        def blue(n), do: {"blue", n, n + 1}
+      end
+      """
+
+      rewritten = apply_refactor(@subject, source, @on)
+
+      assert_compiles(rewritten)
+
+      [{mod, _}] = Code.compile_string(rewritten)
+      assert mod.red(1) == {"red", 1, 2}
+      assert mod.green(2) == {"green", 2, 3}
+      assert mod.blue(3) == {"blue", 3, 4}
+      :code.purge(mod)
+      :code.delete(mod)
+    end
   end
 
   describe "idempotent" do
@@ -147,6 +214,32 @@ defmodule Number42.Refactors.Ex.RepeatedPatternToMacroTest do
       end
       """
 
+      assert_unchanged(@subject, source, @on)
+    end
+
+    test "a single-param collapse is idempotent" do
+      source = """
+      defmodule Colors do
+        def red(mode), do: Color.new("red", mode)
+        def green(mode), do: Color.new("green", mode)
+        def blue(mode), do: Color.new("blue", mode)
+      end
+      """
+
+      assert_idempotent(@subject, source, @on)
+    end
+
+    test "an already-generated single-param for-block passes through unchanged" do
+      source = """
+      defmodule Colors do
+        for {fun, arg1} <- [{:red, "red"}, {:green, "green"}, {:blue, "blue"}] do
+          def unquote(fun)(mode), do: Color.new(unquote(arg1), mode)
+        end
+      end
+      """
+
+      # `unquote(fun)` heads are not bare atoms, so the generated clause
+      # never re-enters a group → no-op.
       assert_unchanged(@subject, source, @on)
     end
   end
@@ -189,15 +282,57 @@ defmodule Number42.Refactors.Ex.RepeatedPatternToMacroTest do
       assert_unchanged(@subject, source, @on)
     end
 
-    test "functions with parameters are skipped (only zero-arity)" do
+    test "multi-parameter functions are skipped (only single bare-var param)" do
       source = """
-      defmodule WithArgs do
-        def red(x), do: {x, "red"}
-        def green(x), do: {x, "green"}
-        def blue(x), do: {x, "blue"}
+      defmodule TwoArgs do
+        def red(x, y), do: {x, y, "red"}
+        def green(x, y), do: {x, y, "green"}
+        def blue(x, y), do: {x, y, "blue"}
       end
       """
 
+      # Two params would need co-parameterisation we don't attempt → skip.
+      assert_unchanged(@subject, source, @on)
+    end
+
+    test "a pattern (non-bare-var) single param is skipped" do
+      source = """
+      defmodule Patterned do
+        def red(%Ctx{} = c), do: {c, "red"}
+        def green(%Ctx{} = c), do: {c, "green"}
+        def blue(%Ctx{} = c), do: {c, "blue"}
+      end
+      """
+
+      # `%Ctx{} = c` is a destructuring head, not a plain var → skip.
+      assert_unchanged(@subject, source, @on)
+    end
+
+    test "single-param groups must agree on the param name" do
+      source = """
+      defmodule MixedParams do
+        def red(mode), do: build("red", mode)
+        def green(opt), do: build("green", opt)
+        def blue(mode), do: build("blue", mode)
+      end
+      """
+
+      # `mode` and `opt` are different param names → at most two `mode`
+      # members, below the threshold of 3 → skip.
+      assert_unchanged(@subject, source, @on)
+    end
+
+    test "a single-param body reading a free var beyond the param is skipped" do
+      source = """
+      defmodule ExtraFree do
+        def red(mode), do: build("red", mode, prefix)
+        def green(mode), do: build("green", mode, prefix)
+        def blue(mode), do: build("blue", mode, prefix)
+      end
+      """
+
+      # `prefix` is free and not the param → undefined after generation,
+      # so the body is not fully determined by the tuple + param → skip.
       assert_unchanged(@subject, source, @on)
     end
 
@@ -236,19 +371,6 @@ defmodule Number42.Refactors.Ex.RepeatedPatternToMacroTest do
       end
       """
 
-      assert_unchanged(@subject, source, @on)
-    end
-
-    test "bodies that reference variables are skipped" do
-      source = """
-      defmodule Dynamic do
-        def red(x), do: x + 1
-        def green(x), do: x + 2
-        def blue(x), do: x + 3
-      end
-      """
-
-      # Carries params → arity > 0 → skipped (only zero-arity collapses).
       assert_unchanged(@subject, source, @on)
     end
 

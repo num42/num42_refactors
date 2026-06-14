@@ -1,8 +1,11 @@
 defmodule Number42.Refactors.Ex.RepeatedPatternToMacro do
   @moduledoc """
-  Collapse **N structurally identical zero-arity functions** that differ
-  only in literal/atom values into a single compile-time `for` block that
-  generates the clauses with `def unquote(...)`.
+  Collapse **N structurally identical functions** that differ only in
+  literal/atom values into a single compile-time `for` block that
+  generates the clauses with `def unquote(...)`. Handles zero-arity
+  functions and single-parameter functions whose param is the same bare
+  variable across the group (passed through to the generated clause
+  unchanged).
 
       # before
       defmodule Palette do
@@ -21,6 +24,23 @@ defmodule Number42.Refactors.Ex.RepeatedPatternToMacro do
           def unquote(fun)(), do: %Color{name: unquote(arg1), hex: unquote(arg2)}
         end
       end
+
+  The single-parameter case threads the param through verbatim:
+
+      # before
+      def red(mode), do: Color.new("red", mode)
+      def green(mode), do: Color.new("green", mode)
+      def blue(mode), do: Color.new("blue", mode)
+
+      # after
+      for {fun, arg1} <- [{:red, "red"}, {:green, "green"}, {:blue, "blue"}] do
+        def unquote(fun)(mode), do: Color.new(unquote(arg1), mode)
+      end
+
+  Only the literals (`"red"`, …) become `unquote` holes; the param
+  (`mode`) is reproduced as a normal head var, so its reads in the body
+  resolve to it without any `var!`/hygiene escape — param and body share
+  the same quote scope, and the value table never carries the param.
 
   Structural identity is decided with
   `AstHelpers.replace_literals_with_holes/1`: two bodies are in the same
@@ -54,16 +74,22 @@ defmodule Number42.Refactors.Ex.RepeatedPatternToMacro do
   - **Not opted in.** No `enabled: true` → no-op (see above).
   - **Below threshold.** Fewer than `min_functions` members in the
     largest eligible group.
-  - **Non-zero arity.** Only `def name, do: ...` (arity 0) is handled.
-    Parameters would need co-parameterisation we don't attempt.
-  - **Guards / multi-clause.** A guarded head, or a name that appears in
-    more than one clause, disqualifies the function — pattern/guard
-    semantics must not be flattened into a value table.
+  - **Arity > 1, or a non-bare-var single param.** Only `def name, do:
+    ...` (arity 0) and `def name(var), do: ...` with a single plain
+    variable param are handled. A pattern/literal/default param, or two+
+    params, would need co-parameterisation we don't attempt. An arity-1
+    group must also agree on the param *name* (`mode` and `m` are
+    different groups).
+  - **Guards / multi-clause.** A guarded head, or a `{name, arity}` that
+    appears in more than one clause, disqualifies the function —
+    pattern/guard semantics must not be flattened into a value table.
   - **Attached `@doc`/`@spec`/`@impl`.** Per-clause documentation and
     specs cannot survive `def unquote(...)`; a documented member blocks
     the whole group rather than silently dropping the doc.
-  - **Free variables in the body.** Only literal-only bodies (no variable
-    reads) are eligible, so the lifted tuple fully determines the clause.
+  - **Free variables beyond the param.** A body may read only the head's
+    param; any other free variable would be undefined after generation,
+    so the lifted tuple (plus the passed-through param) must fully
+    determine the clause.
   - **No varying literal.** If only the name differs and the body is
     byte-identical, a `for` over names is pure obfuscation — left for the
     exact-duplicate pass.
@@ -88,19 +114,22 @@ defmodule Number42.Refactors.Ex.RepeatedPatternToMacro do
 
   @impl Number42.Refactors.Refactor
   def description,
-    do: "Collapse N structurally identical zero-arity functions into a generated for-block"
+    do:
+      "Collapse N structurally identical zero- or single-param functions into a generated for-block"
 
   @impl Number42.Refactors.Refactor
   def explanation do
     """
-    Group zero-arity, guard-free, single-clause, undocumented functions
-    whose bodies share one literal-stripped skeleton and differ only in
-    literal/atom values. Emit a single `for {fun, arg1, ...} <- [...]`
-    block whose `def unquote(fun)()` clause carries the shared skeleton
-    with the varying literals unquoted. Constant literals stay inline.
-    Opt-in and threshold-gated; skips guards, params, docs, free vars,
-    and identical-body groups. Idempotent: generated heads are not bare
-    atoms, so they never re-enter a group.
+    Group zero-arity or single-bare-var-param, guard-free, single-clause,
+    undocumented functions whose bodies share one literal-stripped
+    skeleton and differ only in literal/atom values. Emit a single `for
+    {fun, arg1, ...} <- [...]` block whose `def unquote(fun)(param)`
+    clause carries the shared skeleton with the varying literals unquoted
+    and the param threaded through verbatim. Constant literals stay
+    inline. Opt-in and threshold-gated; skips guards, multi/pattern
+    params, docs, non-param free vars, and identical-body groups.
+    Idempotent: generated heads are not bare atoms, so they never re-enter
+    a group.
     """
   end
 
@@ -157,12 +186,12 @@ defmodule Number42.Refactors.Ex.RepeatedPatternToMacro do
 
   defp candidate?({kind, _, [head, body_kw]} = node, multi, documented)
        when kind in [:def, :defp] and is_list(body_kw) do
-    with {name, nil} <- bare_head(head),
+    with {name, param} <- bare_head(head),
          false <- MapSet.member?(multi, {kind, name}),
          false <- node in documented,
          false <- has_attached_meta?(node),
          body when not is_nil(body) <- do_body(body_kw) do
-      literal_only?(body)
+      extractable_body?(body, param)
     else
       _ -> false
     end
@@ -187,21 +216,55 @@ defmodule Number42.Refactors.Ex.RepeatedPatternToMacro do
   defp attached_attr?({:@, _, [{attr, _, _}]}) when is_atom(attr), do: attr in @attached_attrs
   defp attached_attr?(_), do: false
 
-  # Zero-arity head: `{name, meta, nil}` with an atom name. Anything with
-  # args (a list) or a guard (`:when`) or an unquote head fails here.
+  # Eligible head shapes, returning `{name, param}`:
+  #
+  #   - Zero-arity: `{name, meta, nil}` → `{name, nil}`.
+  #   - Single bare-var param: `{name, meta, [{var, _, ctx}]}` →
+  #     `{name, var}`. The param must be a plain variable (atom name +
+  #     atom context, not underscored); patterns, literals and defaults
+  #     are rejected so the value table never has to co-parameterise a
+  #     destructuring head.
+  #
+  # Anything else — a guard (`:when`), arity > 1, an unquote head, or a
+  # non-var single arg — fails here.
   defp bare_head({name, _, nil}) when is_atom(name), do: {name, nil}
+
+  defp bare_head({name, _, [{var, _, ctx}]})
+       when is_atom(name) and is_atom(var) and is_atom(ctx) do
+    if reserved_var?(var), do: :error, else: {name, var}
+  end
+
   defp bare_head(_), do: :error
 
-  # A body is literal-only when it reads no free variable. `free_vars/2`
-  # filters against a *known* scope and so can't find them with an empty
-  # scope — compute the free set directly: every used var name minus the
-  # names bound within the body itself.
-  @spec literal_only?(term()) :: boolean()
-  defp literal_only?(body) do
-    used_var_names(body)
-    |> MapSet.difference(bound_in(body))
-    |> Enum.empty?()
+  defp reserved_var?(var) do
+    string = Atom.to_string(var)
+    String.starts_with?(string, "_") or var in [:__MODULE__, :__CALLER__, :__ENV__]
   end
+
+  # A body is extractable when its free variables are *exactly* the names
+  # the head supplies as params — every value the clause depends on is
+  # then fully determined by the lifted tuple plus the passed-through
+  # param. `free_vars/2` filters against a *known* scope and so can't find
+  # them with an empty scope — compute the free set directly: every used
+  # var name minus the names bound within the body itself.
+  #
+  #   - Arity 0 (`param == nil`): free set must be empty (literal-only).
+  #   - Arity 1 (`param` is the bare-var name): free set must be a subset
+  #     of `{param}`. The param read stays inline in the generated clause
+  #     (`def unquote(fun)(mode), do: ... mode ...`); any *other* free var
+  #     would be undefined after generation, so the body is rejected.
+  @spec extractable_body?(term(), atom() | nil) :: boolean()
+  defp extractable_body?(body, param) do
+    body
+    |> free_var_names()
+    |> MapSet.subset?(allowed_free_vars(param))
+  end
+
+  defp allowed_free_vars(nil), do: MapSet.new()
+  defp allowed_free_vars(param), do: MapSet.new([param])
+
+  defp free_var_names(body),
+    do: MapSet.difference(used_var_names(body), bound_in(body))
 
   # A def carrying leading/trailing comments (a `@doc` attaches as a
   # comment in Sourceror's view) or `@doc`/`@spec` is blocked: per-clause
@@ -215,9 +278,15 @@ defmodule Number42.Refactors.Ex.RepeatedPatternToMacro do
 
   # --- grouping --------------------------------------------------------
 
-  defp group_key({kind, _, [_head, body_kw]}) do
+  # Group key carries the param name so only same-arity, same-param
+  # members merge: arity-0 (`nil`) never joins arity-1, and an arity-1
+  # group must agree on its bare-var name (`mode` and `m` are distinct
+  # groups). The skeleton hash already separates them via the var node,
+  # but keying on the param makes the "uniform bare var" rule explicit.
+  defp group_key({kind, _, [head, body_kw]}) do
+    {_name, param} = bare_head(head)
     body = do_body(body_kw)
-    {kind, body |> replace_literals_with_holes() |> :erlang.phash2()}
+    {kind, param, body |> replace_literals_with_holes() |> :erlang.phash2()}
   end
 
   defp multi_clause_keys(body_exprs) do
@@ -258,11 +327,12 @@ defmodule Number42.Refactors.Ex.RepeatedPatternToMacro do
   # over names with one fixed body is obfuscation, not dedup → skip.
   defp emit_with_varying(_group, _first, []), do: nil
 
-  defp emit_with_varying(group, {kind, _, _} = first, varying) do
+  defp emit_with_varying(group, {kind, _, [head, _]} = first, varying) do
+    {_name, param} = bare_head(head)
     col_names = column_names(varying)
     hole_body = build_hole_body(def_body(first), varying, col_names)
     rows = Enum.map(group, &row_tuple(&1, varying))
-    block = render_for_block(kind, col_names, rows, hole_body)
+    block = render_for_block(kind, param, col_names, rows, hole_body)
 
     [replace_patch(first, block) | Enum.map(tl(group), &delete_patch/1)]
   end
@@ -313,7 +383,7 @@ defmodule Number42.Refactors.Ex.RepeatedPatternToMacro do
   end
 
   defp row_tuple({_kind, _, [head, body_kw]}, varying) do
-    {name, nil} = bare_head(head)
+    {name, _param} = bare_head(head)
     body = do_body(body_kw)
     leaves = literal_leaves(body)
     values = Enum.map(varying, &(leaves |> Enum.at(&1) |> render_node()))
@@ -323,7 +393,7 @@ defmodule Number42.Refactors.Ex.RepeatedPatternToMacro do
 
   # --- rendering -------------------------------------------------------
 
-  defp render_for_block(kind, col_names, rows, hole_body) do
+  defp render_for_block(kind, param, col_names, rows, hole_body) do
     pattern = "{fun, " <> Enum.join(col_names, ", ") <> "}"
     body_str = hole_body |> strip_comments() |> Sourceror.to_string()
     rows_str = Enum.map_join(rows, ",\n", &("        " <> &1))
@@ -332,10 +402,19 @@ defmodule Number42.Refactors.Ex.RepeatedPatternToMacro do
     for #{pattern} <- [
     #{rows_str}
         ] do
-      #{kind} unquote(fun)(), do: #{body_str}
+      #{kind} unquote(fun)(#{param_head(param)}), do: #{body_str}
     end\
     """
   end
+
+  # The generated clause head: empty parens for arity 0, the original
+  # bare-var name for arity 1. The param is emitted verbatim — `def
+  # unquote(fun)(mode)` reuses the source name, so `mode` reads in the
+  # body resolve to it. No `var!`/hygiene escape is needed: the param and
+  # its body reads share one quote scope, and the only `unquote`d holes
+  # are literals from the value table, never the param.
+  defp param_head(nil), do: ""
+  defp param_head(param) when is_atom(param), do: Atom.to_string(param)
 
   defp render_node(node), do: node |> strip_comments() |> Sourceror.to_string()
 
