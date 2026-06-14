@@ -89,6 +89,17 @@ defmodule Number42.Refactors.Ex.ExtractCommonProlog do
   statement is duplicated. So the observable order of side effects per
   call site is preserved.
 
+  ## Helper placement & clause families
+
+  The helper is emitted after the rewritten group. When the group is a
+  *slice* of one multi-clause function — its clauses share a single
+  name/arity and more clauses of that name/arity follow the group — the
+  helper is instead placed after the **last** clause of that family, so
+  the clause group is never split (Elixir warns, and rejects under
+  `--warnings-as-errors`, on "clauses with the same name and arity
+  should be grouped together"). When the group already is the family's
+  tail (the common case), the helper sits directly after the call sites.
+
   ## Pass scope & idempotence
 
   One eligible group is rewritten per pass (the first found, in source
@@ -152,12 +163,14 @@ defmodule Number42.Refactors.Ex.ExtractCommonProlog do
     min_funcs = Keyword.get(opts, :min_functions, 2)
     existing = def_names(body_exprs)
 
-    body_exprs
+    parsed = Enum.map(body_exprs, &parse_def/1)
+
+    parsed
     |> candidate_groups(min_funcs)
     |> Enum.find_value(nil, fn group ->
       with {:ok, plan} <- plan_group(group, existing, min_prolog),
-           {:ok, patch} <- build_group_patch(group, plan) do
-        Sourceror.patch_string(source, [patch])
+           {:ok, patches} <- build_group_patches(group, parsed, plan) do
+        Sourceror.patch_string(source, patches)
       else
         _ -> nil
       end
@@ -170,9 +183,8 @@ defmodule Number42.Refactors.Ex.ExtractCommonProlog do
   # shared prolog. We chunk the body by that first-statement key so a
   # group is always a contiguous source run (the patch replaces one
   # range). Non-def nodes and bodyless heads break a run.
-  defp candidate_groups(body_exprs, min_funcs) do
-    body_exprs
-    |> Enum.map(&parse_def/1)
+  defp candidate_groups(parsed, min_funcs) do
+    parsed
     |> Enum.chunk_by(&first_stmt_key/1)
     |> Enum.filter(fn
       [first | _] = chunk ->
@@ -195,6 +207,7 @@ defmodule Number42.Refactors.Ex.ExtractCommonProlog do
         kind: kind,
         name: name,
         params: params,
+        arity: length(params),
         guard: guard,
         head: head,
         stmts: body_to_exprs(body),
@@ -340,17 +353,72 @@ defmodule Number42.Refactors.Ex.ExtractCommonProlog do
 
   # --- patch construction ---
 
-  defp build_group_patch(group, plan) do
+  # The rewrite replaces the group's source range with the rewritten call
+  # sites and emits the helper. Where the helper lands matters when the
+  # group is a *slice* of a multi-clause function: if more clauses of the
+  # same name/arity follow the group, dropping the helper right after the
+  # group splits the clause family (compiler warns "clauses with the same
+  # name and arity should be grouped together"). So we place the helper
+  # after the LAST clause of that family. When the group already is the
+  # family's tail (the common case, e.g. the moduledoc `handle_event`
+  # example), `last` is the group itself and the two patches collapse to
+  # the original single-range replacement.
+  defp build_group_patches(group, parsed, plan) do
     case group_range(group) do
       %{} = range ->
         rewritten = Enum.map_join(group, "\n\n", &render_call_site(&1, plan))
         helper = render_helper(group, plan)
-        {:ok, %{change: rewritten <> "\n\n" <> helper, range: range}}
+        {:ok, helper_patches(group, parsed, range, rewritten, helper)}
 
       _ ->
         :skip
     end
   end
+
+  defp helper_patches(group, parsed, range, rewritten, helper) do
+    with %{node: node} <- last_family_clause_after(group, parsed),
+         %{end: end_pos} <- Sourceror.get_range(node) do
+      [
+        %{change: rewritten, range: range},
+        %{change: "\n\n" <> helper, range: %{start: end_pos, end: end_pos}}
+      ]
+    else
+      _ -> [%{change: rewritten <> "\n\n" <> helper, range: range}]
+    end
+  end
+
+  # The last clause sharing the group's name/arity that sits AFTER the
+  # group in the module body. `nil` when the group is already the tail of
+  # its clause family (no splice hazard — keep the single patch). Only a
+  # single-name/arity group can have a family to over-splice; a mixed
+  # group keeps the helper directly after the call sites.
+  defp last_family_clause_after(group, parsed) do
+    with {:single, name, arity} <- group_signature(group),
+         [_ | _] = family <- family_after_group(group, parsed, name, arity) do
+      List.last(family)
+    else
+      _ -> nil
+    end
+  end
+
+  defp family_after_group(group, parsed, name, arity) do
+    last_in_group = List.last(group)
+
+    parsed
+    |> Enum.drop_while(&(&1 != last_in_group))
+    |> Enum.drop(1)
+    |> Enum.filter(&same_signature?(&1, name, arity))
+  end
+
+  defp group_signature(group) do
+    case group |> Enum.map(&{&1.name, &1.arity}) |> Enum.uniq() do
+      [{name, arity}] -> {:single, name, arity}
+      _ -> :mixed
+    end
+  end
+
+  defp same_signature?(%{name: name, arity: arity}, name, arity), do: true
+  defp same_signature?(_, _, _), do: false
 
   defp render_call_site(%{kind: kind, head: head, stmts: stmts}, plan) do
     binding = render_destructure(plan)

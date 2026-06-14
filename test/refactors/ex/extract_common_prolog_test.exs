@@ -377,6 +377,107 @@ defmodule Number42.Refactors.Ex.ExtractCommonPrologTest do
     end
   end
 
+  describe "clause-group safety — helper placed after the whole clause family" do
+    # A multi-clause function whose prolog-sharing clauses sit in the
+    # MIDDLE of the family. The helper must land after the LAST clause of
+    # the family, not between the consuming clauses and the later ones —
+    # otherwise the clause group is split and the compiler warns
+    # "clauses with the same name and arity should be grouped together".
+    test "helper goes after the last same-name/arity clause, not mid-family" do
+      before_source = """
+      defmodule M do
+        defp parse(:a, map) do
+          left = Map.get(map, :left)
+          right = Map.get(map, :right)
+          {:a, left, right}
+        end
+
+        defp parse(:b, map) do
+          left = Map.get(map, :left)
+          right = Map.get(map, :right)
+          {:b, left, right}
+        end
+
+        defp parse(:c, map) do
+          left = Map.get(map, :left)
+          right = Map.get(map, :right)
+          {:c, left, right}
+        end
+
+        defp parse(:later, map) do
+          {:later, map}
+        end
+
+        defp parse(:last, map) do
+          {:last, map}
+        end
+      end
+      """
+
+      rewritten = apply_refactor(@subject, before_source)
+
+      assert rewritten =~ "defp prepare_parse(map)"
+
+      {helper_pos, _} = :binary.match(rewritten, "defp prepare_parse(map)")
+      {last_clause_pos, _} = :binary.match(rewritten, "defp parse(:last, map)")
+
+      assert helper_pos > last_clause_pos, """
+      Helper was spliced before the end of the clause family — the
+      `parse/2` clause group is split.
+
+      --- rewritten ---
+      #{rewritten}
+      """
+
+      # No `parse/2` clause header may follow the helper header.
+      after_helper = String.split(rewritten, "defp prepare_parse(map)") |> List.last()
+
+      refute after_helper =~ "defp parse(",
+             """
+             A `parse/2` clause follows the helper — clause family is split.
+
+             --- rewritten ---
+             #{rewritten}
+             """
+
+      assert_compiles(rewritten)
+    end
+
+    # Sanity: when the prolog-sharing clauses ARE the tail of the family
+    # (no later same-name/arity clauses), the helper sits directly after
+    # them — the original, idempotent behaviour is preserved.
+    test "helper stays directly after the group when it is the family tail" do
+      before_source = """
+      defmodule M do
+        defp parse(:early, map) do
+          {:early, map}
+        end
+
+        defp parse(:a, map) do
+          left = Map.get(map, :left)
+          right = Map.get(map, :right)
+          {:a, left, right}
+        end
+
+        defp parse(:b, map) do
+          left = Map.get(map, :left)
+          right = Map.get(map, :right)
+          {:b, left, right}
+        end
+      end
+      """
+
+      rewritten = apply_refactor(@subject, before_source)
+
+      assert rewritten =~ "defp prepare_parse(map)"
+
+      after_helper = String.split(rewritten, "defp prepare_parse(map)") |> List.last()
+      refute after_helper =~ "defp parse("
+
+      assert_compiles(rewritten)
+    end
+  end
+
   describe "idempotence" do
     test "second pass over rewritten output is a no-op" do
       source = """
