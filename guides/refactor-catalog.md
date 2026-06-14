@@ -83,6 +83,10 @@ function that already does the same thing.
 
 > `Enum.reverse(a) ++ b` → `Enum.reverse(a, b)`.
 
+### `Number42.Refactors.Ex.FilterCountToCount`
+
+> `Enum.filter(coll, pred) |> Enum.count()` → `Enum.count(coll, pred)`.
+
 ### `Number42.Refactors.Ex.FlatMapToFilter`
 
 > `Enum.flat_map(coll, fn x -> if c, do: [x], else: [] end)` →

@@ -135,6 +135,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Enum.sum_by(coll, fun)` (Elixir 1.18+).
 - `EnumFindToKeyfind`: `Enum.find(list, fn {k, _} -> k == key end)` →
   `List.keyfind(list, key, 0)`, incl. the `elem(t, n) ==` form.
+- `FilterCountToCount`: `Enum.filter(coll, pred) |> Enum.count()` →
+  `Enum.count(coll, pred)` (pipe, half-pipe and nested-call forms);
+  lambda/capture predicates only, leaves `Enum.count/2` alone.
 - `MergePipelineIntoComprehension` now also fuses
   `Enum.reject |> Enum.map` (`for x <- coll, !pred(x), do: f(x)`).
 - Initial public release, extracted from an internal project.

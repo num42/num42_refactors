@@ -136,6 +136,7 @@ defmodule Number42.Refactors.MixProject do
           Number42.Refactors.Ex.EnumMapIntoToMapNew,
           Number42.Refactors.Ex.EnumReduceToSum,
           Number42.Refactors.Ex.EnumReverseConcat,
+          Number42.Refactors.Ex.FilterCountToCount,
           Number42.Refactors.Ex.FlatMapToFilter,
           Number42.Refactors.Ex.MapNewLambdaToForComprehension,
           Number42.Refactors.Ex.MapNewToPipe,

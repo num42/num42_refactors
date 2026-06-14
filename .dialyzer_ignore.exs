@@ -43,6 +43,7 @@
   {"lib/number42/refactors/ex/enum_map_into_to_map_new.ex", :call},
   {"lib/number42/refactors/ex/enum_reduce_to_sum.ex", :call},
   {"lib/number42/refactors/ex/enum_reverse_concat.ex", :call},
+  {"lib/number42/refactors/ex/filter_count_to_count.ex", :call},
   {"lib/number42/refactors/ex/flat_map_to_filter.ex", :call},
   {"lib/number42/refactors/ex/graphemes_length.ex", :call},
   {"lib/number42/refactors/ex/identity_passthrough.ex", :call},
