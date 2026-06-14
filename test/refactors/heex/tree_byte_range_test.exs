@@ -69,5 +69,21 @@ defmodule Number42.Refactors.Heex.TreeByteRangeTest do
       {s, e} = Tree.node_byte_range(expr, body)
       assert binary_part(body, s, e - s) == "{@title}"
     end
+
+    test "covers an eex_expr `<%= ... %>` expression without over-scanning (issue #216)" do
+      body = ~s|<p><%= @greeting %></p>\n|
+      {:ok, [{:element, "p", _, [expr], _}]} = Tree.parse_body(body)
+
+      {s, e} = Tree.node_byte_range(expr, body)
+      assert binary_part(body, s, e - s) == "<%= @greeting %>"
+    end
+
+    test "eex_expr `<%= ... %>` with a `}` in the code stops at `%>`" do
+      body = ~s|<p><%= Map.get(m, :k) %> after</p>\n|
+      {:ok, [{:element, "p", _, [expr | _], _}]} = Tree.parse_body(body)
+
+      {s, e} = Tree.node_byte_range(expr, body)
+      assert binary_part(body, s, e - s) == "<%= Map.get(m, :k) %>"
+    end
   end
 end
