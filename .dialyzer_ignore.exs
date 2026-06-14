@@ -75,6 +75,7 @@
   # are pure follow-ons from the spec gap above.
   {"lib/number42/refactors/ex/push_param_into_callee.ex", :call},
   {"lib/number42/refactors/ex/push_param_into_callee.ex", :no_return},
+  {"lib/number42/refactors/ex/range_literal_to_range_new.ex", :call},
   {"lib/number42/refactors/ex/reduce_as_map.ex", :call},
   {"lib/number42/refactors/ex/reduce_map_put.ex", :call},
   {"lib/number42/refactors/ex/reduce_to_named_aggregate.ex", :call},
