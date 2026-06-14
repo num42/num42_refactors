@@ -159,6 +159,7 @@ defmodule Number42.Refactors.MixProject do
           Number42.Refactors.Ex.CondToCase,
           Number42.Refactors.Ex.ExtractCondIfGuardClauses,
           Number42.Refactors.Ex.IfLiftToClauses,
+          Number42.Refactors.Ex.LambdaDestructureToHead,
           Number42.Refactors.Ex.RedundantBooleanIf,
           Number42.Refactors.Ex.RemoveTrivialElseClause,
           Number42.Refactors.Ex.WithSingleClauseToCase,
