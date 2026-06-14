@@ -724,6 +724,126 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctionsTest do
     end
   end
 
+  describe "0-arity parenless definitions (regression: asymmetric rename)" do
+    test "multiline do:-shortform 0-arity defp head is renamed with its call sites" do
+      # Regression from position-db: a 0-arity `defp sample_pl,\n  do: ...`
+      # had every call site (`sample_pl()`) expanded to `sample_price_list()`
+      # but the DEFINITION head was left as `sample_pl`. The parenless
+      # 0-arity head's AST is `{:sample_pl, meta, nil}` — the call-site
+      # patcher guards on `is_list(args)`, so `nil` slipped through and
+      # the head stayed stale → `undefined function sample_price_list/0`
+      # + `unused function sample_pl/0`. Definition and call sites must
+      # rename symmetrically.
+      result =
+        apply_refactor(
+          @subject,
+          ~S'''
+          defmodule M do
+            defp sample_pl,
+              do: %{a: 1, b: 2}
+
+            def one, do: sample_pl()
+            def two, do: sample_pl()
+          end
+          ''',
+          known: %{"pl" => "price_list"}
+        )
+
+      assert result =~ "defp sample_price_list"
+      refute result =~ "sample_pl"
+      assert_compiles(result)
+    end
+
+    test "single-line do:-shortform 0-arity defp head is renamed with its call sites" do
+      result =
+        apply_refactor(
+          @subject,
+          ~S'''
+          defmodule M do
+            defp sample_pl, do: %{a: 1}
+
+            def one, do: sample_pl()
+          end
+          ''',
+          known: %{"pl" => "price_list"}
+        )
+
+      assert result =~ "defp sample_price_list"
+      refute result =~ "sample_pl"
+      assert_compiles(result)
+    end
+
+    test "do/end-form 0-arity parenless defp head is renamed with its call sites" do
+      result =
+        apply_refactor(
+          @subject,
+          ~S'''
+          defmodule M do
+            defp sample_pl do
+              %{a: 1}
+            end
+
+            def one, do: sample_pl()
+          end
+          ''',
+          known: %{"pl" => "price_list"}
+        )
+
+      assert result =~ "defp sample_price_list"
+      refute result =~ "sample_pl"
+      assert_compiles(result)
+    end
+
+    test "a same-named local variable is left alone (only the def head is patched)" do
+      # The parenless 0-arity head `{name, meta, ctx}` is AST-identical
+      # to a bare-atom variable reference. The fix patches the head only
+      # via the enclosing `def*` node, so a variable that happens to
+      # share the renamed helper's name is NOT rewritten. (A bare
+      # `sample_pl` in expression position is a variable in Elixir, never
+      # a 0-arity call — 0-arity calls need parens.)
+      result =
+        apply_refactor(
+          @subject,
+          ~S'''
+          defmodule M do
+            defp sample_pl, do: %{a: 1}
+
+            def one(sample_pl) do
+              {sample_pl, sample_pl()}
+            end
+          end
+          ''',
+          known: %{"pl" => "price_list"}
+        )
+
+      assert result =~ "defp sample_price_list, do:"
+      # the paren'd call is renamed, the bound variable is not
+      assert result =~ "{sample_pl, sample_price_list()}"
+      assert result =~ "def one(sample_pl)"
+    end
+
+    test "0-arity parenless head with multiple clauses renames all heads" do
+      result =
+        apply_refactor(
+          @subject,
+          ~S'''
+          defmodule M do
+            defp sample_pl, do: %{a: 1}
+            defp sample_pl(opts), do: Map.merge(%{a: 1}, opts)
+
+            def go(o), do: {sample_pl(), sample_pl(o)}
+          end
+          ''',
+          known: %{"pl" => "price_list"}
+        )
+
+      assert result =~ "defp sample_price_list, do:"
+      assert result =~ "defp sample_price_list(opts)"
+      refute result =~ "sample_pl"
+      assert_compiles(result)
+    end
+  end
+
   describe "idempotent" do
     test "running twice equals running once" do
       assert_idempotent(
