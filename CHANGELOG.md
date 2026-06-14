@@ -80,6 +80,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in its own RHS. Applies to any block tail: `def`/`defp`/`fn` bodies and
   `case`/`with`/`if` arm bodies. One shim per pass for determinism;
   idempotent.
+- `FilterFirstToFind` fuses `Enum.filter(coll, pred) |> List.first()` and
+  the `|> Enum.at(0)` variant (plus the call-nested
+  `List.first(Enum.filter(...))` / `Enum.at(Enum.filter(...), 0)` forms)
+  into `Enum.find(coll, pred)`. `filter |> first` runs the predicate over
+  every element and builds the whole match list just to keep its head;
+  `Enum.find/2` stops at the first match for the same result. Only the
+  provably-safe set rewrites: downstream must be exactly `List.first/1` or
+  `Enum.at(_, 0)` — never `Enum.at(_, n != 0)` or `hd/1` (which raises on
+  `[]`). The 2-arg `List.first(list, default)` is skipped (it returns
+  `default` on no match where `Enum.find/2` returns `nil`, and the arg
+  order differs from `Enum.find/3`). A predicate that performs IO, sends a
+  message, or raises is skipped, since early-stop changes how often its
+  effect fires.
 - `LiftUntypedParamToStructPattern`'s call-site source now reads
   **transitive struct returns**. A project function whose every clause
   provably returns a single in-project struct — through Ecto's get-family
