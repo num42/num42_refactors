@@ -50,6 +50,9 @@ defmodule Number42.Refactors.Ex.InlineSingleCallerPrivate do
   A module-local scan counts:
 
   - direct calls `helper(args)` (the inlinable shape),
+  - pipe-form calls `arg |> helper(rest)` — the piped value is the
+    implicit first argument, so `x |> helper()` is really `helper/1`
+    even though the right-hand AST node carries zero explicit args,
   - captures `&helper/arity` (both Sourceror AST forms),
   - any `apply/2,3` that names the helper, even dynamically.
 
@@ -60,6 +63,10 @@ defmodule Number42.Refactors.Ex.InlineSingleCallerPrivate do
     can't be substituted with an inlined body).
   - If **any** `apply` references the name → skip (we can't tell
     statically how many times it fires).
+  - If **any** use is a **pipe-form call** → skip. v1 does not splice an
+    inlined body into a pipe stage; counting the pipe caller (rather
+    than missing it) also prevents deleting a `defp` that pipe callers
+    still reference — the bug fixed in issue #80.
   - So we inline only when the single use is exactly one direct call.
 
   ## What we skip
@@ -70,7 +77,8 @@ defmodule Number42.Refactors.Ex.InlineSingleCallerPrivate do
     substitution).
   - Recursive `defp`.
   - Zero, two, or more call sites.
-  - Capture-only use, or any `apply` mentioning the name.
+  - Capture-only use, any `apply` mentioning the name, or any pipe-form
+    caller `arg |> helper(...)`.
   - Pattern / default params.
   - Bodies containing a binding construct.
   - A param used >1× with a non-trivial argument.
@@ -271,16 +279,20 @@ defmodule Number42.Refactors.Ex.InlineSingleCallerPrivate do
 
   # Returns the list of direct-call nodes for `{name, arity}`, but only
   # when the helper's *sole* use is exactly that one direct call. Any
-  # capture, apply, or extra direct call collapses the result to `[]`.
+  # capture, apply, pipe-form call, or extra direct call collapses the
+  # result to `[]`.
   defp uses(body_exprs, name, arity) do
-    {direct_calls, capture?, apply?} =
+    {direct_calls, capture?, apply?, pipe?} =
       body_exprs
       |> Enum.reject(&(own_definition?(&1, name, arity) or module_attribute?(&1)))
-      |> Enum.reduce({[], false, false}, fn expr, acc -> scan_uses(expr, name, arity, acc) end)
+      |> Enum.reduce({[], false, false, false}, fn expr, acc ->
+        scan_uses(expr, name, arity, acc)
+      end)
 
     cond do
       capture? -> []
       apply? -> []
+      pipe? -> []
       true -> direct_calls
     end
   end
@@ -301,11 +313,12 @@ defmodule Number42.Refactors.Ex.InlineSingleCallerPrivate do
 
   defp scan_uses(ast, name, arity, acc) do
     {_, result} =
-      Macro.prewalk(ast, acc, fn node, {calls, capture?, apply?} = inner ->
+      Macro.prewalk(ast, acc, fn node, {calls, capture?, apply?, pipe?} = inner ->
         cond do
-          capture_of?(node, name, arity) -> {node, {calls, true, apply?}}
-          apply_of?(node, name) -> {node, {calls, capture?, true}}
-          direct_call_of?(node, name, arity) -> {node, {[node | calls], capture?, apply?}}
+          capture_of?(node, name, arity) -> {node, {calls, true, apply?, pipe?}}
+          apply_of?(node, name) -> {node, {calls, capture?, true, pipe?}}
+          pipe_call_of?(node, name, arity) -> {node, {calls, capture?, apply?, true}}
+          direct_call_of?(node, name, arity) -> {node, {[node | calls], capture?, apply?, pipe?}}
           true -> {node, inner}
         end
       end)
@@ -318,6 +331,18 @@ defmodule Number42.Refactors.Ex.InlineSingleCallerPrivate do
        do: call_name == name and length(args) == arity
 
   defp direct_call_of?(_, _name, _arity), do: false
+
+  # A pipe `lhs |> f(args)` calls `f/(length(args) + 1)` — the piped value
+  # is the implicit first argument, so the RHS node carries one fewer
+  # explicit arg than the real arity. Counting the bare RHS node would
+  # miss it (its arity is `real_arity - 1`); we match the pipe shape
+  # directly. Substituting an inlined body into a pipe stage is not
+  # something v1 attempts, so any pipe-form use disqualifies the helper.
+  defp pipe_call_of?({:|>, _, [_lhs, {call_name, _, args}]}, name, arity)
+       when is_atom(call_name) and is_list(args),
+       do: call_name == name and length(args) + 1 == arity
+
+  defp pipe_call_of?(_, _name, _arity), do: false
 
   defp capture_of?({:&, _, [{:/, _, [{cap_name, _, ctx}, cap_arity]}]}, name, arity)
        when is_atom(cap_name) and is_atom(ctx) and is_integer(cap_arity),

@@ -301,6 +301,69 @@ defmodule Number42.Refactors.Ex.InlineSingleCallerPrivateTest do
     end
   end
 
+  describe "leaves alone — pipe-form callers (issue #80)" do
+    test "one direct caller + one pipe caller is not inlined/deleted" do
+      # `x |> render()` is AST-shaped as render/0 (the piped arg is
+      # implicit) but is really a render/1 call. Counting it as a use
+      # means render/1 has two callers → skip. Before the fix the pipe
+      # caller was missed, render was deleted, and `b` dangled.
+      assert_unchanged(
+        @subject,
+        """
+        defmodule M do
+          defp render(x), do: do_render(x)
+          def a(x), do: render(x)
+          def b(x), do: x |> render()
+        end
+        """,
+        @on
+      )
+    end
+
+    test "sole caller is a pipe call (no direct call) is not inlined/deleted" do
+      assert_unchanged(
+        @subject,
+        """
+        defmodule M do
+          defp render(x), do: do_render(x)
+          def b(x), do: x |> render()
+        end
+        """,
+        @on
+      )
+    end
+
+    test "pipe call with an explicit arg counts at arity+1" do
+      # `x |> combine(y)` is really combine/2. With a direct combine/2
+      # call too, that's two callers → skip.
+      assert_unchanged(
+        @subject,
+        """
+        defmodule M do
+          defp combine(a, b), do: a + b
+          def f(x, y), do: combine(x, y)
+          def g(x, y), do: x |> combine(y)
+        end
+        """,
+        @on
+      )
+    end
+
+    test "pipe call into a later pipe stage is counted" do
+      assert_unchanged(
+        @subject,
+        """
+        defmodule M do
+          defp step(x), do: x + 1
+          def f(x), do: step(x)
+          def g(x), do: x |> step() |> Integer.to_string()
+        end
+        """,
+        @on
+      )
+    end
+  end
+
   describe "idempotent" do
     test "canonical inline is stable across passes" do
       assert_idempotent(
