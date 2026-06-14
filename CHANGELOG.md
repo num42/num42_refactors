@@ -99,6 +99,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   embedded in a larger body, heads with a non-bare param or an existing
   `when`-guard, and `defmacro`. Parameters used in neither a clause's
   guard nor its body are underscored so the output compiles cleanly.
+- `LambdaDestructureToHead`: a single-bare-param lambda whose first body
+  statement destructures that param (`fn pair -> {k, v} = pair; rest end`)
+  lifts the pattern into the head (`fn {k, v} -> rest end`); a `for`
+  generator with the same shape (`for pair <- coll do {k, v} = pair; … end`)
+  moves the pattern onto the `<-`. Fires only when the param is destructured
+  by a real pattern (not a bare rename) and is **not used again as a whole**
+  afterwards — otherwise the bound whole-value reference would be lost, so it
+  skips. Also skips multi-clause/guarded lambdas, non-first-statement
+  destructures, a pattern that re-binds the param's own name, and a `for`
+  whose param is shared by another clause.
 - `ManualTapToTap`: a hand-rolled "run a side effect, return the
   original value" lambda in a pipe → `Kernel.tap/2`. Matches
   `value |> then(fn x -> eff; x end)` and the immediately-applied

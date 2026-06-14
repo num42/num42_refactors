@@ -53,6 +53,8 @@
   {"lib/number42/refactors/ex/if_else_to_cond.ex", :call},
   {"lib/number42/refactors/ex/if_lift_to_clauses.ex", :call},
   {"lib/number42/refactors/ex/inline_single_expression_def.ex", :call},
+  {"lib/number42/refactors/ex/lambda_destructure_to_head.ex", :call},
+  {"lib/number42/refactors/ex/lambda_destructure_to_head.ex", :pattern_match},
   {"lib/number42/refactors/ex/length_in_guard.ex", :call},
   {"lib/number42/refactors/ex/length_in_guard.ex", :pattern_match_cov},
   {"lib/number42/refactors/ex/length_zero_to_empty.ex", :call},
