@@ -196,6 +196,7 @@ defmodule Number42.Refactors.MixProject do
           Number42.Refactors.Ex.InlineSingleExpressionDef,
           Number42.Refactors.Ex.LiftUntypedParamToStructPattern,
           Number42.Refactors.Ex.ResolveImplTrue,
+          Number42.Refactors.Ex.SplitFlagArgument,
           Number42.Refactors.Ex.UnusedVariable
         ],
         "Refactors – Cross-File Extraction": [
