@@ -185,6 +185,11 @@ Refactors that reshape data-flow expressions into pipe form.
 
 > Lift single-clause `with` with a transformation body into a pipe.
 
+### `Number42.Refactors.Ex.ManualTapToTap`
+
+> `value |> then(fn x -> eff; x end)` /
+> `value |> (fn x -> eff; x end).()` → `value |> tap(fn x -> eff end)`.
+
 ### `Number42.Refactors.Ex.PipeReassign`
 
 > `x = f(x, ...)` → `x = x |> f(...)`.

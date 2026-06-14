@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ManualTapToTap`: a hand-rolled "run a side effect, return the
+  original value" lambda in a pipe → `Kernel.tap/2`. Matches
+  `value |> then(fn x -> eff; x end)` and the immediately-applied
+  `value |> (fn x -> eff; x end).()`, where the lambda is single-clause,
+  single-bare-param, and its block body ends in exactly the bound param
+  after at least one side effect. The trailing `; x` is dropped on emit
+  (`tap` ignores the return). Skips when the body returns a derived
+  value, is identity-only, has a multi/destructuring param, or **rebinds
+  the param before the final `x`** (the returned value would no longer
+  be the original).
 - `LiftUntypedParamToStructPattern`'s call-site source now reads
   **transitive struct returns**. A project function whose every clause
   provably returns a single in-project struct — through Ecto's get-family

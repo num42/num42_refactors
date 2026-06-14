@@ -55,6 +55,7 @@
   {"lib/number42/refactors/ex/length_zero_to_empty.ex", :call},
   {"lib/number42/refactors/ex/lift_with_into_pipeline.ex", :call},
   {"lib/number42/refactors/ex/list_last_of_reverse.ex", :call},
+  {"lib/number42/refactors/ex/manual_tap_to_tap.ex", :call},
   {"lib/number42/refactors/ex/map_get_unsafe_pass.ex", :call},
   {"lib/number42/refactors/ex/map_new_lambda_to_for_comprehension.ex", :call},
   {"lib/number42/refactors/ex/map_new_lambda_to_for_comprehension.ex", :no_return},

@@ -163,6 +163,7 @@ defmodule Number42.Refactors.MixProject do
           Number42.Refactors.Ex.ExtractToPipeline,
           Number42.Refactors.Ex.LiftPinnedEctoExpr,
           Number42.Refactors.Ex.LiftWithIntoPipeline,
+          Number42.Refactors.Ex.ManualTapToTap,
           Number42.Refactors.Ex.PipeReassign
         ],
         "Refactors – Length / String / List": [
