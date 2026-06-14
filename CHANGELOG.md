@@ -502,3 +502,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sibling arguments stay on their own stage so left-to-right evaluation
   order is preserved. Single-call seeds (`x = f(g(input))`) keep their
   existing `g(input) |> f()` shape. No new liveness invariants.
+- `RelocateMisplacedFunction`: the feature-envy threshold `min_envy_refs`
+  (how many references to a single other module a body must make before
+  it counts as misplaced) is now configurable via `min_envy_refs:` in the
+  refactor's opts. Defaults to `2` — unchanged behaviour when unset.
+  Raise it for fewer, more confident moves; lower it to `1` to catch thin
+  forwarders. Non-positive or non-integer values fall back to the
+  default (#84).
