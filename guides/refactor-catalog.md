@@ -393,6 +393,13 @@ Refactors that reach across files to consolidate duplication.
 
 > Cross-file: extract exact duplicates into a `{LCP}.Shared` module.
 
+### `Number42.Refactors.Ex.PromoteRepeatedPrivateHelpers`
+
+> Cross-file: promote repeated private helpers (`defp`) into a
+> `{LCP}.Support` module, rewrite call sites to remote calls, delete the
+> duplicates. Skips helpers reading module attributes, referencing
+> `__MODULE__`, or calling other locals. Default-OFF.
+
 ## Module Structure
 
 Refactors that change which *modules* exist, not just their contents.

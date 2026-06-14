@@ -213,7 +213,8 @@ defmodule Number42.Refactors.MixProject do
           Number42.Refactors.Ex.ExtractPrimitiveToStruct,
           Number42.Refactors.Ex.ExtractProtocolFromStructFamily,
           Number42.Refactors.Ex.ExtractRenamedClone,
-          Number42.Refactors.Ex.ExtractSharedModule
+          Number42.Refactors.Ex.ExtractSharedModule,
+          Number42.Refactors.Ex.PromoteRepeatedPrivateHelpers
         ],
         "Refactors – Module Structure": [
           Number42.Refactors.Ex.SplitLowCohesionModule
