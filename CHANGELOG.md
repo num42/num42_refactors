@@ -25,6 +25,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`case` clause shadowing), or a `true ->` arm is not the final clause.
   The multi-clause-`def` target (#38) is produced downstream by
   `CaseToFunctionClauses`; this is the upstream `cond -> case` half.
+- `ExtractRepeatedGuardToDefguard`: a single-variable `when`-guard
+  repeated across `>= 3` (`:min_occurrences`, default `3`) clause heads
+  in one module → a `defguardp <is_valid_var>(<var>) when <expr>`
+  inserted at the first top-level expression (after aliases, before its
+  first use), with each head rewritten to `when is_valid_var(var)`.
+  Guards are compared **structurally modulo the single guarded var
+  name**, so `is_integer(id) and id > 0` and `is_integer(n) and n > 0`
+  group together. Sound by construction — a guard that compiled in a
+  `when` is guard-legal, exactly what `defguardp` accepts. Skips when
+  below threshold, when the guard references more than one parameter (v1
+  is single-var only), when the guarded variable is not a bare parameter,
+  or when the head already calls a guard defined in the module
+  (idempotence).
 - `ManualTapToTap`: a hand-rolled "run a side effect, return the
   original value" lambda in a pipe → `Kernel.tap/2`. Matches
   `value |> then(fn x -> eff; x end)` and the immediately-applied
