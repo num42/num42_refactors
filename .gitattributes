@@ -1,0 +1,4 @@
+# Changelog entries are append-only bullet lists under [Unreleased].
+# Parallel refactor PRs each add a line, producing add/add conflicts on
+# every merge. union merge keeps both sides' added lines automatically.
+CHANGELOG.md merge=union
