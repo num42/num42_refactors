@@ -66,9 +66,11 @@ defmodule Number42.Refactors.Heex.Tree do
 
   For `:element` nodes (open/close pair or self-closing) the range
   spans the leading `<` through the matching `>` (or `/>`). For
-  `:eex_expr` it spans `{` through the matching `}`. For `:eex_block`
-  it spans the opening `<%=` through the closing `<% end %>`. For
-  `:text` it spans the literal characters.
+  `:eex_expr` from a `{...}` interpolation it spans `{` through the
+  matching `}`; for `:eex_expr` from an EEx `<%= ... %>` expression it
+  spans `<%` through the terminating `%>`. For `:eex_block` it spans
+  the opening `<%=` through the closing `<% end %>`. For `:text` it
+  spans the literal characters.
 
   The node's start byte is taken from `meta.byte_offset`, threaded
   through the parser as a monotonic cursor over `body` (see
@@ -617,11 +619,17 @@ defmodule Number42.Refactors.Heex.Tree do
     end
   end
 
-  defp scan_node_end({:eex_expr, _code, _meta}, body, start_byte),
-    do:
-      body
-      # `{...}` — balance curlies starting at depth 1 just past `{`.
-      |> balance_curlies(start_byte + 1, 1)
+  # `:eex_expr` nodes come from two sources with different delimiters:
+  # `{...}` curly interpolations in text, and EEx `<%= ... %>`
+  # expressions. The start byte points at the leading `{` or `<`
+  # respectively, so dispatch on it: balance curlies for the former,
+  # scan to the matching `%>` for the latter.
+  defp scan_node_end({:eex_expr, _code, _meta}, body, start_byte) do
+    case binary_part_safe(body, start_byte, 1) do
+      "<" -> find_eex_close(body, start_byte)
+      _ -> balance_curlies(body, start_byte + 1, 1)
+    end
+  end
 
   defp scan_node_end({:eex_block, _header, _children, _meta}, body, start_byte),
     do:
