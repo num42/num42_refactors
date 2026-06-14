@@ -105,6 +105,7 @@ defmodule Number42.Refactors.MixProject do
         Core: [
           Number42.Refactors.Engine,
           Number42.Refactors.Refactor,
+          Number42.Refactors.PatchRefactor,
           Number42.Refactors.AstHelpers,
           Number42.Refactors.AstDiff,
           Number42.Refactors.CommunityDetection
@@ -213,6 +214,7 @@ defmodule Number42.Refactors.MixProject do
           Number42.Refactors.Ex.ExtractSharedModule
         ],
         "Refactors – Module Structure": [
+          Number42.Refactors.Ex.ExtractPatchRunner,
           Number42.Refactors.Ex.SplitLowCohesionModule
         ],
         "Refactors – HEEx": [
