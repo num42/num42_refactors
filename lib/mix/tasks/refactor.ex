@@ -362,6 +362,7 @@ defmodule Mix.Tasks.Refactor do
   # adding a top-level engine concept.
   @cross_file_refactors [
     Number42.Refactors.Ex.ExtractBehaviourFromAdapterFamily,
+    Number42.Refactors.Ex.ExtractPrimitiveToStruct,
     Number42.Refactors.Ex.ExtractProtocolFromStructFamily,
     Number42.Refactors.Ex.LiftUntypedParamToStructPattern,
     Number42.Refactors.Ex.ExtractHeexExactClone
