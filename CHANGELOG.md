@@ -320,3 +320,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   liveness, and read-after gates carry over unchanged, so the
   strictness shift stays unobservable. `case`/`if` behaviour is
   unaffected.
+- `LiftCommonTailFromBranches` now also lifts the common tail out of
+  `cond` blocks, not just `case`/`if`. When every arm of a `cond` ends in
+  the same trailing statement(s), that run is pulled out to a single
+  execution after the block. The existing preconditions carry over: the
+  longest AST-identical trailing run is lifted (each arm keeps at least
+  one statement before it), the tail may not read any arm-local binding,
+  and the `cond` must sit in statement position (its value not consumed by
+  `=`, `|>`, or a call argument). A `cond` is treated as exhaustive only
+  when its final arm is a literal `true ->` catch-all — the same
+  implicit-branch SKIP rule that guards a non-exhaustive `case` and an
+  `else`-less `if`; a `cond` without it raises when no arm matches and so
+  carries an implicit branch that would not run the tail.
