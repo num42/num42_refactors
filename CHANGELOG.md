@@ -145,6 +145,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to a self-call), multi-clause hosts, module-attribute references, and
   chains with no in-scope seed. Default-OFF — opt in with
   `{Number42.Refactors.Ex.ExtractPipelineToFunction, enabled: true}`.
+- `ExtractCommonProlog`: a setup prolog shared by several functions —
+  their identical leading statements — is lifted into one private helper
+  that returns the bindings still read afterwards (liveness-analysed) as
+  a tuple; each call site destructures it (`{socket, current_user} =
+  prepare_handle_event(socket)`). Free vars the prolog reads but doesn't
+  bind become helper params; the statements move verbatim, in order, so
+  side-effect ordering is preserved. A single live binding is returned
+  bare (no tuple); every call site destructures the **same** shape even
+  when one reads only part of it (monomorphic helper). Skips when the
+  prolog is shorter than `:min_prolog_statements` (default `2`), appears
+  in fewer than `:min_functions` (default `2`) contiguous defs, diverges
+  in a literal (a parametric clone), contains control flow, has no live
+  binding (pure side-effect run), is the function's whole body (full-body
+  clone), or needs an input that isn't a bare parameter everywhere. The
+  cross-function counterpart to `DedupeClausePrologue` (shared prolog
+  across the *clauses* of one function).
 - `ManualTapToTap`: a hand-rolled "run a side effect, return the
   original value" lambda in a pipe → `Kernel.tap/2`. Matches
   `value |> then(fn x -> eff; x end)` and the immediately-applied
