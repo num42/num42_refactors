@@ -19,14 +19,34 @@ defmodule Number42.Refactors.Ex.PushParamIntoCallee do
         defp process(data), do: data * 42
       end
 
-  ## Why only `defp`
+  ## `defp` always, `def` only in `public: true` mode
 
   Dropping a parameter is an arity change at every call site. A private
   function's caller set is bounded by its defining module — the corpus
-  always contains all of them. A public `def` could be called from
-  outside the corpus (other apps, deps, runtime dispatch), so dropping
-  its parameter would silently break callers we can't see. We refuse
-  every `def`.
+  always contains all of them, so the push is always safe.
+
+  A public `def` could be called from outside the corpus (other apps,
+  deps, runtime dispatch), so dropping its parameter outright would
+  silently break callers we can't see. By default we refuse every `def`.
+
+  When `opts[:public]` is `true` we *do* rewrite a `def`, but only by
+  keeping a **backward-compat wrapper** at the original arity:
+
+      # before
+      def process(d, cfg), do: d * cfg   # every corpus caller: process(x, 42)
+
+      # after
+      def process(d), do: d * 42         # new, slimmer arity
+      def process(d, _cfg), do: process(d)  # old arity preserved, forwards
+
+  Corpus callers are rewritten to the new arity; the wrapper keeps
+  external callers at the old arity compiling. The wrapper **discards**
+  the argument it used to forward and uses the pushed constant instead —
+  external callers that passed a *different* value silently get the
+  corpus value. That semantic narrowing is the documented trade of this
+  mode (the param was a uniform constant across the whole corpus).
+  Private `defp` behaviour is unchanged: no wrapper, the param simply
+  disappears.
 
   ## Cross-file context (`prepare/1`)
 
@@ -43,7 +63,8 @@ defmodule Number42.Refactors.Ex.PushParamIntoCallee do
 
   ## The invariant (all must hold, else skip)
 
-    1. **Private callee** (`defp`) — see above.
+    1. **Private callee** (`defp`), or a public `def` when `public: true`
+       is set — see above. A `def` additionally carries the wrapper.
     2. **Every call site** of the callee passes a **syntactically
        identical** expression at the same position. Missing callers,
        diverging values, or any caller at a different arity → skip.
@@ -104,9 +125,17 @@ defmodule Number42.Refactors.Ex.PushParamIntoCallee do
   @typedoc """
   One eligible callee rewrite within a module: the callee's
   `{name, arity}` (original arity, before the drop), the parameter
-  position to drop, and the expression AST to inline into the body.
+  position to drop, the expression AST to inline into the body, and
+  whether the callee is a public `def` (`public: true`, needs a
+  backward-compat wrapper) or a private `defp` (`public: false`).
   """
-  @type spec :: %{name: atom(), arity: arity(), pos: non_neg_integer(), expr: Macro.t()}
+  @type spec :: %{
+          name: atom(),
+          arity: arity(),
+          pos: non_neg_integer(),
+          expr: Macro.t(),
+          public: boolean()
+        }
 
   @doc """
   Build a rewrite plan from `[{path, source}]` tuples.
@@ -114,14 +143,21 @@ defmodule Number42.Refactors.Ex.PushParamIntoCallee do
   Returns a map keyed by module atom; each value is the list of
   `t:spec/0` rewrites for that module. Modules absent from the map need
   no rewrite. Exposed so tests can build a plan without the engine.
+
+  Pass `public: true` to also consider public `def` callees (rewritten
+  with a backward-compat wrapper); the default only touches `defp`.
   """
-  @spec build_plan([{String.t(), String.t()}]) :: %{module() => [spec()]}
-  def build_plan(sources) do
+  @spec build_plan([{String.t(), String.t()}], keyword()) :: %{module() => [spec()]}
+  def build_plan(sources, opts \\ []) do
+    public? = Keyword.get(opts, :public, false)
+
     sources
     |> Enum.reject(fn {path, _src} -> excluded_path?(path) end)
     |> Enum.flat_map(&module_bodies/1)
     |> Enum.group_by(fn {module, _body} -> module end, fn {_module, body} -> body end)
-    |> Enum.flat_map(fn {module, bodies} -> plan_for_module(module, List.flatten(bodies)) end)
+    |> Enum.flat_map(fn {module, bodies} ->
+      plan_for_module(module, List.flatten(bodies), public?)
+    end)
     |> Enum.group_by(fn {module, _spec} -> module end, fn {_module, spec} -> spec end)
   end
 
@@ -142,7 +178,11 @@ defmodule Number42.Refactors.Ex.PushParamIntoCallee do
   end
 
   @impl Number42.Refactors.Refactor
-  def prepare(opts), do: Keyword.get(opts, :source_files) |> prepared_for_paths()
+  def prepare(opts) do
+    public? = Keyword.get(opts, :public, false)
+    Keyword.get(opts, :source_files) |> prepared_for_paths(public?)
+  end
+
   @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
   @impl Number42.Refactors.Refactor
@@ -156,15 +196,16 @@ defmodule Number42.Refactors.Ex.PushParamIntoCallee do
 
   # ── prepare/1 plumbing ────────────────────────────────────────────
 
-  defp prepared_for_paths(nil), do: load_default_sources() |> plan_from_sources()
+  defp prepared_for_paths(nil, public?),
+    do: load_default_sources() |> plan_from_sources(public?)
 
-  defp prepared_for_paths(paths) when is_list(paths) do
+  defp prepared_for_paths(paths, public?) when is_list(paths) do
     sources = paths |> Enum.map(fn p -> {p, File.read!(p)} end)
-    {:ok, build_plan(sources)}
+    {:ok, build_plan(sources, public: public?)}
   end
 
-  defp plan_from_sources([]), do: :no_cache
-  defp plan_from_sources(sources), do: {:ok, build_plan(sources)}
+  defp plan_from_sources([], _public?), do: :no_cache
+  defp plan_from_sources(sources, public?), do: {:ok, build_plan(sources, public: public?)}
 
   defp load_default_sources, do: File.read(".refactor.exs") |> parse_inputs_from_config()
 
@@ -208,36 +249,40 @@ defmodule Number42.Refactors.Ex.PushParamIntoCallee do
 
   # ── Eligibility analysis (per module) ─────────────────────────────
 
-  defp plan_for_module(module, body_exprs) do
+  defp plan_for_module(module, body_exprs, public?) do
     body_exprs
-    |> private_clause_groups()
-    |> Enum.flat_map(fn {{name, arity}, clauses} ->
-      case eligible_spec(name, arity, clauses, body_exprs) do
+    |> callee_clause_groups(public?)
+    |> Enum.flat_map(fn {{kind, name, arity}, clauses} ->
+      case eligible_spec(kind, name, arity, clauses, body_exprs) do
         {:ok, spec} -> [{module, spec}]
         :skip -> []
       end
     end)
   end
 
-  defp private_clause_groups(body_exprs) do
+  # Group every candidate callee by `{kind, name, arity}`. `defp` is
+  # always a candidate; `def` only when `public?` (it then gets a
+  # backward-compat wrapper, see `wrapper_patch/2`).
+  defp callee_clause_groups(body_exprs, public?) do
     body_exprs
-    |> Enum.filter(&defp_clause?/1)
-    |> Enum.group_by(&clause_name_arity/1)
+    |> Enum.filter(&candidate_clause?(&1, public?))
+    |> Enum.group_by(&clause_kind_name_arity/1)
     |> Enum.reject(fn {key, _} -> key == :skip end)
-    |> Enum.filter(fn {{_name, arity}, _} -> arity >= 1 end)
+    |> Enum.filter(fn {{_kind, _name, arity}, _} -> arity >= 1 end)
   end
 
-  defp defp_clause?({:defp, _, [_head | _]}), do: true
-  defp defp_clause?(_), do: false
+  defp candidate_clause?({:defp, _, [_head | _]}, _public?), do: true
+  defp candidate_clause?({:def, _, [_head | _]}, public?), do: public?
+  defp candidate_clause?(_, _public?), do: false
 
-  defp clause_name_arity({:defp, _, [head | _]}) do
+  defp clause_kind_name_arity({kind, _, [head | _]}) when kind in [:def, :defp] do
     case strip_when(head) do
-      {name, _, args} when is_atom(name) and is_list(args) -> {name, length(args)}
+      {name, _, args} when is_atom(name) and is_list(args) -> {kind, name, length(args)}
       _ -> :skip
     end
   end
 
-  defp eligible_spec(name, arity, clauses, body_exprs) do
+  defp eligible_spec(kind, name, arity, clauses, body_exprs) do
     # Call sites only ever appear inside the *bodies* of definitions —
     # never in a head. Restricting the scan to clause bodies keeps a
     # callee's own head (which is shaped like a call) out of the
@@ -252,7 +297,7 @@ defmodule Number42.Refactors.Ex.PushParamIntoCallee do
          {:ok, call_args} <- uniform_call_args(name, arity, bodies),
          {:ok, pos, expr} <- pick_pushable_position(arity, call_args),
          :ok <- check_param_plain_and_unguarded(clauses, pos) do
-      {:ok, %{arity: arity, expr: expr, name: name, pos: pos}}
+      {:ok, %{arity: arity, expr: expr, name: name, pos: pos, public: kind == :def}}
     else
       _ -> :skip
     end
@@ -299,7 +344,7 @@ defmodule Number42.Refactors.Ex.PushParamIntoCallee do
   defp check_no_defaults(clauses) do
     has_default? =
       clauses
-      |> Enum.any?(fn {:defp, _, [head | _]} ->
+      |> Enum.any?(fn {kind, _, [head | _]} when kind in [:def, :defp] ->
         head |> strip_when() |> head_args() |> Enum.any?(&match?({:\\, _, _}, &1))
       end)
 
@@ -449,7 +494,7 @@ defmodule Number42.Refactors.Ex.PushParamIntoCallee do
   defp check_param_plain_and_unguarded(clauses, pos) do
     ok? =
       clauses
-      |> Enum.all?(fn {:defp, _, [head | _]} ->
+      |> Enum.all?(fn {kind, _, [head | _]} when kind in [:def, :defp] ->
         param_plain?(head, pos) and not param_in_guard?(head, pos)
       end)
 
@@ -522,28 +567,80 @@ defmodule Number42.Refactors.Ex.PushParamIntoCallee do
   end
 
   # Rewrite each callee clause: drop the param, substitute the expr for
-  # every reference to the dropped variable in head/guard/body.
-  defp callee_patches(body_exprs, %{arity: arity, name: name} = spec) do
-    body_exprs
-    |> Enum.filter(&callee_clause?(&1, name, arity))
-    |> Enum.flat_map(&rewrite_callee_clause(&1, spec))
+  # every reference to the dropped variable in head/guard/body. For a
+  # public `def` the backward-compat wrapper is appended to the *last*
+  # callee clause so the new-arity clauses stay contiguous (an
+  # interleaved wrapper trips the compiler's clause-grouping warning).
+  defp callee_patches(body_exprs, %{arity: arity, name: name, pos: pos, public: public?} = spec) do
+    clauses = Enum.filter(body_exprs, &callee_clause?(&1, name, arity, pos, public?))
+    last = List.last(clauses)
+
+    clauses
+    |> Enum.flat_map(fn clause ->
+      append_wrapper? = public? and clause == last
+      rewrite_callee_clause(clause, spec, append_wrapper?)
+    end)
   end
 
-  defp callee_clause?({:defp, _, [head | _]}, name, arity) do
-    case strip_when(head) do
-      {^name, _, args} when is_list(args) and length(args) == arity -> true
-      _ -> false
-    end
+  # A clause of the callee `name/arity` whose param at `pos` is a real var
+  # to push into. The `pos`-must-be-plain check also excludes the injected
+  # backward-compat wrapper (`def name(a0, _), do: name(a0)` — `_` at the
+  # dropped position), so re-applying a stale plan to already-rewritten
+  # source leaves the wrapper untouched (idempotence).
+  defp callee_clause?({kind, _, [head | _]}, name, arity, pos, public?)
+       when kind in [:def, :defp] do
+    matches_kind? = if public?, do: kind == :def, else: kind == :defp
+
+    matches_kind? and
+      case strip_when(head) do
+        {^name, _, args} when is_list(args) and length(args) == arity ->
+          param_plain?(head, pos)
+
+        _ ->
+          false
+      end
   end
 
-  defp callee_clause?(_, _, _), do: false
+  defp callee_clause?(_, _, _, _, _), do: false
 
-  defp rewrite_callee_clause({:defp, meta, [head, body_kw]}, %{expr: expr, pos: pos}) do
+  defp rewrite_callee_clause(
+         {kind, meta, [head, body_kw]},
+         %{expr: expr, pos: pos},
+         append_wrapper?
+       ) do
     var_name = param_var_name(head, pos)
     new_head = head |> drop_param(pos) |> substitute_var(var_name, expr)
     new_body = body_kw |> substitute_var(var_name, expr)
-    replacement = {:defp, meta, [new_head, new_body]}
-    [Patch.replace({:defp, meta, [head, body_kw]}, render(replacement))]
+    replacement = {kind, meta, [new_head, new_body]}
+    rendered = render(replacement) |> maybe_append_wrapper(head, pos, append_wrapper?)
+    [Patch.replace({kind, meta, [head, body_kw]}, rendered)]
+  end
+
+  defp maybe_append_wrapper(rendered, _head, _pos, false), do: rendered
+
+  defp maybe_append_wrapper(rendered, head, pos, true),
+    do: rendered <> "\n\n" <> wrapper_source(head, pos)
+
+  # Backward-compat wrapper at the *original* arity for a public `def`.
+  # Fresh generic params (`a0, a1, …`) at the kept positions, `_` at the
+  # dropped position, forwarding to the new arity. The discarded arg is
+  # the param we just pushed as a constant — external callers that passed
+  # something else now get the corpus value. Built as a compact one-liner
+  # `def head, do: call` string (`mix format` keeps short defs compact).
+  defp wrapper_source(head, pos) do
+    {name, _, args} = strip_when(head)
+    forwarded = wrapper_params(length(args), pos)
+    head_src = render({name, [], forwarded})
+    call_src = render({name, [], List.delete_at(forwarded, pos)})
+    "def #{head_src}, do: #{call_src}"
+  end
+
+  defp wrapper_params(arity, pos) do
+    0..(arity - 1)//1
+    |> Enum.map(fn
+      ^pos -> {:_, [], nil}
+      i -> {String.to_atom("a#{i}"), [], nil}
+    end)
   end
 
   defp param_var_name(head, pos) do

@@ -17,6 +17,7 @@ defmodule Number42.Refactors.Ex.PushParamIntoCalleeTest do
   # Tests feed that context via opts[:prepared] — same shape the engine
   # produces from prepare/1.
   defp prepared(sources), do: PushParamIntoCallee.build_plan(sources)
+  defp prepared_public(sources), do: PushParamIntoCallee.build_plan(sources, public: true)
 
   describe "default-off" do
     test "without enabled: true the source is left untouched" do
@@ -398,6 +399,196 @@ defmodule Number42.Refactors.Ex.PushParamIntoCalleeTest do
 
       plan = prepared([{"guarded.ex", src}])
       assert_unchanged(@subject, src, @on ++ [prepared: plan])
+    end
+  end
+
+  # In `public: true` mode a public `def` callee is rewritten to the new
+  # arity *and* a backward-compat wrapper at the old arity is injected, so
+  # external callers outside the corpus keep compiling. `defp` behaviour is
+  # unchanged; without `public: true` a `def` is still never touched.
+  describe "public def with backward-compat wrapper" do
+    test "public def: param dropped, value pushed, wrapper preserves old arity" do
+      src = """
+      defmodule MyApp.Pub do
+        def run(a), do: process(a, 42)
+        def run_other(b), do: process(b, 42)
+
+        def process(data, factor), do: data * factor
+      end
+      """
+
+      expected = """
+      defmodule MyApp.Pub do
+        def run(a), do: process(a)
+        def run_other(b), do: process(b)
+
+        def process(data), do: data * 42
+        def process(a0, _), do: process(a0)
+      end
+      """
+
+      plan = prepared_public([{"pub.ex", src}])
+      actual = apply_refactor(@subject, src, @on ++ [prepared: plan])
+
+      assert_rewrites(@subject, src, expected, @on ++ [prepared: plan])
+      assert_compiles(actual)
+      assert ungrouped_clauses(actual) == []
+    end
+
+    test "public def: dropped param at position 0, wrapper underscores it" do
+      src = """
+      defmodule MyApp.PubFront do
+        def a(x), do: wrap(:tag, x)
+        def b(y), do: wrap(:tag, y)
+
+        def wrap(label, val), do: {label, val}
+      end
+      """
+
+      expected = """
+      defmodule MyApp.PubFront do
+        def a(x), do: wrap(x)
+        def b(y), do: wrap(y)
+
+        def wrap(val), do: {:tag, val}
+        def wrap(_, a1), do: wrap(a1)
+      end
+      """
+
+      plan = prepared_public([{"pubfront.ex", src}])
+      actual = apply_refactor(@subject, src, @on ++ [prepared: plan])
+
+      assert_rewrites(@subject, src, expected, @on ++ [prepared: plan])
+      assert_compiles(actual)
+    end
+
+    test "public multi-clause def: wrapper appended after the last clause, clauses grouped" do
+      src = """
+      defmodule MyApp.PubMulti do
+        def a, do: pick(:x, 7)
+        def b, do: pick(:y, 7)
+
+        def pick(:x, n), do: n + 1
+        def pick(other, m), do: {other, m}
+      end
+      """
+
+      expected = """
+      defmodule MyApp.PubMulti do
+        def a, do: pick(:x)
+        def b, do: pick(:y)
+
+        def pick(:x), do: 7 + 1
+        def pick(other), do: {other, 7}
+        def pick(a0, _), do: pick(a0)
+      end
+      """
+
+      plan = prepared_public([{"pubmulti.ex", src}])
+      actual = apply_refactor(@subject, src, @on ++ [prepared: plan])
+
+      assert_rewrites(@subject, src, expected, @on ++ [prepared: plan])
+      assert_compiles(actual)
+      assert ungrouped_clauses(actual) == []
+    end
+
+    test "public def: dropping the sole param forwards to arity 0" do
+      src = """
+      defmodule MyApp.PubSole do
+        def a, do: greet("hi")
+        def b, do: greet("hi")
+
+        def greet(msg), do: String.upcase(msg)
+      end
+      """
+
+      # Sourceror renders the zero-arg head as `greet()`; `mix format`
+      # (reformat_after?) drops the parens. We compare raw refactor output.
+      expected = """
+      defmodule MyApp.PubSole do
+        def a, do: greet()
+        def b, do: greet()
+
+        def greet(), do: String.upcase("hi")
+        def greet(_), do: greet()
+      end
+      """
+
+      plan = prepared_public([{"pubsole.ex", src}])
+      actual = apply_refactor(@subject, src, @on ++ [prepared: plan])
+
+      assert_rewrites(@subject, src, expected, @on ++ [prepared: plan])
+      assert_compiles(actual)
+      assert ungrouped_clauses(actual) == []
+    end
+
+    test "public def is idempotent: second pass leaves the wrapper alone" do
+      src = """
+      defmodule MyApp.Pub do
+        def run(a), do: process(a, 42)
+        def run_other(b), do: process(b, 42)
+
+        def process(data, factor), do: data * factor
+      end
+      """
+
+      plan = prepared_public([{"pub.ex", src}])
+      assert_idempotent(@subject, src, @on ++ [prepared: plan])
+    end
+
+    test "public def left alone when public: false (default)" do
+      src = """
+      defmodule MyApp.Pub do
+        def run(a), do: process(a, 42)
+        def run_other(b), do: process(b, 42)
+
+        def process(data, factor), do: data * factor
+      end
+      """
+
+      plan = prepared([{"pub.ex", src}])
+      assert_unchanged(@subject, src, @on ++ [prepared: plan])
+    end
+
+    test "public def with an existing lower arity collision is left alone" do
+      src = """
+      defmodule MyApp.PubArity do
+        def a(x), do: process(x, 5)
+        def b(y), do: process(y, 5)
+
+        def process(data, n), do: data + n
+        def process(data), do: data
+      end
+      """
+
+      plan = prepared_public([{"pubarity.ex", src}])
+      assert_unchanged(@subject, src, @on ++ [prepared: plan])
+    end
+
+    test "private defp gets no wrapper even in public: true mode" do
+      src = """
+      defmodule MyApp.Mixed do
+        def run(a), do: process(a, 42)
+        def run_other(b), do: process(b, 42)
+
+        defp process(data, factor), do: data * factor
+      end
+      """
+
+      expected = """
+      defmodule MyApp.Mixed do
+        def run(a), do: process(a)
+        def run_other(b), do: process(b)
+
+        defp process(data), do: data * 42
+      end
+      """
+
+      plan = prepared_public([{"mixed.ex", src}])
+      actual = apply_refactor(@subject, src, @on ++ [prepared: plan])
+
+      assert_rewrites(@subject, src, expected, @on ++ [prepared: plan])
+      assert_compiles(actual)
     end
   end
 end
