@@ -120,6 +120,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Cross-module families are reported but not rewritten. **Default off**
   (opt in via `.refactor.exs`): idiomatic Elixir rarely hand-rolls
   struct-type dispatch, so the honest first result is often "none".
+- `SortReverseToDesc`: `Enum.sort(coll) |> Enum.reverse()` →
+  `Enum.sort(coll, :desc)` and the `sort_by` analogue (both call and
+  pipe forms). Skips a sort that already carries a sorter/direction arg
+  (arity-based gate, e.g. `Enum.sort(coll, &>=/2)` / `:asc`) and any
+  `Enum.reverse/2`. **Default off** (opt in via `.refactor.exs` with
+  `enabled: true`): `Enum.sort/1` is stable so `sort |> reverse` flips
+  tie order while `sort(:desc)` preserves it — not strictly
+  behaviour-preserving when duplicate sort keys exist (accepted
+  best-effort trade-off for the dominant no-relevant-ties case).
 - `MemberToInOperator`: `Enum.member?(coll, x)` → `x in coll`, negated
   calls fold to `not in`; guard context gated on literal collections.
 - `MapSumToSumBy`: `Enum.map(coll, fun) |> Enum.sum()` →

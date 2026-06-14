@@ -145,6 +145,7 @@ defmodule Number42.Refactors.MixProject do
           Number42.Refactors.Ex.ReduceAsMap,
           Number42.Refactors.Ex.ReduceMapPut,
           Number42.Refactors.Ex.RejectIsNil,
+          Number42.Refactors.Ex.SortReverseToDesc,
           Number42.Refactors.Ex.UseMapJoin
         ],
         "Refactors – Pattern Matching & Control Flow": [
