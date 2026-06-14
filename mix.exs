@@ -215,7 +215,8 @@ defmodule Number42.Refactors.MixProject do
           Number42.Refactors.Ex.ExtractProtocolFromStructFamily,
           Number42.Refactors.Ex.ExtractRenamedClone,
           Number42.Refactors.Ex.ExtractSharedModule,
-          Number42.Refactors.Ex.PromoteRepeatedPrivateHelpers
+          Number42.Refactors.Ex.PromoteRepeatedPrivateHelpers,
+          Number42.Refactors.Ex.SuggestInputStructsForProtocol
         ],
         "Refactors – Module Structure": [
           Number42.Refactors.Ex.ExtractPatchRunner,

@@ -62,7 +62,14 @@
     # we cannot guarantee equivalence. Enable per project once nil is
     # ruled out at the call sites. Try locally with
     # `mix refactor --only ListWrapConditional --dry-run`.
-    Number42.Refactors.Ex.ListWrapConditional
+    Number42.Refactors.Ex.ListWrapConditional,
+
+    # Detector, not a rewriter: `transform/2` is a hard no-op, so it can
+    # never drift `--check`. It only reports input-struct suggestions for
+    # `*_to_X` map families that could become a protocol. Run it on demand
+    # against a consuming app, not on the library's own bootstrap. Try with
+    # `mix refactor --only SuggestInputStructsForProtocol --dry-run --log`.
+    Number42.Refactors.Ex.SuggestInputStructsForProtocol
   ],
 
   # Per-refactor options. Keys are fully-qualified modules, values are
