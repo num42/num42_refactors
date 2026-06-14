@@ -529,12 +529,37 @@ defmodule Number42.Refactors.Ex.ExpandShortFormFunctions do
     Map.fetch(resolutions, name) |> name_patch_or_skip(meta, name)
   end
 
+  # Parenless 0-arity definition head. A `defp name, do: ...` head
+  # parses to `{name, meta, ctx}` where `ctx` is an atom (`nil`/context),
+  # NOT an arg list — so the call-site clause below (guarding on
+  # `is_list(args)`) never fires for it, leaving the head stale while
+  # paren'd call sites are renamed → asymmetric rename, broken build.
+  # We match the enclosing `def*` node so the head is unambiguously a
+  # definition (a bare `name` elsewhere is a variable, never a 0-arity
+  # call in Elixir) and patch only this parenless shape; arity ≥ 1 heads
+  # carry an arg list and are still patched by the call-site clause
+  # below (matching them here too would double-patch the name token).
+  # `:when` guards unwrap to the real head.
+  defp patches_for_node({kind, _, [head | _]}, resolutions)
+       when kind in [:def, :defp, :defmacro, :defmacrop] do
+    parenless_head_patch(head, resolutions)
+  end
+
   defp patches_for_node({name, meta, args}, resolutions)
        when is_atom(name) and is_list(args) do
     Map.fetch(resolutions, name) |> name_patch_or_skip(meta, name)
   end
 
   defp patches_for_node(_, _), do: []
+
+  defp parenless_head_patch({:when, _, [inner | _]}, resolutions),
+    do: parenless_head_patch(inner, resolutions)
+
+  defp parenless_head_patch({name, meta, ctx}, resolutions)
+       when is_atom(name) and is_atom(ctx),
+       do: Map.fetch(resolutions, name) |> name_patch_or_skip(meta, name)
+
+  defp parenless_head_patch(_, _), do: []
 
   # Patch ~H sigil bodies textually for every renamed function:
   # `<.old`, `</.old`, `old(`, `&old/`. Word-boundary on the function
