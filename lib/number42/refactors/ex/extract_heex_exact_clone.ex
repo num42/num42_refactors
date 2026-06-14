@@ -227,15 +227,98 @@ defmodule Number42.Refactors.Ex.ExtractHeexExactClone do
         |> Enum.filter(&(&1.file == file))
         |> Enum.map(&{plan, &1})
       end)
-      # Patches must be applied back-to-front, otherwise earlier
-      # patches shift the byte offsets of later ones.
-      |> Enum.sort_by(fn {_plan, occ} -> -occ.line end)
+
+    case occs_in_file do
+      [] -> source
+      _ -> rewrite_sigils(source, occs_in_file)
+    end
+  end
+
+  # Re-emit whole `~H` sigils via `Sourceror.patch_string` instead of
+  # splicing the source directly. The clone tree's byte ranges live in
+  # the *dedented* sigil body (Sourceror strips the heredoc indentation),
+  # so we splice the component call into that dedented body and let
+  # `reformat_after?: true` restore the indentation. Mixing the two
+  # offset spaces — source bytes vs. dedented-body bytes — would
+  # misalign the splice for any indented multi-line clone.
+  defp rewrite_sigils(source, occs_in_file) do
+    sigils = collect_sigils_with_nodes(source)
 
     occs_in_file
-    |> Enum.reduce(source, fn {plan, occ}, acc ->
-      replace_occurrence(acc, plan, occ)
+    |> Enum.flat_map(&match_occurrence_to_sigil(&1, sigils))
+    |> Enum.group_by(fn {sigil, _occ, _plan} -> sigil end, fn {_sigil, occ, plan} ->
+      {occ, plan}
+    end)
+    |> Enum.map(fn {sigil, occ_plans} -> build_sigil_patch(sigil, occ_plans) end)
+    |> patch_or_passthrough(source)
+  end
+
+  defp patch_or_passthrough([], source), do: source
+  defp patch_or_passthrough(patches, source), do: Sourceror.patch_string(source, patches)
+
+  defp match_occurrence_to_sigil({plan, occ}, sigils) do
+    case Enum.find(sigils, &sigil_contains_line?(&1, occ.line)) do
+      nil -> []
+      sigil -> [{sigil, occ, plan}]
+    end
+  end
+
+  defp sigil_contains_line?(sigil, file_line) do
+    body_lines = count_lines(sigil.body)
+    sigil.file_line < file_line and file_line <= sigil.file_line + body_lines + 1
+  end
+
+  defp build_sigil_patch(sigil, occ_plans) do
+    new_body = splice_calls_in_body(sigil.body, occ_plans)
+    range = Sourceror.get_range(sigil.sigil_node)
+    indent = String.duplicate(" ", range.start[:column] - 1)
+    rendered = render_sigil(new_body, indent)
+    Sourceror.Patch.new(%{end: range.end, start: range.start}, rendered, false)
+  end
+
+  # Splice every component call into the dedented body, back-to-front so
+  # earlier byte ranges aren't shifted by later splices.
+  defp splice_calls_in_body(body, occ_plans) do
+    occ_plans
+    |> Enum.map(fn {occ, plan} ->
+      {Tree.node_byte_range(occ.node, body), render_call(plan)}
+    end)
+    |> Enum.sort_by(fn {{start, _end}, _call} -> -start end)
+    |> Enum.reduce(body, fn {{start, stop}, call}, acc ->
+      binary_part(acc, 0, start) <>
+        call <> binary_part(acc, stop, byte_size(acc) - stop)
     end)
   end
+
+  defp render_sigil(new_body, indent) do
+    indented_body =
+      new_body
+      |> String.split("\n", trim: false)
+      |> Enum.map_join("\n", fn
+        "" -> ""
+        line -> indent <> line
+      end)
+
+    "~H\"\"\"\n" <> indented_body <> indent <> "\"\"\""
+  end
+
+  defp collect_sigils_with_nodes(source) do
+    case Sourceror.parse_string(source) do
+      {:ok, ast} ->
+        ast
+        |> Macro.prewalker()
+        |> Enum.flat_map(&sigil_node_or_empty/1)
+
+      _ ->
+        []
+    end
+  end
+
+  defp sigil_node_or_empty({:sigil_H, _meta, [{:<<>>, body_meta, [body]}, _modifiers]} = node)
+       when is_binary(body),
+       do: [%{body: body, file_line: Keyword.get(body_meta, :line, 1), sigil_node: node}]
+
+  defp sigil_node_or_empty(_), do: []
 
   defp assign_names(ast) do
     ast
@@ -245,13 +328,6 @@ defmodule Number42.Refactors.Ex.ExtractHeexExactClone do
       _ -> []
     end)
     |> Enum.uniq()
-  end
-
-  defp byte_offset_of_line(source, line) do
-    source
-    |> String.split("\n", trim: false)
-    |> Enum.take(line - 1)
-    |> Enum.reduce(0, fn part, acc -> acc + byte_size(part) + 1 end)
   end
 
   defp cluster_to_plan(%{hash: hash, occurrences: occs} = cluster) do
@@ -317,27 +393,6 @@ defmodule Number42.Refactors.Ex.ExtractHeexExactClone do
     (head ++ [insert_text | tail]) |> Enum.join("\n")
   end
 
-  defp locate_sigil_containing({:ok, sigils}, file_line, source) do
-    sigils
-    |> Enum.find(fn s ->
-      body_lines = count_lines(s.body)
-      s.file_line < file_line and file_line <= s.file_line + body_lines + 1
-    end)
-    |> case do
-      nil ->
-        nil
-
-      sigil ->
-        body_start_byte = byte_offset_of_line(source, sigil.file_line + 1)
-        {sigil.body, body_start_byte}
-    end
-  end
-
-  defp locate_sigil_containing(:error, _file_line, _source), do: nil
-
-  defp locate_sigil_for_line(source, file_line),
-    do: Tree.from_source(source) |> locate_sigil_containing(file_line, source)
-
   defp parse_for_pattern(header) do
     trimmed = header |> String.trim() |> String.trim_trailing("do") |> String.trim()
 
@@ -402,11 +457,6 @@ defmodule Number42.Refactors.Ex.ExtractHeexExactClone do
       end
     """
   end
-
-  defp replace_occurrence(source, plan, occurrence),
-    do:
-      locate_sigil_for_line(source, occurrence.line)
-      |> splice_call_at_sigil(occurrence, plan, source)
 
   defp resolve_target_file(source, opts, prepared) do
     case opts[:file] do
@@ -486,18 +536,6 @@ defmodule Number42.Refactors.Ex.ExtractHeexExactClone do
 
   defp scan_eex_code(code, a, l, b),
     do: Code.string_to_quoted(code) |> walk_eex_ast_branch(a, b, l)
-
-  defp splice_call_at_sigil(nil, _occurrence, _plan, source), do: source
-
-  defp splice_call_at_sigil({sigil_body, sigil_body_start_byte}, occurrence, plan, source) do
-    {body_start, body_end} = Tree.node_byte_range(occurrence.node, sigil_body)
-    abs_start = sigil_body_start_byte + body_start
-    abs_end = sigil_body_start_byte + body_end
-    call = render_call(plan)
-
-    binary_part(source, 0, abs_start) <>
-      call <> binary_part(source, abs_end, byte_size(source) - abs_end)
-  end
 
   defp walk_ast(ast, a, l, b) do
     {_, {a, l}} =
