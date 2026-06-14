@@ -467,3 +467,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `with`/`fn`/`for`) is a pattern/guard position, so a literal there is
   left inline — a `@attribute` cannot stand in a match. Same shape
   predicates and idempotence guarantee as before.
+- `RepeatedPatternToMacro` now also collapses **single-parameter**
+  functions, not only zero-arity ones. A group of `def name(var), do:
+  ...` clauses that share one literal-stripped skeleton, agree on the
+  bare-var param name, and whose only free variable is that param is
+  lifted into a `for {fun, arg1, ...} <- [...] do def unquote(fun)(var),
+  do: ... end` block with the param threaded through verbatim (only the
+  varying literals become `unquote` holes — the param is reproduced as a
+  normal head var, so its body reads stay in scope; no `var!`/hygiene
+  escape needed). Multi-param heads, non-bare-var/pattern params, mixed
+  param names across the group, and bodies reading any free variable
+  beyond the param are still rejected. Remains default-off and
+  threshold-gated.

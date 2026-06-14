@@ -136,6 +136,7 @@
   {"lib/number42/refactors/ex/extract_renamed_clone.ex", :call_without_opaque},
   {"lib/number42/refactors/ex/extract_shared_module.ex", :call_without_opaque},
   {"lib/number42/refactors/ex/hoist_invariant_out_of_comprehension.ex", :call_without_opaque},
+  {"lib/number42/refactors/ex/repeated_pattern_to_macro.ex", :call_without_opaque},
   {"lib/number42/refactors/ex/unused_variable.ex", :call_without_opaque},
 
   # ---------------------------------------------------------------------------
