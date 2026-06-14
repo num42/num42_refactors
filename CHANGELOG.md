@@ -38,6 +38,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is single-var only), when the guarded variable is not a bare parameter,
   or when the head already calls a guard defined in the module
   (idempotence).
+- `ExtractCondIfGuardClauses`: lift a `def`/`defp` whose entire body is a
+  two-branch `if`/`else` with a guard-expressible condition into two
+  `when`-guarded clauses (`def f(n) when n < 0, do: :neg` /
+  `def f(n), do: :pos`). The two-branch sibling of
+  `ExtractCondToGuardClauses` (it reuses the same guard-safety predicate)
+  and a strict, no-pattern-synthesis subset of `IfLiftToClauses` — for
+  cases where the condition is a plain guard over the parameters and no
+  head-pattern destructuring applies. Skips non-guard-safe conditions,
+  conditions over non-parameter bindings, `if` without `else`, an `if`
+  embedded in a larger body, heads with a non-bare param or an existing
+  `when`-guard, and `defmacro`. Parameters used in neither a clause's
+  guard nor its body are underscored so the output compiles cleanly.
 - `ManualTapToTap`: a hand-rolled "run a side effect, return the
   original value" lambda in a pipe → `Kernel.tap/2`. Matches
   `value |> then(fn x -> eff; x end)` and the immediately-applied

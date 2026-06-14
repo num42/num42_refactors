@@ -86,6 +86,7 @@
   {"lib/number42/refactors/ex/utc_now_truncate.ex", :call},
   {"lib/number42/refactors/ex/with_single_clause_to_case.ex", :call},
   {"lib/number42/refactors/ex/with_without_else.ex", :call},
+  {"lib/number42/refactors/ex/extract_cond_if_guard_clauses.ex", :call},
   {"lib/number42/refactors/ex/extract_cond_to_guard_clauses.ex", :call},
   # `extract_repeated_guard_to_defguard.ex` calls `Patch.replace` in the
   # `emit_group/3` head-mapper; the `:call` plus the anonymous-mapper

@@ -158,6 +158,12 @@ nested conditionals.
 > Rewrite a `cond` whose arms all test the same variable with `==`
 > against literals as a `case` on that variable (`true ->` → `_ ->`).
 
+### `Number42.Refactors.Ex.ExtractCondIfGuardClauses`
+
+> Lift a guard-safe `def f(p) do if guard, do: x, else: y end` into two
+> `when`-guarded clauses. A no-pattern-synthesis subset of
+> `IfLiftToClauses`.
+
 ### `Number42.Refactors.Ex.IfLiftToClauses`
 
 > Lift `def f(p) do if ... else ... end end` to pattern-matched
