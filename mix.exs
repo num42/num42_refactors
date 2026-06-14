@@ -179,6 +179,7 @@ defmodule Number42.Refactors.MixProject do
           Number42.Refactors.Ex.SortForTopK
         ],
         "Refactors – Definition Hygiene": [
+          Number42.Refactors.Ex.ClauseLookupToMap,
           Number42.Refactors.Ex.DelegateExactDuplicates,
           Number42.Refactors.Ex.DropTrailingReturnBinding,
           Number42.Refactors.Ex.ExpandShortFormBindings,

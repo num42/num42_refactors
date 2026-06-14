@@ -247,6 +247,12 @@ Refactors that fix correctness or performance bugs hidden inside
 
 Refactors that clean up redundant or unhelpful `def` shapes.
 
+### `Number42.Refactors.Ex.ClauseLookupToMap`
+
+> Collapse N literal→constant clauses into a `@<plural>` lookup map + a
+> single passthrough clause; a trailing catch-all becomes the
+> `Map.get/3` default.
+
 ### `Number42.Refactors.Ex.DelegateExactDuplicates`
 
 > Cross-file: replace exact duplicates with `defdelegate`.
