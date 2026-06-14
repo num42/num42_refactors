@@ -166,6 +166,7 @@ defmodule Number42.Refactors.MixProject do
           Number42.Refactors.Ex.WithWithoutElse
         ],
         "Refactors – Pipes & Sigils": [
+          Number42.Refactors.Ex.ExtractPipelineToFunction,
           Number42.Refactors.Ex.ExtractSocketToPipe,
           Number42.Refactors.Ex.ExtractToPipeline,
           Number42.Refactors.Ex.LiftPinnedEctoExpr,

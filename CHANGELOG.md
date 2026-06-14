@@ -131,6 +131,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   skips. Also skips multi-clause/guarded lambdas, non-first-statement
   destructures, a pattern that re-binds the param's own name, and a `for`
   whose param is shared by another clause.
+- `ExtractPipelineToFunction`: a long inline `|>` pipeline (default `>= 5`
+  stages), bound to a single variable or returned as the body's tail, is
+  lifted into a named private helper. The chain's free variables — every
+  bare variable referenced inside it but not bound within it (lambda args,
+  comprehension generators), restricted to names in scope at the extraction
+  site — become the helper's parameters, with the head-seed variable first
+  and the rest in source order; the call site passes each by name. The
+  helper name is derived from the terminal call, never a placeholder
+  (`Repo.all` → `load_<seed>`, `Enum.map` → `map_<seed>`), with a host-derived
+  `<fn>_pipeline` fallback (bang-safe). Skips pipelines below the threshold,
+  dead bound results, a host body that is *only* the pipeline (would extract
+  to a self-call), multi-clause hosts, module-attribute references, and
+  chains with no in-scope seed. Default-OFF — opt in with
+  `{Number42.Refactors.Ex.ExtractPipelineToFunction, enabled: true}`.
 - `ManualTapToTap`: a hand-rolled "run a side effect, return the
   original value" lambda in a pipe → `Kernel.tap/2`. Matches
   `value |> then(fn x -> eff; x end)` and the immediately-applied
