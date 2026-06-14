@@ -53,6 +53,12 @@
   {"lib/number42/refactors/ex/identity_passthrough.ex", :call},
   {"lib/number42/refactors/ex/if_else_to_cond.ex", :call},
   {"lib/number42/refactors/ex/if_lift_to_clauses.ex", :call},
+  # `introduce_context_object_for_parameter_train.ex` calls `Patch.replace` in
+  # `build_callee_patch/7` and `call_site_patch/2`; the `:call` plus the
+  # `:no_return` on `build_callee_patch/7` are pure follow-ons from the spec
+  # gap above.
+  {"lib/number42/refactors/ex/introduce_context_object_for_parameter_train.ex", :call},
+  {"lib/number42/refactors/ex/introduce_context_object_for_parameter_train.ex", :no_return},
   {"lib/number42/refactors/ex/inline_single_expression_def.ex", :call},
   {"lib/number42/refactors/ex/lambda_destructure_to_head.ex", :call},
   {"lib/number42/refactors/ex/lambda_destructure_to_head.ex", :pattern_match},
