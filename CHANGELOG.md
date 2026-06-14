@@ -153,6 +153,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `FilterCountToCount`: `Enum.filter(coll, pred) |> Enum.count()` →
   `Enum.count(coll, pred)` (pipe, half-pipe and nested-call forms);
   lambda/capture predicates only, leaves `Enum.count/2` alone.
+- `RangeToListRedundant`: drops a redundant `Enum.to_list/1` on a range
+  that feeds directly into another `Enum.*`/`Stream.*` call —
+  `Enum.to_list(1..n) |> Enum.map(fun)` → `1..n |> Enum.map(fun)`,
+  `Enum.map(Enum.to_list(a..b), fun)` → `Enum.map(a..b, fun)`. Fires
+  only when the `to_list` argument is a syntactic range (`a..b`,
+  `a..b//s`, `Range.new(...)`) and the consumer is a direct Enum/Stream
+  call (pipe or nested); skips bound results, unknown consumers, and
+  non-range arguments.
 - `MergePipelineIntoComprehension` now also fuses
   `Enum.reject |> Enum.map` (`for x <- coll, !pred(x), do: f(x)`).
 - Initial public release, extracted from an internal project.

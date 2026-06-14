@@ -118,6 +118,11 @@ function that already does the same thing.
 > `coll |> Enum.filter/reject(pred) |> Enum.map(f)` →
 > `for x <- coll, [!]pred(x), do: f(x)` (pure bodies only).
 
+### `Number42.Refactors.Ex.RangeToListRedundant`
+
+> `Enum.to_list(a..b) |> Enum.map(fun)` → `a..b |> Enum.map(fun)`
+> (drops a redundant `to_list` on a range feeding another Enum/Stream call).
+
 ### `Number42.Refactors.Ex.ReduceAsMap`
 
 > `Enum.reduce/3` building a list → `Enum.map/2`.
