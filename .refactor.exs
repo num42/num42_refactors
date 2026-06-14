@@ -53,7 +53,16 @@
     # that the envy heuristic could mis-trigger on; keep it off our own
     # bootstrap. Try locally with
     # `mix refactor --only RelocateMisplacedFunction --dry-run`.
-    Number42.Refactors.Ex.RelocateMisplacedFunction
+    Number42.Refactors.Ex.RelocateMisplacedFunction,
+
+    # Default-off for strict behaviour-preservation: the rewrite
+    # `if is_list(x), do: x, else: [x]` -> `List.wrap(x)` diverges
+    # exactly at `x == nil` — `List.wrap(nil)` is `[]`, the conditional
+    # yields `[nil]`. The conditional alone can't prove `x` non-nil, so
+    # we cannot guarantee equivalence. Enable per project once nil is
+    # ruled out at the call sites. Try locally with
+    # `mix refactor --only ListWrapConditional --dry-run`.
+    Number42.Refactors.Ex.ListWrapConditional
   ],
 
   # Per-refactor options. Keys are fully-qualified modules, values are

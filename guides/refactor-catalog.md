@@ -230,6 +230,12 @@ Refactors that fix correctness or performance bugs hidden inside
 
 > `List.last(Enum.reverse(list))` → `List.first(list)`.
 
+### `Number42.Refactors.Ex.ListWrapConditional`
+
+> `if is_list(x), do: x, else: [x]` → `List.wrap(x)`. **Default-off**:
+> `List.wrap(nil)` is `[]` while the conditional yields `[nil]`, so the
+> rewrite only preserves behaviour when `x` is never `nil`.
+
 ### `Number42.Refactors.Ex.SortForTopK`
 
 > `Enum.sort + take(1)` / `hd` → `Enum.min` / `Enum.max`.

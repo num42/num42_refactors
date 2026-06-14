@@ -123,6 +123,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `coll |> MapSet.new()`). Sibling of `EnumIntoToMapNew` for `MapSet`.
   Fires only on the zero-arg `MapSet.new()` accumulator — a seeded
   `MapSet.new(seed)` merges into an existing set and is left untouched.
+- `ListWrapConditional`: rewrites `if is_list(x), do: x, else: [x]` to
+  `List.wrap(x)`. Fires only on the exact shape — `is_list/1` guard on a
+  bare variable, `do` branch the same variable, `else` branch the
+  singleton `[x]`; both the inline (`if c, do: …, else: …`) and block
+  (`if c do … else … end`) forms are accepted. **Default-off** (listed
+  in this repo's `.refactor.exs` `skipped_modules`): `List.wrap(nil)` is
+  `[]`, while the conditional yields `[nil]` for `x == nil`, and the
+  conditional alone can't prove `x` is non-nil — so the rewrite is only
+  behaviour-preserving when `nil` is ruled out at the call sites. Enable
+  per project by removing it from `skipped_modules` once that holds.
 - `LiftUntypedParamToStructPattern`: lifts a bare untyped parameter to a
   struct-pattern match (`def f(r)` → `def f(%Position{} = r)`) when the
   body **proves** the type. Inference, strongest first: an existing
