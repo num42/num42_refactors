@@ -143,6 +143,7 @@ defmodule Number42.Refactors.MixProject do
           Number42.Refactors.Ex.MapSumToSumBy,
           Number42.Refactors.Ex.MemberToInOperator,
           Number42.Refactors.Ex.MergePipelineIntoComprehension,
+          Number42.Refactors.Ex.RangeToListRedundant,
           Number42.Refactors.Ex.ReduceAsMap,
           Number42.Refactors.Ex.ReduceMapPut,
           Number42.Refactors.Ex.RejectIsNil,

@@ -64,6 +64,7 @@
   {"lib/number42/refactors/ex/merge_pipeline_into_comprehension.ex", :call},
   {"lib/number42/refactors/ex/negated_boolean_name.ex", :call},
   {"lib/number42/refactors/ex/pipe_reassign.ex", :call},
+  {"lib/number42/refactors/ex/range_to_list_redundant.ex", :call},
   # `push_param_into_callee.ex` calls `Patch.replace` in
   # `rewrite_callee_clause/2` and `call_site_patch/4`; the `:call` plus the
   # two `:no_return` findings (the anonymous mapper and `rewrite_callee_clause/2`)
