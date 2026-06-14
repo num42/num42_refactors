@@ -28,6 +28,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   statements, multiple acc updates), the seed mismatches the idiom
   (non-`%{}`, non-`1`), the key/value projection doesn't reference the
   element, or the group_by seed-elem and cons-elem differ.
+- `HoistInvariantOutOfComprehension` now covers **multiple generators**
+  and **nested** comprehensions. A flat multi-generator `for` is one
+  scope: a subexpression invariant w.r.t. *every* generator and filter
+  binding lifts before the whole `for` (a subexpression that depends on
+  an earlier generator but not a later one is left in place — a flat
+  `for` has no statement position between generators to host the binding
+  without restructuring the loop). For nested `for`/`Enum.map`, each
+  comprehension lifts only what is invariant in its own body to just
+  before itself, so a partially-invariant subexpression lands at the
+  tightest legal level. The invariance check is now **scope-aware**:
+  it excludes variables introduced by any nested scope inside the body
+  (an inner `for`, a `fn`, a `with`, a `case`/`cond`/`receive`/`try`
+  clause), fixing a latent bug where such a subexpression was hoisted
+  past its binder into non-compiling code. Still gated on `pure?/1`
+  (pure + total, empty-collection-safe); one hoist per pass; idempotent.
 - `CondToCase`: a `cond` whose every non-default arm is `var == literal`
   (or the symmetric `literal == var`) over the **same** bare variable →
   a `case` on that variable, one `literal -> body` clause per arm, with a
