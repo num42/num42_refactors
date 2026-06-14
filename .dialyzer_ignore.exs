@@ -40,6 +40,7 @@
   {"lib/number42/refactors/ex/enum_capture.ex", :pattern_match},
   {"lib/number42/refactors/ex/enum_find_to_keyfind.ex", :call},
   {"lib/number42/refactors/ex/enum_into_to_map_new.ex", :call},
+  {"lib/number42/refactors/ex/enum_into_to_map_set.ex", :call},
   {"lib/number42/refactors/ex/enum_map_into_to_map_new.ex", :call},
   {"lib/number42/refactors/ex/enum_reduce_to_sum.ex", :call},
   {"lib/number42/refactors/ex/enum_reverse_concat.ex", :call},

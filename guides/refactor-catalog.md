@@ -71,6 +71,10 @@ function that already does the same thing.
 
 > `Enum.into(coll, %{})` → `Map.new(coll)`.
 
+### `Number42.Refactors.Ex.EnumIntoToMapSet`
+
+> `Enum.into(coll, MapSet.new())` → `MapSet.new(coll)`.
+
 ### `Number42.Refactors.Ex.EnumMapIntoToMapNew`
 
 > `Enum.map(coll, fun) |> Enum.into(%{})` → `Map.new(coll, fun)`.
