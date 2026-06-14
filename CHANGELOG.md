@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `PushParamIntoCallee`: added a `public: true` mode that also rewrites
+  public `def` callees (previously `defp`-only). Dropping a public
+  function's parameter is an arity change external callers can't see, so
+  the rewrite keeps a backward-compat wrapper at the original arity that
+  forwards to the new one (`def f(d, _cfg), do: f(d)`), placed after the
+  last callee clause to keep clauses grouped. The wrapper discards the
+  argument it used to forward and uses the pushed constant — external
+  callers that passed a different value now get the corpus value (the
+  documented trade of this mode). Skips a `def` when the lower arity is
+  already taken, and the wrapper's `_` at the dropped position keeps the
+  rewrite idempotent. `defp` behaviour and the default (`public: false`,
+  every `def` skipped) are unchanged. (#83)
+
 ### Added
 
 - `ReduceToNamedAggregate`: classifies a multi-line `Enum.reduce/3`
