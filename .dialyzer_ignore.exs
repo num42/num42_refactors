@@ -75,6 +75,7 @@
   {"lib/number42/refactors/ex/push_param_into_callee.ex", :no_return},
   {"lib/number42/refactors/ex/reduce_as_map.ex", :call},
   {"lib/number42/refactors/ex/reduce_map_put.ex", :call},
+  {"lib/number42/refactors/ex/reduce_to_named_aggregate.ex", :call},
   {"lib/number42/refactors/ex/redundant_boolean_if.ex", :call},
   {"lib/number42/refactors/ex/reject_is_nil.ex", :call},
   {"lib/number42/refactors/ex/remove_trivial_else_clause.ex", :call},

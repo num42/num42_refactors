@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ReduceToNamedAggregate`: classifies a multi-line `Enum.reduce/3`
+  whose accumulator follows a known aggregation shape and rewrites it to
+  the named idiom. `Map.update(acc, key, [v], &[v | &1])` with seed `%{}`
+  → `Enum.group_by/2` (or `/3` when the grouped value differs from the
+  element); `Map.update(acc, key, 1, &(&1 + 1))` with seed `%{}` →
+  `Enum.frequencies_by/2`; `acc * value` with seed `1` →
+  `Enum.product_by/2`. Both capture (`&[v | &1]`, `&(&1 + 1)`) and
+  explicit (`fn e -> [v | e] end`, `fn c -> c + 1 end`) fold funs are
+  recognised. The `+`/`0` **sum** case is left to `EnumReduceToSum` and
+  the single-line `Map.put` map-build to `ReduceMapPut` — this only adds
+  the idioms those two don't cover. Documented divergence: the
+  `group_by` source prepends (reverse within-bucket order) while
+  `Enum.group_by/3` appends (input order); keys and per-bucket membership
+  are identical, only within-bucket order flips, so it rewrites and
+  relies on the mandatory manual review for the rare order-sensitive
+  case. Skips when the body is more than the recognised expression (extra
+  statements, multiple acc updates), the seed mismatches the idiom
+  (non-`%{}`, non-`1`), the key/value projection doesn't reference the
+  element, or the group_by seed-elem and cons-elem differ.
 - `CondToCase`: a `cond` whose every non-default arm is `var == literal`
   (or the symmetric `literal == var`) over the **same** bare variable →
   a `case` on that variable, one `literal -> body` clause per arm, with a
