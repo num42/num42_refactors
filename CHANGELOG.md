@@ -493,3 +493,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   param names across the group, and bodies reading any free variable
   beyond the param are still rejected. Remains default-off and
   threshold-gated.
+- `PipelineFromRebindChain` now also folds chains whose **head seed** is
+  a nested function call. `x = f(g(h(input))); x = step(x)` previously
+  treated the seed as atomic and skipped; it now unwraps the
+  leading-argument spine into pipe stages —
+  `h(input) |> g() |> f() |> step()`. The recursion stops at the
+  innermost call (`h(input)`), which is rendered whole as the seed, and
+  sibling arguments stay on their own stage so left-to-right evaluation
+  order is preserved. Single-call seeds (`x = f(g(input))`) keep their
+  existing `g(input) |> f()` shape. No new liveness invariants.

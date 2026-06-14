@@ -168,9 +168,38 @@ defmodule Number42.Refactors.Ex.PipelineFromRebindChain do
     {:ok, Sourceror.to_string(seed), Enum.map(stages, &Sourceror.to_string/1)}
   end
 
+  # A nested head seed unwraps along its **leading-argument spine**:
+  # `f(g(h(input)))` seeds from `h(input)` and stacks `g()` then `f()`.
+  # Each level lifts only its first argument; sibling args stay inside
+  # their own stage, so left-to-right evaluation order is preserved. The
+  # recursion stops at the **innermost call** — the deepest call whose own
+  # leading argument is not itself a call (`h(input)`, `fetch(input)`),
+  # which is rendered whole as the seed. A single linear call seeds from
+  # its leading argument exactly as before.
   defp head_stage(rhs) do
     with {:ok, {callee, _, [first | rest]}} <- as_call(rhs) do
-      {:ok, Sourceror.to_string(first), [headless_text(callee, rest)]}
+      case as_call(first) do
+        {:ok, _} ->
+          {seed, inner_stages} = unwrap_seed(first)
+          {:ok, seed, inner_stages ++ [headless_text(callee, rest)]}
+
+        :skip ->
+          {:ok, Sourceror.to_string(first), [headless_text(callee, rest)]}
+      end
+    end
+  end
+
+  # `call` is a call whose leading arg may itself be a call. Keep peeling
+  # the leading-arg spine until the inner leading arg is a non-call; that
+  # innermost call is the seed, rendered whole.
+  defp unwrap_seed({callee, _, [first | rest]} = call) do
+    case as_call(first) do
+      {:ok, _} ->
+        {seed, inner_stages} = unwrap_seed(first)
+        {seed, inner_stages ++ [headless_text(callee, rest)]}
+
+      :skip ->
+        {Sourceror.to_string(call), []}
     end
   end
 
