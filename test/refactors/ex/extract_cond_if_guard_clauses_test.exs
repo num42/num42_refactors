@@ -119,6 +119,114 @@ defmodule Number42.Refactors.Ex.ExtractCondIfGuardClausesTest do
     end
   end
 
+  describe "truthiness-safe guards (bare/non-boolean conditions)" do
+    test "a bare-variable condition is wrapped in `not in [nil, false]`" do
+      before_source = """
+      defmodule M do
+        defp table(name, prefix) do
+          if prefix, do: ~s("\#{prefix}".\#{name}), else: name
+        end
+      end
+      """
+
+      result = apply_refactor(@subject, before_source)
+
+      assert result =~ "not in [nil, false]"
+      # No bare-variable guard — a guard `when prefix` would require literal
+      # `true` and silently take the else-branch for any truthy non-true value.
+      refute result =~ "when prefix,"
+      refute result =~ "when prefix do"
+      assert_compiles(result)
+    end
+
+    test "bare-variable truthiness matches `if` at runtime (string takes the then-branch)" do
+      before_source = """
+      defmodule TruthyM do
+        def pick(x) do
+          if x, do: :present, else: :absent
+        end
+      end
+      """
+
+      result = apply_refactor(@subject, before_source)
+      assert_compiles(result)
+
+      [{mod, _}] = Code.compile_string(result)
+
+      try do
+        assert mod.pick("truthy string") == :present
+        assert mod.pick(0) == :present
+        assert mod.pick(nil) == :absent
+        assert mod.pick(false) == :absent
+      after
+        :code.purge(mod)
+        :code.delete(mod)
+      end
+    end
+
+    test "a non-boolean guard-legal term (elem) is wrapped" do
+      before_source = """
+      defmodule M do
+        def first(t) do
+          if elem(t, 0), do: :set, else: :unset
+        end
+      end
+      """
+
+      result = apply_refactor(@subject, before_source)
+
+      assert result =~ "not in [nil, false]"
+      assert_compiles(result)
+    end
+  end
+
+  describe "boolean-proven conditions keep their guard unchanged" do
+    test "a comparison is not wrapped in `not in [nil, false]`" do
+      before_source = """
+      defmodule M do
+        def classify(n) do
+          if n > 0, do: :pos, else: :nonpos
+        end
+      end
+      """
+
+      result = apply_refactor(@subject, before_source)
+
+      assert result =~ "when n > 0"
+      refute result =~ "not in [nil, false]"
+    end
+
+    test "a boolean combinator of comparisons is not wrapped" do
+      before_source = """
+      defmodule M do
+        def between(n) do
+          if n > 0 and n < 10, do: :inside, else: :outside
+        end
+      end
+      """
+
+      result = apply_refactor(@subject, before_source)
+
+      assert result =~ "when n > 0 and n < 10"
+      refute result =~ "not in [nil, false]"
+    end
+
+    test "a bare BIF predicate is not wrapped" do
+      before_source = """
+      defmodule M do
+        def kind(x) do
+          if is_atom(x), do: :atom, else: :other
+        end
+      end
+      """
+
+      result = apply_refactor(@subject, before_source)
+
+      assert result =~ "when is_atom(x)"
+      refute result =~ "not in [nil, false]"
+    end
+  end
+
   describe "leaves alone" do
     test "non-guard-safe condition (function call) is skipped" do
       source = """

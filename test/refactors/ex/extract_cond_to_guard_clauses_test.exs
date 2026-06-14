@@ -116,6 +116,86 @@ defmodule Number42.Refactors.Ex.ExtractCondToGuardClausesTest do
     end
   end
 
+  describe "truthiness-safe guards (bare/non-boolean conditions)" do
+    test "a bare-variable branch condition is wrapped in `not in [nil, false]`" do
+      before_source = """
+      defmodule M do
+        defp table(name, prefix) do
+          cond do
+            prefix ->
+              x = prefix
+              ~s("\#{x}".\#{name})
+
+            true ->
+              name
+          end
+        end
+      end
+      """
+
+      result = apply_refactor(@subject, before_source)
+
+      assert result =~ "not in [nil, false]"
+      refute result =~ "when prefix do"
+      refute result =~ "when prefix,"
+      assert_compiles(result)
+    end
+
+    test "bare-variable truthiness matches `cond` at runtime" do
+      before_source = """
+      defmodule CondTruthyM do
+        def pick(x) do
+          cond do
+            x ->
+              y = x
+              {:present, y}
+
+            true ->
+              :absent
+          end
+        end
+      end
+      """
+
+      result = apply_refactor(@subject, before_source)
+      assert_compiles(result)
+
+      [{mod, _}] = Code.compile_string(result)
+
+      try do
+        assert mod.pick("truthy string") == {:present, "truthy string"}
+        assert mod.pick(0) == {:present, 0}
+        assert mod.pick(nil) == :absent
+        assert mod.pick(false) == :absent
+      after
+        :code.purge(mod)
+        :code.delete(mod)
+      end
+    end
+  end
+
+  describe "boolean-proven conditions keep their guard unchanged" do
+    test "comparison branch conditions are not wrapped" do
+      before_source = """
+      defmodule M do
+        def classify(n) do
+          cond do
+            n < 0 -> n |> abs() |> Integer.to_string()
+            n == 0 -> :zero
+            true -> :pos
+          end
+        end
+      end
+      """
+
+      result = apply_refactor(@subject, before_source)
+
+      assert result =~ "when n < 0"
+      assert result =~ "when n == 0"
+      refute result =~ "not in [nil, false]"
+    end
+  end
+
   describe "unused parameters per lifted clause" do
     test "params unused in a clause are underscored" do
       before_source = """

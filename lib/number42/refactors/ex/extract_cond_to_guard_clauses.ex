@@ -49,6 +49,28 @@ defmodule Number42.Refactors.Ex.ExtractCondToGuardClauses do
   The final branch must be a literal `true ->` catch-all, and at least
   one branch body must be clause-worthy (see above).
 
+  ## Truthiness preservation
+
+  `cond` runs a branch for any *truthy* condition — everything except
+  `nil` and `false`. A `when` guard, by contrast, fires only on a literal
+  `true`. Copying a branch condition verbatim into the guard would
+  therefore silently change behaviour whenever it evaluates to a truthy
+  non-`true` value (a string, a number, a map, …): the guard would fail
+  and a later clause would run instead.
+
+  To keep the lifted clauses semantically identical to the `cond`, each
+  branch condition is classified:
+
+    * **Boolean-proven** — a comparison/equality (`==`, `<`, …), an `is_*`
+      predicate, a boolean combinator (`and`/`or`/`not`/`&&`/`||`/`!`),
+      `in`, or a boolean literal. Its value is already `true`/`false`, so
+      the guard is used verbatim (`when n < 0`).
+    * **Truthy but not boolean-proven** — a bare variable (`cond do x ->`),
+      or another guard-legal term whose value need not be boolean
+      (`elem(t, 0)`, arithmetic, `hd/1`, …). The guard is wrapped as
+      `when COND not in [nil, false]`, which is guard-legal and reproduces
+      `cond`'s truthiness exactly.
+
   ## What we skip
 
     * Every branch body is simple (single expression, no multi-stage
@@ -228,11 +250,33 @@ defmodule Number42.Refactors.Ex.ExtractCondToGuardClauses do
 
   defp render_clause({:guard, cond_ast, body}, kind, fn_name, params, source) do
     head = clause_head(kind, fn_name, params, [cond_ast, body])
-    render_body("#{head} when #{Sourceror.to_string(cond_ast)}", body, source)
+    render_body("#{head} when #{guard_text(cond_ast)}", body, source)
   end
 
   defp render_clause({:catch_all, body}, kind, fn_name, params, source),
     do: render_body(clause_head(kind, fn_name, params, [body]), body, source)
+
+  # `cond` takes a branch for any truthy condition (everything but
+  # `nil`/`false`), but a `when` guard fires only on a literal `true`.
+  # A boolean-proven condition already matches `cond`'s truthiness, so its
+  # guard is used verbatim. A non-boolean truthy term (a bare variable,
+  # `elem/2`, arithmetic, …) is wrapped in `not in [nil, false]`, which is
+  # guard-legal and reproduces `cond`'s truthiness exactly.
+  defp guard_text(cond_ast) do
+    text = Sourceror.to_string(cond_ast)
+    if boolean_guard?(cond_ast), do: text, else: "#{text} not in [nil, false]"
+  end
+
+  @boolean_ops ~w(== != === !== < > <= >= and or not && || ! in)a
+
+  defp boolean_guard?(true), do: true
+  defp boolean_guard?(false), do: true
+  defp boolean_guard?({:__block__, _, [inner]}), do: boolean_guard?(inner)
+  defp boolean_guard?({op, _, _}) when op in @boolean_ops, do: true
+  defp boolean_guard?({fun, _, args}) when is_atom(fun) and is_list(args), do: predicate_bif?(fun)
+  defp boolean_guard?(_), do: false
+
+  defp predicate_bif?(fun), do: String.starts_with?(Atom.to_string(fun), "is_")
 
   # Each clause gets its own parameter list: params that appear in neither
   # the guard nor the body are underscored so the lifted form compiles
