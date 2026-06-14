@@ -131,6 +131,15 @@ function that already does the same thing.
 
 > `Enum.reduce/3` building a map via `Map.put` → `Map.new/2`.
 
+### `Number42.Refactors.Ex.ReduceToNamedAggregate`
+
+> Classifies a multi-line `Enum.reduce/3` aggregation lambda and
+> rewrites it to the named idiom: `Map.update(acc, k, [v], &[v | &1])` →
+> `Enum.group_by/2,3`, `Map.update(acc, k, 1, &(&1 + 1))` →
+> `Enum.frequencies_by/2`, `acc * v` (seed `1`) → `Enum.product_by/2`.
+> The `+`/`0` sum case is owned by `EnumReduceToSum`; the single-line
+> `Map.put` build by `ReduceMapPut`.
+
 ### `Number42.Refactors.Ex.RejectIsNil`
 
 > Manual nil-filtering lambdas → `Enum.reject(&is_nil/1)`.
