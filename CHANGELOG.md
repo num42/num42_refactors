@@ -72,6 +72,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for `--dry-run` review. **Default-OFF** (the most destructive refactor
   in the catalogue) — both `prepare/1` and `transform/2` are no-ops unless
   `enabled: true`.
+- `SplitFlagArgument`: splits a function gated by a boolean (or
+  small-enum) flag parameter into one intent-named function per flag
+  value (Fowler "Remove Flag Argument"), and rewrites the literal and
+  default-implied call sites across files. **Default-off** — a
+  structural refactor that rewrites call sites is never auto-on;
+  `transform/2` is a no-op unless its opts carry `enabled: true`.
+  Detection is strict: the flag parameter must be a single-clause
+  function's **last** plain-variable argument, used **solely** as the
+  discriminant of exactly one top-level `if`/`case` on that parameter
+  (never woven into a branch body, passed onward, or stored), and the
+  branch must be exhaustive/exclusive on the flag domain (bool
+  `true`/`false`, or 2..4 distinct atoms with no catch-all arm).
+  Call-site policy is the **dispatcher-shim** (option (b) from the
+  issue): literal sites (`render(x, true)`) rewrite to the named split
+  (`render_shrink(x)`), default-implied sites (`render(x)` under a
+  default) route to the default-branch split, and **dynamic**
+  (`render(x, runtime_bool)`) or **unfindable** (`apply/3`, `&render/2`
+  captures) callers keep the original as a thin dispatcher delegating to
+  the splits — a deliberate partial win, never a half-rewritten call
+  graph. When every caller is literal/default and no capture/apply names
+  the function, the dispatcher is dropped. Enum atoms name the split by
+  value (`emit_json`); bool splits name from the branch body's called
+  helper (`shrink` → `render_shrink`). Skips when the flag is woven into
+  the computation, the branch is non-exhaustive, the function is
+  multi-clause, the flag isn't the last parameter, a derived name
+  collides with an existing definition, or the branch bodies already
+  bare-delegate to `name_*`-shaped siblings (the dispatcher shape it
+  emits — refused to keep the rewrite idempotent).
 - `ReduceToNamedAggregate`: classifies a multi-line `Enum.reduce/3`
   whose accumulator follows a known aggregation shape and rewrites it to
   the named idiom. `Map.update(acc, key, [v], &[v | &1])` with seed `%{}`

@@ -314,6 +314,13 @@ Refactors that clean up redundant or unhelpful `def` shapes.
 
 > `@impl true` → `@impl <Behaviour>` via BEAM lookup.
 
+### `Number42.Refactors.Ex.SplitFlagArgument`
+
+> Split a boolean/small-enum flag function into intent-named functions
+> and rewrite literal + default-implied call sites cross-file. Dynamic
+> or unfindable callers keep the original as a thin dispatcher (partial
+> win). **Default-off** (opt-in via `enabled: true`).
+
 ### `Number42.Refactors.Ex.UnusedVariable`
 
 > Prefix unused bindings in `def` / `case` / `with` / `fn` / `cond`
