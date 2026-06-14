@@ -93,6 +93,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   order differs from `Enum.find/3`). A predicate that performs IO, sends a
   message, or raises is skipped, since early-stop changes how often its
   effect fires.
+- `ClauseLookupToMap` — collapses N (>= 3) clauses of one arity-1
+  function, each mapping a single literal head (atom / int / string /
+  bool) to a single constant body, into a `@<plural_name>` lookup-map
+  attribute plus one passthrough clause (`name(key), do: @attr[key]`).
+  Clause order is preserved and duplicate heads keep the first entry. A
+  trailing catch-all clause (`name(_), do: default`) becomes the
+  `Map.get(@attr, key, default)` default. Guards on any clause,
+  non-literal heads, multi-arg heads, and non-constant bodies leave the
+  group untouched.
 - `LiftUntypedParamToStructPattern`'s call-site source now reads
   **transitive struct returns**. A project function whose every clause
   provably returns a single in-project struct — through Ecto's get-family
