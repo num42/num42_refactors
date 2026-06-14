@@ -106,7 +106,8 @@ defmodule Number42.Refactors.MixProject do
           Number42.Refactors.Engine,
           Number42.Refactors.Refactor,
           Number42.Refactors.AstHelpers,
-          Number42.Refactors.AstDiff
+          Number42.Refactors.AstDiff,
+          Number42.Refactors.CommunityDetection
         ],
         "Mix Tasks": [
           Mix.Tasks.Refactor,
@@ -210,6 +211,9 @@ defmodule Number42.Refactors.MixProject do
           Number42.Refactors.Ex.ExtractProtocolFromStructFamily,
           Number42.Refactors.Ex.ExtractRenamedClone,
           Number42.Refactors.Ex.ExtractSharedModule
+        ],
+        "Refactors – Module Structure": [
+          Number42.Refactors.Ex.SplitLowCohesionModule
         ],
         "Refactors – HEEx": [
           Number42.Refactors.Ex.ExtractHeexExactClone,

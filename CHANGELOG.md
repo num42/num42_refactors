@@ -46,6 +46,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   literal tuple at a call position whose head this pass struct-typed —
   never by arity-guessing. Every ambiguous case declines and is recorded
   for `--log` review.
+- `SplitLowCohesionModule`: splits a low-cohesion "god module" into
+  focused submodules along the seams of its internal call-graph. The
+  hard part is **detection**, not the rewrite. Builds the module-local
+  undirected call-graph (`AstHelpers.collect_definitions/1`) and runs
+  greedy modularity-maximising community detection
+  (`Number42.Refactors.CommunityDetection`, Clauset-Newman-Moore) — plain
+  connected components is too blunt because one shared helper bridges
+  every island into a single blob. The split is gated by three
+  configurable, justified thresholds: `:min_modularity` (default `0.3`,
+  Newman's textbook "no significant community structure" floor — below it
+  the refactor **declines** rather than impose an arbitrary cut),
+  `:max_cut_ratio` (default `0.25`, the direct "islands barely call
+  across" signal), and `:min_cluster_size` (default `2`); plus a
+  `:min_module_functions` floor (default `6`). Hard false-positive guards,
+  each of which declines the whole module: a `@attr`/`%__MODULE__{}`
+  referenced across clusters (splitting would orphan shared state),
+  `@behaviour`/`@impl` (callbacks must stay on the module), `use X`
+  (may inject functions invisible to the source call-graph), and dynamic
+  `apply/3` (incomplete graph + unrewritable call sites). The cluster
+  with the most public functions stays in the home module; others move to
+  `Original.<DominantFunction>` submodules with `defdelegate` shims left
+  behind and cross-file call sites rewritten. Every considered-but-
+  declined module is recorded with its reason and surfaced by `report/1`
+  for `--dry-run` review. **Default-OFF** (the most destructive refactor
+  in the catalogue) — both `prepare/1` and `transform/2` are no-ops unless
+  `enabled: true`.
 - `ReduceToNamedAggregate`: classifies a multi-line `Enum.reduce/3`
   whose accumulator follows a known aggregation shape and rewrites it to
   the named idiom. `Map.update(acc, key, [v], &[v | &1])` with seed `%{}`

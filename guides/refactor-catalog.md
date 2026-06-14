@@ -369,6 +369,17 @@ Refactors that reach across files to consolidate duplication.
 
 > Cross-file: extract exact duplicates into a `{LCP}.Shared` module.
 
+## Module Structure
+
+Refactors that change which *modules* exist, not just their contents.
+The highest-risk group — **default-off**, `--dry-run` first.
+
+### `Number42.Refactors.Ex.SplitLowCohesionModule`
+
+> Split a low-cohesion god module along call-graph community boundaries
+> (greedy modularity). Declines on a tangled blob, shared state,
+> behaviours, `use`-codegen, or dynamic dispatch. Default-OFF.
+
 ## HEEx
 
 Refactors that operate on HEEx templates (inline `~H` sigils and
