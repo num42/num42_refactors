@@ -194,6 +194,7 @@ defmodule Number42.Refactors.MixProject do
           Number42.Refactors.Ex.ExtractRepeatedGuardToDefguard,
           Number42.Refactors.Ex.IdentityPassthrough,
           Number42.Refactors.Ex.InlineSingleExpressionDef,
+          Number42.Refactors.Ex.LiftLocalLambda,
           Number42.Refactors.Ex.LiftUntypedParamToStructPattern,
           Number42.Refactors.Ex.ResolveImplTrue,
           Number42.Refactors.Ex.SplitFlagArgument,

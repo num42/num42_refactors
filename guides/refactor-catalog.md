@@ -310,6 +310,12 @@ Refactors that clean up redundant or unhelpful `def` shapes.
 
 > Collapse single-expression `def` / `defp` body to `do:` form.
 
+### `Number42.Refactors.Ex.LiftLocalLambda`
+
+> Lift a local `f = fn ... end` binding to a private function,
+> promoting closed-over vars to params and rewriting every `f.(...)`
+> call site.
+
 ### `Number42.Refactors.Ex.ResolveImplTrue`
 
 > `@impl true` → `@impl <Behaviour>` via BEAM lookup.
