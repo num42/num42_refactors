@@ -49,6 +49,36 @@ defmodule Number42.Refactors.Ex.HoistInvariantOutOfComprehension do
   position wins, so `f(g(h()))` lifts the whole `f(...)` rather than an
   inner piece, when the whole thing is invariant.
 
+  ## Multiple generators and nested comprehensions
+
+  A `for` with several comma-separated generators is treated as one
+  scope: a subexpression is invariant only when it references **none** of
+  the generator/filter bindings, and then it lifts entirely before the
+  `for`. A subexpression that depends on an earlier generator but not a
+  later one is *not* lifted — a flat `for` has no statement position
+  between its generators to host the binding without restructuring the
+  loop, which this rewrite deliberately does not do.
+
+  **Nested** `for`/`Enum.map` get the level right by construction. Each
+  comprehension lifts only what is invariant in *its own* body, to just
+  before *itself*. So in
+
+      for row <- rows do
+        for col <- cols, do: f(row, col, g(row))
+      end
+
+  `g(row)` depends on `row` (outer) but not `col` (inner), so it lifts to
+  before the inner `for`, inside the outer body — the tightest legal
+  level. A fully invariant `g()` lifts all the way out past both.
+
+  The invariance check is **scope-aware**: when scanning a comprehension's
+  body it excludes not just that comprehension's own bindings but every
+  variable introduced by a *nested* scope inside the body — an inner
+  `for`, a `fn`, a `with`, a `case`/`cond`/`receive`/`try` clause. Lifting
+  a subexpression that reads a nested-scope variable to before the outer
+  comprehension would reference an unbound variable and fail to compile,
+  so such a subexpression is left for the inner scope to claim.
+
   ## One hoist per pass
 
   We lift one subexpression per `Engine` pass and let the fixpoint loop
@@ -281,11 +311,61 @@ defmodule Number42.Refactors.Ex.HoistInvariantOutOfComprehension do
   # qualifying node (we don't descend into a call we already accept).
   defp invariant_call(body, bound), do: find_invariant(body, bound)
 
+  # `bound` grows as we descend: a nested scope (an inner `for`, a `fn`,
+  # a `with`, a `case`/`cond`/… clause) introduces variables visible only
+  # to its own subtree. A candidate that references such a nested-scope
+  # variable must NOT be lifted before *this* comprehension — out there
+  # the variable is not yet bound and the code no longer compiles. Adding
+  # every nested-scope variable to `bound` before recursing keeps the
+  # lift at the correct level: the innermost comprehension whose body the
+  # candidate is truly invariant in claims it (one hoist per pass).
   defp find_invariant(node, bound) do
-    if hoistable_call?(node, bound),
-      do: node,
-      else: node |> children() |> Enum.find_value(&find_invariant(&1, bound))
+    if hoistable_call?(node, bound) do
+      node
+    else
+      inner = MapSet.union(bound, scope_bound(node))
+      node |> children() |> Enum.find_value(&find_invariant(&1, inner))
+    end
   end
+
+  # Variables a node introduces into its own subtree. Conservative: every
+  # name bound *anywhere* under a scope-former is excluded for the whole
+  # subtree. This can only narrow what we lift — it never hoists past a
+  # binding — which is the safe side for nested generators.
+  defp scope_bound({:for, _, args}) when is_list(args) do
+    {clauses, _body} = for_clauses_and_body(args)
+    clauses |> Enum.flat_map(&clause_bound_vars/1) |> MapSet.new()
+  end
+
+  defp scope_bound({:fn, _, clauses}) when is_list(clauses) do
+    clauses |> Enum.flat_map(&fn_clause_bound_vars/1) |> MapSet.new()
+  end
+
+  defp scope_bound({form, _, args})
+       when form in [:with, :case, :cond, :receive, :try] and is_list(args) do
+    args |> Enum.flat_map(&scope_clause_bound_vars/1) |> MapSet.new()
+  end
+
+  defp scope_bound(_), do: MapSet.new()
+
+  defp fn_clause_bound_vars({:->, _, [params, _body]}) when is_list(params),
+    do: Enum.flat_map(params, &pattern_var_names/1)
+
+  defp fn_clause_bound_vars(_), do: []
+
+  # `with`/`case`/… clause heads bind on their left: `pat <- expr`,
+  # `pat = expr`, and `pat -> body` (each `->` head is a pattern list).
+  defp scope_clause_bound_vars({:<-, _, [pattern, _expr]}), do: pattern_var_names(pattern)
+  defp scope_clause_bound_vars({:=, _, [lhs, _rhs]}), do: pattern_var_names(lhs)
+
+  defp scope_clause_bound_vars({:->, _, [heads, _body]}) when is_list(heads),
+    do: Enum.flat_map(heads, &pattern_var_names/1)
+
+  defp scope_clause_bound_vars(kw) when is_list(kw),
+    do: Enum.flat_map(kw, &scope_clause_bound_vars/1)
+
+  defp scope_clause_bound_vars({_key, value}), do: scope_clause_bound_vars(value)
+  defp scope_clause_bound_vars(_), do: []
 
   defp children({_form, _meta, args}) when is_list(args), do: args
   defp children({left, right}), do: [left, right]

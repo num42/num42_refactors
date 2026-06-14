@@ -86,6 +86,282 @@ defmodule Number42.Refactors.Ex.HoistInvariantOutOfComprehensionTest do
     end
   end
 
+  describe "rewrites — multiple generators" do
+    test "hoists an expr invariant w.r.t. ALL generators out of a multi-gen `for`" do
+      before_source = """
+      defmodule M do
+        def run(rows, cols) do
+          for row <- rows, col <- cols do
+            format(row, col, Enum.sum([1, 2, 3]))
+          end
+        end
+      end
+      """
+
+      actual = apply_refactor(@subject, before_source)
+
+      assert {:ok, _} = Code.string_to_quoted(actual)
+      assert String.contains?(actual, "= Enum.sum([1, 2, 3])")
+      # Binding sits before the whole `for`, body references the binding.
+      assert String.match?(
+               actual,
+               ~r/=\s*Enum\.sum\(\[1, 2, 3\]\)\s*\n.*\bfor row <- rows, col <- cols/s
+             )
+
+      refute String.match?(actual, ~r/format\(row, col, Enum\.sum/)
+    end
+
+    test "hoists past a filter binding when invariant w.r.t. every binding" do
+      before_source = """
+      defmodule M do
+        def run(rows, cols) do
+          for row <- rows, n = score(row), n > 0, col <- cols do
+            format(row, col, n, Enum.sum([1, 2, 3]))
+          end
+        end
+      end
+      """
+
+      actual = apply_refactor(@subject, before_source)
+
+      assert {:ok, _} = Code.string_to_quoted(actual)
+      assert String.match?(actual, ~r/=\s*Enum\.sum\(\[1, 2, 3\]\)\s*\n.*\bfor row <- rows/s)
+    end
+
+    test "hoists when an `into:` option is present" do
+      before_source = """
+      defmodule M do
+        def run(rows, cols) do
+          for row <- rows, col <- cols, into: %{} do
+            {row, format(col, Enum.sum([1, 2, 3]))}
+          end
+        end
+      end
+      """
+
+      actual = apply_refactor(@subject, before_source)
+
+      assert {:ok, _} = Code.string_to_quoted(actual)
+      assert String.contains?(actual, "= Enum.sum([1, 2, 3])")
+      assert String.contains?(actual, "into: %{}")
+    end
+
+    test "the multi-generator output compiles" do
+      before_source = """
+      defmodule M do
+        def run(rows, cols) do
+          for row <- rows, col <- cols do
+            format(row, col, Enum.sum([1, 2, 3]))
+          end
+        end
+
+        defp format(row, col, sum), do: {row, col, sum}
+      end
+      """
+
+      actual = apply_refactor(@subject, before_source)
+
+      assert_compiles(actual)
+    end
+
+    test "multi-generator hoist is idempotent" do
+      source = """
+      defmodule M do
+        def run(rows, cols) do
+          for row <- rows, col <- cols do
+            format(row, col, Enum.sum([1, 2, 3]))
+          end
+        end
+      end
+      """
+
+      assert_idempotent(@subject, source)
+    end
+
+    test "leaves a flat multi-gen expr that depends on an earlier generator only" do
+      # `String.upcase(row)` is invariant w.r.t. the inner `col` loop but a
+      # flat `for` has no statement position between its generators to host
+      # the binding without restructuring — left in place.
+      source = """
+      defmodule M do
+        def run(rows, cols) do
+          for row <- rows, col <- cols do
+            format(col, String.upcase(row))
+          end
+        end
+      end
+      """
+
+      assert_unchanged(@subject, source)
+    end
+  end
+
+  describe "rewrites — nested comprehensions" do
+    test "lifts a fully-invariant expr all the way out of a nested `for`" do
+      before_source = """
+      defmodule M do
+        def run(rows, cols) do
+          for row <- rows do
+            for col <- cols do
+              format(row, col, Enum.sum([1, 2, 3]))
+            end
+          end
+        end
+      end
+      """
+
+      actual = apply_refactor(@subject, before_source)
+
+      assert {:ok, _} = Code.string_to_quoted(actual)
+      # Lands before the OUTER `for`, not between the two.
+      assert String.match?(
+               actual,
+               ~r/=\s*Enum\.sum\(\[1, 2, 3\]\)\s*\n.*\bfor row <- rows do.*\bfor col <- cols/s
+             )
+    end
+
+    test "lifts an outer-generator-dependent expr to before the inner `for`" do
+      before_source = """
+      defmodule M do
+        def run(rows, cols) do
+          for row <- rows do
+            for col <- cols do
+              format(col, String.upcase(row))
+            end
+          end
+        end
+      end
+      """
+
+      actual = apply_refactor(@subject, before_source)
+
+      assert {:ok, _} = Code.string_to_quoted(actual)
+      # Binding sits inside the outer body, before the inner `for`.
+      assert String.match?(
+               actual,
+               ~r/for row <- rows do\s*\n\s*upcase\s*=\s*String\.upcase\(row\)\s*\n.*\bfor col <- cols/s
+             )
+    end
+
+    test "lifts an inner-generator-dependent expr to before the deeper `for` (not past its binder)" do
+      before_source = """
+      defmodule M do
+        def run(a, b, c) do
+          for x <- a do
+            for y <- b do
+              for z <- c do
+                f(z, String.upcase(y))
+              end
+            end
+          end
+        end
+      end
+      """
+
+      actual = apply_refactor(@subject, before_source)
+
+      assert {:ok, _} = Code.string_to_quoted(actual)
+      # `y` is bound by the middle generator: the binding must sit inside
+      # that loop, before `for z`, where `y` is in scope.
+      assert String.match?(
+               actual,
+               ~r/for y <- b do\s*\n\s*upcase\s*=\s*String\.upcase\(y\)\s*\n.*\bfor z <- c/s
+             )
+    end
+
+    test "the nested-comprehension output compiles" do
+      before_source = """
+      defmodule M do
+        def run(a, b, c) do
+          for x <- a do
+            for y <- b do
+              for z <- c do
+                f(x, z, String.upcase(y))
+              end
+            end
+          end
+        end
+
+        defp f(x, z, u), do: {x, z, u}
+      end
+      """
+
+      actual = apply_refactor(@subject, before_source)
+
+      assert_compiles(actual)
+    end
+
+    test "nested hoist is idempotent" do
+      source = """
+      defmodule M do
+        def run(a, b, c) do
+          for x <- a do
+            for y <- b do
+              for z <- c do
+                f(z, String.upcase(y))
+              end
+            end
+          end
+        end
+      end
+      """
+
+      assert_idempotent(@subject, source)
+    end
+  end
+
+  describe "skip — nested-scope variables" do
+    # The candidate must not be hoisted past the binder of a variable it
+    # references — a `fn`/`with`/`case` inside the loop body introduces
+    # names visible only to that subtree.
+    test "leaves a call on a `fn` parameter inside the loop body" do
+      source = """
+      defmodule M do
+        def run(rows, list) do
+          for row <- rows do
+            Enum.map(list, fn p -> g(row, String.upcase(p)) end)
+          end
+        end
+      end
+      """
+
+      assert_unchanged(@subject, source)
+    end
+
+    test "leaves a call on a `with` binding inside the loop body" do
+      source = """
+      defmodule M do
+        def run(rows) do
+          for row <- rows do
+            with {:ok, u} <- fetch(row) do
+              g(String.upcase(u))
+            end
+          end
+        end
+      end
+      """
+
+      assert_unchanged(@subject, source)
+    end
+
+    test "leaves a call on a `case` clause binding inside the loop body" do
+      source = """
+      defmodule M do
+        def run(rows) do
+          for row <- rows do
+            case row do
+              {:a, v} -> g(String.upcase(v))
+              _ -> :skip
+            end
+          end
+        end
+      end
+      """
+
+      assert_unchanged(@subject, source)
+    end
+  end
+
   describe "rewrites — Enum.map" do
     test "hoists a loop-invariant pure call out of an `Enum.map` lambda" do
       before_source = """
