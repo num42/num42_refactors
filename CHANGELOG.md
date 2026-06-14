@@ -76,6 +76,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   target struct (else `:polymorphic_unsafe`). Calibrated against a real
   Phoenix app: doubled the lift count (3 → 6), every new lift correct and
   compiling under `--warnings-as-errors`.
+- `EnumIntoToMapSet`: rewrites `Enum.into(coll, MapSet.new())` to
+  `MapSet.new(coll)` (pipe form `coll |> Enum.into(MapSet.new())` →
+  `coll |> MapSet.new()`). Sibling of `EnumIntoToMapNew` for `MapSet`.
+  Fires only on the zero-arg `MapSet.new()` accumulator — a seeded
+  `MapSet.new(seed)` merges into an existing set and is left untouched.
 - `LiftUntypedParamToStructPattern`: lifts a bare untyped parameter to a
   struct-pattern match (`def f(r)` → `def f(%Position{} = r)`) when the
   body **proves** the type. Inference, strongest first: an existing

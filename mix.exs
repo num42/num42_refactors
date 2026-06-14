@@ -133,6 +133,7 @@ defmodule Number42.Refactors.MixProject do
           Number42.Refactors.Ex.EnumCapture,
           Number42.Refactors.Ex.EnumFindToKeyfind,
           Number42.Refactors.Ex.EnumIntoToMapNew,
+          Number42.Refactors.Ex.EnumIntoToMapSet,
           Number42.Refactors.Ex.EnumMapIntoToMapNew,
           Number42.Refactors.Ex.EnumReduceToSum,
           Number42.Refactors.Ex.EnumReverseConcat,
