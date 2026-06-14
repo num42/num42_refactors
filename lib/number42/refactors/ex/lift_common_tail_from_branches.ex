@@ -1,7 +1,7 @@
 defmodule Number42.Refactors.Ex.LiftCommonTailFromBranches do
   @moduledoc """
   Lifts the identical trailing statements shared by **every** branch of
-  a `case`/`if` out of the block, to a single run after it.
+  a `case`/`if`/`cond` out of the block, to a single run after it.
 
       case x do
         :a ->
@@ -27,9 +27,10 @@ defmodule Number42.Refactors.Ex.LiftCommonTailFromBranches do
     branch. Each branch must keep at least one statement before it — a
     branch that is *exactly* the tail can't be emptied.
   - **Every branch is explicit.** A non-exhaustive `case` (no catch-all
-    clause) and an `if` without `else` both carry an *implicit* branch
-    that does not run the tail. Lifting would make the tail run for
-    inputs that previously skipped it. Such blocks are skipped.
+    clause), an `if` without `else`, and a `cond` without a literal
+    `true ->` final arm all carry an *implicit* branch that does not run
+    the tail. Lifting would make the tail run for inputs that previously
+    skipped it. Such blocks are skipped.
   - **The tail is branch-independent.** A tail statement may not read any
     variable bound inside a branch — neither by the branch pattern nor by
     a pre-tail statement. Otherwise the lifted tail would reference an
@@ -51,16 +52,16 @@ defmodule Number42.Refactors.Ex.LiftCommonTailFromBranches do
   alias Sourceror.Patch
 
   @impl Number42.Refactors.Refactor
-  def description, do: "Lift identical trailing statements out of all case/if branches"
+  def description, do: "Lift identical trailing statements out of all case/if/cond branches"
 
   @impl Number42.Refactors.Refactor
   def explanation do
     """
-    When every branch of a `case`/`if` ends in the same statements, that
-    tail is duplicated work the reader has to diff-match by eye. When all
-    branches are explicit, the tail is branch-independent, and the block
-    value isn't consumed, the tail can run once after the block instead —
-    shorter branches, the shared epilogue stated exactly once.
+    When every branch of a `case`/`if`/`cond` ends in the same statements,
+    that tail is duplicated work the reader has to diff-match by eye. When
+    all branches are explicit, the tail is branch-independent, and the
+    block value isn't consumed, the tail can run once after the block
+    instead — shorter branches, the shared epilogue stated exactly once.
     """
   end
 
@@ -86,7 +87,7 @@ defmodule Number42.Refactors.Ex.LiftCommonTailFromBranches do
     |> Enum.find_value([], fn node -> maybe_patch(node, consumed, source) end)
   end
 
-  defp maybe_patch({form, _, _} = node, consumed, source) when form in [:case, :if] do
+  defp maybe_patch({form, _, _} = node, consumed, source) when form in [:case, :if, :cond] do
     with false <- MapSet.member?(consumed, strip_meta(node)),
          {:ok, branches} <- branches(node),
          {:ok, tail_len} <- common_tail_length(branches),
@@ -125,6 +126,16 @@ defmodule Number42.Refactors.Ex.LiftCommonTailFromBranches do
     end
   end
 
+  defp branches({:cond, _, [[{_do_key, clauses}]]}) do
+    with true <- is_list(clauses),
+         true <- Enum.all?(clauses, &match?({:->, _, [[_condition], _body]}, &1)),
+         true <- cond_exhaustive?(clauses) do
+      {:ok, Enum.map(clauses, &clause_stmts/1)}
+    else
+      _ -> :skip
+    end
+  end
+
   # Any other shape (e.g. a bare `do:`-keyword `case` parsed as
   # `{:case, _, [scrutinee]}`) has no `do/end` block to lift a tail
   # behind — skip.
@@ -143,6 +154,20 @@ defmodule Number42.Refactors.Ex.LiftCommonTailFromBranches do
 
   defp catch_all_pattern?({name, _, ctx}) when is_atom(name) and is_atom(ctx), do: true
   defp catch_all_pattern?(_), do: false
+
+  # A cond is exhaustive iff its last arm tests a literal `true`. Without
+  # it, no arm may match and the cond raises — an implicit branch that
+  # wouldn't run the tail.
+  defp cond_exhaustive?(clauses) do
+    case List.last(clauses) do
+      {:->, _, [[condition], _body]} -> literal_true?(condition)
+      _ -> false
+    end
+  end
+
+  defp literal_true?(true), do: true
+  defp literal_true?({:__block__, _, [true]}), do: true
+  defp literal_true?(_), do: false
 
   defp fetch_block(kw, key) when is_list(kw) do
     kw
@@ -215,6 +240,7 @@ defmodule Number42.Refactors.Ex.LiftCommonTailFromBranches do
   end
 
   defp pattern_binds({:if, _, _}), do: MapSet.new()
+  defp pattern_binds({:cond, _, _}), do: MapSet.new()
 
   # --- patch construction ---
 
@@ -237,6 +263,11 @@ defmodule Number42.Refactors.Ex.LiftCommonTailFromBranches do
   defp render_block_without_tail({:case, meta, [scrutinee, kw]}, tail_len) do
     clauses = strip_tail_from_clauses(fetch_block!(kw, :do), tail_len)
     {:ok, Sourceror.to_string({:case, meta, [scrutinee, put_block(kw, :do, clauses)]})}
+  end
+
+  defp render_block_without_tail({:cond, meta, [[{do_key, clauses}]]}, tail_len) do
+    new_clauses = strip_tail_from_clauses(clauses, tail_len)
+    {:ok, Sourceror.to_string({:cond, meta, [[{do_key, new_clauses}]]})}
   end
 
   defp render_block_without_tail({:if, meta, [cond_ast, kw]}, tail_len) do
@@ -308,7 +339,9 @@ defmodule Number42.Refactors.Ex.LiftCommonTailFromBranches do
     |> MapSet.new()
   end
 
-  defp control_flow_in({form, _, _} = node) when form in [:case, :if], do: [strip_meta(node)]
+  defp control_flow_in({form, _, _} = node) when form in [:case, :if, :cond],
+    do: [strip_meta(node)]
+
   defp control_flow_in(_), do: []
 
   defp strip_meta(ast) do

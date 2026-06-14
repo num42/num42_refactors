@@ -156,6 +156,119 @@ defmodule Number42.Refactors.Ex.LiftCommonTailFromBranchesTest do
     end
   end
 
+  describe "cond lifts" do
+    test "cond with a true catch-all and identical tail in every arm lifts the tail" do
+      before_source = """
+      defmodule M do
+        def f(x) do
+          cond do
+            x > 0 ->
+              do_a()
+              log(:done)
+
+            x < 0 ->
+              do_b()
+              log(:done)
+
+            true ->
+              do_c()
+              log(:done)
+          end
+        end
+      end
+      """
+
+      expected = """
+      defmodule M do
+        def f(x) do
+          cond do
+            x > 0 ->
+              do_a()
+
+            x < 0 ->
+              do_b()
+
+            true ->
+              do_c()
+          end
+
+          log(:done)
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, expected)
+    end
+
+    test "multi-statement common tail lifts as a run from a cond" do
+      before_source = """
+      defmodule M do
+        def f(x) do
+          cond do
+            x > 0 ->
+              do_a()
+              cleanup()
+              log(:done)
+
+            true ->
+              do_b()
+              cleanup()
+              log(:done)
+          end
+        end
+      end
+      """
+
+      expected = """
+      defmodule M do
+        def f(x) do
+          cond do
+            x > 0 ->
+              do_a()
+
+            true ->
+              do_b()
+          end
+
+          cleanup()
+          log(:done)
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, expected)
+    end
+
+    test "lifted cond output compiles" do
+      before_source = """
+      defmodule M do
+        def f(x) do
+          cond do
+            x > 0 ->
+              step_a(x)
+              finalize()
+
+            true ->
+              step_b(x)
+              finalize()
+          end
+        end
+
+        defp step_a(x), do: x + 1
+        defp step_b(x), do: x - 1
+        defp finalize, do: :ok
+      end
+      """
+
+      lifted = apply_refactor(@subject, before_source)
+
+      refute lifted == before_source,
+             "expected the cond tail to be lifted, got unchanged source"
+
+      assert_compiles(lifted)
+    end
+  end
+
   describe "idempotent" do
     test "case lift runs once" do
       source = """
@@ -205,6 +318,26 @@ defmodule Number42.Refactors.Ex.LiftCommonTailFromBranchesTest do
           end
 
           log(:done)
+        end
+      end
+      """
+
+      assert_idempotent(@subject, source)
+    end
+
+    test "cond lift runs once" do
+      source = """
+      defmodule M do
+        def f(x) do
+          cond do
+            x > 0 ->
+              do_a()
+              log(:done)
+
+            true ->
+              do_b()
+              log(:done)
+          end
         end
       end
       """
@@ -394,6 +527,107 @@ defmodule Number42.Refactors.Ex.LiftCommonTailFromBranchesTest do
             log(:done)
           else
             do_b()
+          end
+        end
+      end
+      """
+
+      assert_unchanged(@subject, source)
+    end
+
+    test "non-exhaustive cond (no true catch-all) is skipped" do
+      source = """
+      defmodule M do
+        def f(x) do
+          cond do
+            x > 0 ->
+              do_a()
+              log(:done)
+
+            x < 0 ->
+              do_b()
+              log(:done)
+          end
+        end
+      end
+      """
+
+      assert_unchanged(@subject, source)
+    end
+
+    test "cond where only some arms share the tail is skipped" do
+      source = """
+      defmodule M do
+        def f(x) do
+          cond do
+            x > 0 ->
+              do_a()
+              log(:done)
+
+            true ->
+              do_b()
+          end
+        end
+      end
+      """
+
+      assert_unchanged(@subject, source)
+    end
+
+    test "cond tail depends on an arm-local binding is skipped" do
+      source = """
+      defmodule M do
+        def f(x) do
+          cond do
+            x > 0 ->
+              v = do_a()
+              log(v)
+
+            true ->
+              v = do_b()
+              log(v)
+          end
+        end
+      end
+      """
+
+      assert_unchanged(@subject, source)
+    end
+
+    test "cond value is consumed by an assignment is skipped" do
+      source = """
+      defmodule M do
+        def f(x) do
+          y =
+            cond do
+              x > 0 ->
+                do_a()
+                log(:done)
+
+              true ->
+                do_b()
+                log(:done)
+            end
+
+          y
+        end
+      end
+      """
+
+      assert_unchanged(@subject, source)
+    end
+
+    test "a cond arm is exactly the common tail (would leave it empty) is skipped" do
+      source = """
+      defmodule M do
+        def f(x) do
+          cond do
+            x > 0 ->
+              log(:done)
+
+            true ->
+              do_b()
+              log(:done)
           end
         end
       end
