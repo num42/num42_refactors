@@ -178,6 +178,12 @@ nested conditionals.
 > `when`-guarded clauses. A no-pattern-synthesis subset of
 > `IfLiftToClauses`.
 
+### `Number42.Refactors.Ex.CollapseRichCaseToWithElse`
+
+> Collapse a nested `case` with non-trivial error arms into a
+> `with`/`else` — routing every level's error arm through one `else`
+> block.
+
 ### `Number42.Refactors.Ex.IfLiftToClauses`
 
 > Lift `def f(p) do if ... else ... end end` to pattern-matched
