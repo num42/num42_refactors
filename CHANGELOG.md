@@ -34,6 +34,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- InlineDefdelegate (#225): the inverse of the move-method delegations —
+  rewrites every in-corpus call site of a `defdelegate`'d function to call
+  the delegated target directly (alias-aware: short form when the caller
+  aliases the target, fully-qualified otherwise, never injecting an
+  alias), supporting 1:1 and `as:`-rename forms. Removes the
+  `defdelegate` only when its module is not a public API boundary (a
+  conservative depth heuristic; contexts/facades are always kept) and no
+  caller survives the rewrite. Skips multi-form keyword-list delegates,
+  unresolvable targets, and any delegate that is dynamically dispatched
+  (`apply/3` or `&name/arity` capture). **Default-OFF** (`enabled: true`
+  to opt in) since it both rewrites across files and deletes definitions.
 - `ExtractPrimitiveToStruct` (#118): detects a recurring primitive shape
   — the same bare tuple or bare map threaded through many function heads
   — and extracts it into a named struct, rewriting the heads and the
