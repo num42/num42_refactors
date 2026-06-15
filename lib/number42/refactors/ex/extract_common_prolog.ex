@@ -96,6 +96,34 @@ defmodule Number42.Refactors.Ex.ExtractCommonProlog do
   statement is duplicated. So the observable order of side effects per
   call site is preserved.
 
+  ## Near matches — one boundary extra getter
+
+  The prologs need not be byte-identical. Exactly **one** clause may
+  carry a single extra binding statement at the prolog boundary (right
+  after the shared run) — typically a getter the other clauses don't
+  need. That extra is pulled into the helper too, and threaded back
+  through its own return slot:
+
+  - A **pure read** — a `param.field.field` chain (`socket.assigns.x`)
+    or any `pure?/1`-true RHS (`Map.get`, arithmetic) — stays **eager**:
+    it runs in the helper and is returned by value, exactly like a
+    normal live binding. The non-needing clauses underscore the slot.
+  - A **side-effect-possible getter** (`Repo.get`, a local `get_user/1`)
+    is **lazy**: the helper returns a thunk (`fn -> … end`) in a
+    `*_fun` slot. The needing clause forces it (`x = x_fun.()`); the
+    others underscore the slot and never run it. Laziness here is a
+    correctness requirement, not an optimisation — running the getter
+    eagerly in the helper would execute it for clauses that don't need
+    it (an extra query, a possible crash).
+
+  The near match qualifies only when the extra is **safely deferrable**:
+  it sits at the boundary, its binding is read solely in the bearer's
+  own tail (no shared follow-up consumes it), it reads only helper
+  params or shared-prolog bindings, and there is exactly one bearer. If
+  any of these fail, the near-match layer declines and the exact-match
+  path runs unchanged — never a relaxation of the exact-match guards,
+  always an extra qualification on top of them.
+
   ## Helper placement & clause families
 
   The helper is emitted after the rewritten group. When the group is a
@@ -112,7 +140,11 @@ defmodule Number42.Refactors.Ex.ExtractCommonProlog do
   One eligible group is rewritten per pass (the first found, in source
   order). After the rewrite each former call site opens with a helper
   call, not the shared statements, so a second pass finds no shared
-  prolog to lift — the rewrite is idempotent.
+  prolog to lift — the rewrite is idempotent. A near-match rewrite is
+  idempotent for the same reason: the bearer opens with the helper call
+  (and, for a lazy extra, a `x = x_fun.()` force) while the others open
+  with a differently-shaped destructure, so no shared first statement
+  remains to re-detect.
   """
 
   use Number42.Refactors.Refactor
@@ -234,17 +266,143 @@ defmodule Number42.Refactors.Ex.ExtractCommonProlog do
          :ok <- ensure_no_control_flow(group, prolog_len),
          :ok <- ensure_divergent_tail(group, prolog_len),
          {:ok, params} <- helper_params(group, prolog_len),
-         {:ok, live} <- live_bindings(group, prolog_len),
+         extra = detect_boundary_extra(group, prolog_len, params),
+         {:ok, live} <- live_bindings(group, prolog_len, extra),
          {:ok, helper_name} <- helper_name(group, existing) do
       {:ok,
        %{
          prolog_len: prolog_len,
          params: params,
          live: live,
+         extra: extra,
          helper_name: helper_name
        }}
     end
   end
+
+  # --- near-match: a single boundary extra getter ---
+  #
+  # Beyond the shared prolog, exactly one clause may carry ONE extra
+  # binding statement at the prolog boundary (index `prolog_len`). That
+  # extra is pulled into the helper too: a pure read stays eager in the
+  # return tuple; a side-effect-possible getter is deferred behind a
+  # thunk so the non-bearing clauses never run it.
+  #
+  # Returns the extra descriptor map, or `nil` when no qualifying single
+  # boundary extra exists — in which case the exact-match path runs
+  # unchanged. The descriptor:
+  #
+  #   %{bearer: def, var: atom, rhs: ast, slot: atom, mode: :eager | :lazy}
+  #
+  # `slot` is the tuple position name: for `:eager` it is `var` itself
+  # (the value is returned directly); for `:lazy` it is `:"#{var}_fun"`
+  # (a thunk the bearer forces). Qualification (all must hold):
+  #
+  #   * exactly one clause has a statement at `prolog_len`; every other
+  #     clause's tail begins there (its statement at `prolog_len` is the
+  #     first of its divergent tail, never a second extra). "Exactly one
+  #     bearer" — two clauses with extras disqualifies.
+  #   * the extra is a binding `var = rhs` (a bare side-effecting call
+  #     with no binding has nothing to thread back → disqualifies).
+  #   * `var` is read only in the bearer's own tail, not by any shared
+  #     follow-up the other clauses also run (deferrable to one clause).
+  #   * every var `rhs` reads is a helper param or bound by the shared
+  #     prolog (so the helper can evaluate it at call time).
+  #   * `rhs` is either a pure field-access chain over a helper param
+  #     (eager) or `pure?/1`-true (eager) or otherwise side-effect
+  #     possible (lazy thunk). Anything that can't be classified — e.g.
+  #     control flow — disqualifies.
+  defp detect_boundary_extra(group, prolog_len, params) do
+    available = MapSet.union(MapSet.new(params), prolog_binds(hd(group), prolog_len))
+
+    case Enum.filter(group, &qualifying_bearer?(&1, group, prolog_len, available)) do
+      [bearer] -> build_extra(bearer, prolog_len, params)
+      _ -> nil
+    end
+  end
+
+  # Whether `def` is a viable single-extra bearer: its statement at the
+  # boundary is a binding `var = rhs` where `rhs` reads only available
+  # names (params + shared-prolog bindings), and `var` is read in this
+  # clause's own tail but nowhere else (not by any sibling's tail, not by
+  # the shared prolog). "Read only here" is what makes the value safe to
+  # defer to this one clause. Two qualifying clauses ⇒ caller declines.
+  defp qualifying_bearer?(def, group, prolog_len, available) do
+    with {:=, _, [lhs, rhs]} <- Enum.at(def.stmts, prolog_len),
+         {:ok, var} <- bare_var(lhs),
+         true <- MapSet.subset?(used_var_names(rhs), available) do
+      var_read_only_in?(group, def, prolog_len, var)
+    else
+      _ -> false
+    end
+  end
+
+  defp build_extra(bearer, prolog_len, params) do
+    {:=, _, [lhs, rhs]} = Enum.at(bearer.stmts, prolog_len)
+    {:ok, var} = bare_var(lhs)
+
+    case classify_extra_rhs(rhs, MapSet.new(params)) do
+      {:ok, mode} ->
+        %{bearer: bearer, var: var, rhs: rhs, slot: slot_name(var, mode), mode: mode}
+
+      :skip ->
+        nil
+    end
+  end
+
+  # `var` (bound by the bearer's boundary extra) must be read in the
+  # bearer's OWN tail and nowhere else: not by any sibling clause (which
+  # never even runs the extra) and not by the shared prolog (which runs
+  # for everyone). That read-locality is what lets the value be deferred
+  # to this single clause.
+  defp var_read_only_in?(group, bearer, prolog_len, var) do
+    read_in_bearer_tail? = bearer.stmts |> Enum.drop(prolog_len + 1) |> free_reads(var)
+
+    read_elsewhere? =
+      Enum.any?(group, fn
+        ^bearer -> false
+        %{stmts: stmts} -> stmts |> Enum.drop(prolog_len) |> free_reads(var)
+      end)
+
+    read_in_bearer_tail? and not read_elsewhere?
+  end
+
+  defp free_reads(stmts, var),
+    do: var in free_vars_in_order(stmts, MapSet.new([var]))
+
+  # Eager when `rhs` is a pure field-access chain rooted in a helper
+  # param (`socket.assigns.current_user`) — `pure?/1` rejects the dotted
+  # chain because its root is a dot-call, not an `__aliases__` — or when
+  # `pure?/1` itself accepts it (`Map.get`, arithmetic). Otherwise the
+  # call may have a side effect (`Repo.get`, a local getter) and is
+  # deferred as a lazy thunk. Control flow never reaches here (the shared
+  # prolog already bans it and the extra is a single binding RHS), but a
+  # belt-and-braces guard keeps `fn`/`case`/… out of the helper.
+  defp classify_extra_rhs(rhs, param_set) do
+    cond do
+      has_control_flow?(rhs) -> :skip
+      field_access_over_param?(rhs, param_set) -> {:ok, :eager}
+      pure?(rhs) -> {:ok, :eager}
+      true -> {:ok, :lazy}
+    end
+  end
+
+  # A nullary dotted field-access chain (`a.b.c`) whose root identifier
+  # is a helper param. These are pure reads `pure?/1` can't see as pure
+  # (the chain's root is a `{:., …}` dot-call, so `alias_to_module`
+  # returns `:error`). Local: only this refactor needs the predicate.
+  defp field_access_over_param?({{:., _, [inner, field]}, _, []}, param_set)
+       when is_atom(field),
+       do: field_access_over_param?(inner, param_set)
+
+  defp field_access_over_param?({name, _, ctx}, param_set)
+       when is_atom(name) and is_atom(ctx),
+       do: MapSet.member?(param_set, name)
+
+  defp field_access_over_param?(_, _), do: false
+
+  defp slot_name(var, :eager), do: var
+  defp slot_name(var, :lazy), do: :"#{var}_fun"
 
   # Longest leading run of AST-identical (metadata-stripped) statements
   # across every def in the group.
@@ -311,14 +469,17 @@ defmodule Number42.Refactors.Ex.ExtractCommonProlog do
 
   # Prolog-bound names still read in some def's tail. Flow-sensitive so a
   # self-rebind (`socket = assign(socket, …)`) followed by a later read
-  # keeps the name live.
-  defp live_bindings(group, prolog_len) do
+  # keeps the name live. The bearer of a near-match extra has that extra
+  # statement at index `prolog_len`; its real tail begins one statement
+  # later, so we drop the extra before scanning for reads (its own binding
+  # is threaded back through the extra slot, not the live tuple).
+  defp live_bindings(group, prolog_len, extra) do
     bound = group |> hd() |> prolog_binds(prolog_len)
 
     read_after =
       group
-      |> Enum.flat_map(fn %{stmts: stmts} ->
-        stmts |> Enum.drop(prolog_len) |> free_vars_in_order(bound)
+      |> Enum.flat_map(fn def ->
+        def |> def_tail(prolog_len, extra) |> free_vars_in_order(bound)
       end)
       |> MapSet.new()
 
@@ -327,6 +488,14 @@ defmodule Number42.Refactors.Ex.ExtractCommonProlog do
       live -> {:ok, live}
     end
   end
+
+  # The statements of `def` after the shared prolog — and, for the bearer
+  # of a near-match extra, after the extra too. Non-bearers and the
+  # exact-match path drop only the shared prolog.
+  defp def_tail(%{stmts: stmts} = def, prolog_len, %{bearer: bearer}) when def == bearer,
+    do: Enum.drop(stmts, prolog_len + 1)
+
+  defp def_tail(%{stmts: stmts}, prolog_len, _extra), do: Enum.drop(stmts, prolog_len)
 
   defp prolog_binds(%{stmts: stmts}, prolog_len) do
     stmts
@@ -427,56 +596,109 @@ defmodule Number42.Refactors.Ex.ExtractCommonProlog do
   defp same_signature?(%{name: name, arity: arity}, name, arity), do: true
   defp same_signature?(_, _, _), do: false
 
-  defp render_call_site(%{kind: kind, head: head, stmts: stmts}, plan) do
-    tail_stmts = Enum.drop(stmts, plan.prolog_len)
-    binding = render_destructure(plan, read_live_vars(tail_stmts, plan.live))
+  defp render_call_site(%{kind: kind, head: head} = def, plan) do
+    tail_stmts = def_tail(def, plan.prolog_len, plan.extra)
+    binding = render_destructure(plan, read_slots(def, tail_stmts, plan))
     call = "#{plan.helper_name}(#{Enum.map_join(plan.params, ", ", &Atom.to_string/1)})"
+    force = render_force(def, plan)
     tail = Enum.map_join(tail_stmts, "\n", &Sourceror.to_string/1)
 
     "  #{kind} #{Sourceror.to_string(head)} do\n" <>
-      indent("#{binding} = #{call}\n#{tail}") <>
+      indent("#{binding} = #{call}\n#{force}#{tail}") <>
       "\n  end"
   end
 
-  # The live vars this site actually reads in its own tail. The helper
-  # returns the full live tuple (monomorphic), but a site that never
-  # reads a returned position would bind it unused — rejected under
-  # `--warnings-as-errors`. We underscore exactly those positions here.
-  defp read_live_vars(tail_stmts, live) do
-    free_vars_in_order(tail_stmts, MapSet.new(live)) |> MapSet.new()
+  # The bearer of a lazy extra forces its thunk right after the helper
+  # call (`var = var_fun.()`); every other site, and the eager/exact-match
+  # paths, emit nothing here.
+  defp render_force(def, %{extra: %{mode: :lazy, bearer: bearer, var: var, slot: slot}})
+       when def == bearer,
+       do: "#{var} = #{slot}.()\n"
+
+  defp render_force(_def, _plan), do: ""
+
+  # The return-tuple slots this site reads, so the others can be
+  # underscored (an unread bound position is rejected under
+  # `--warnings-as-errors`). Live bindings and an eager extra are read
+  # when free in the tail. A lazy thunk slot is "read" only by the bearer
+  # (it forces it); every other site underscores the slot.
+  defp read_slots(def, tail_stmts, plan) do
+    live_read = free_vars_in_order(tail_stmts, MapSet.new(plan.live)) |> MapSet.new()
+    add_extra_read(live_read, def, tail_stmts, plan.extra)
   end
+
+  defp add_extra_read(read, _def, tail_stmts, %{mode: :eager, var: var}) do
+    if var in free_vars_in_order(tail_stmts, MapSet.new([var])),
+      do: MapSet.put(read, var),
+      else: read
+  end
+
+  defp add_extra_read(read, def, _tail_stmts, %{mode: :lazy, bearer: bearer, slot: slot})
+       when def == bearer,
+       do: MapSet.put(read, slot)
+
+  defp add_extra_read(read, _def, _tail_stmts, _extra), do: read
 
   defp render_helper(group, plan) do
     [first | _] = group
 
-    prolog =
-      first.stmts |> Enum.take(plan.prolog_len) |> Enum.map_join("\n", &Sourceror.to_string/1)
+    body =
+      first.stmts
+      |> Enum.take(plan.prolog_len)
+      |> append_eager_extra(plan.extra)
+      |> Enum.map_join("\n", &Sourceror.to_string/1)
 
     ret = render_return(plan)
     params = Enum.map_join(plan.params, ", ", &Atom.to_string/1)
 
     "  defp #{plan.helper_name}(#{params}) do\n" <>
-      indent("#{prolog}\n#{ret}") <>
+      indent("#{body}\n#{ret}") <>
       "\n  end"
   end
 
-  # Pattern for one call site. Positions keep `plan.live` order (the
+  # An eager extra runs verbatim inside the helper (its value is returned
+  # directly). A lazy extra is NOT a helper statement — it is captured by
+  # the returned thunk — so the body stays the shared prolog only.
+  defp append_eager_extra(prolog, %{mode: :eager, bearer: bearer}),
+    do: prolog ++ [Enum.at(bearer.stmts, length(prolog))]
+
+  defp append_eager_extra(prolog, _extra), do: prolog
+
+  # Pattern for one call site. Positions follow the slot order (the
   # helper's returned tuple shape, identical everywhere); a position this
   # site does not read is underscored so it isn't bound unused.
-  defp render_destructure(%{live: [one]}, read) do
-    bind_name(one, read)
-  end
-
-  defp render_destructure(%{live: many}, read) do
-    "{#{Enum.map_join(many, ", ", &bind_name(&1, read))}}"
+  defp render_destructure(plan, read) do
+    case return_slots(plan) do
+      [one] -> bind_name(one, read)
+      many -> "{#{Enum.map_join(many, ", ", &bind_name(&1, read))}}"
+    end
   end
 
   defp bind_name(var, read) do
     if MapSet.member?(read, var), do: Atom.to_string(var), else: "_#{var}"
   end
 
-  defp render_return(%{live: [one]}), do: Atom.to_string(one)
-  defp render_return(%{live: many}), do: "{#{Enum.map_join(many, ", ", &Atom.to_string/1)}}"
+  defp render_return(plan) do
+    case return_slots(plan) do
+      [one] -> render_slot(one, plan)
+      many -> "{#{Enum.map_join(many, ", ", &render_slot(&1, plan))}}"
+    end
+  end
+
+  # A live binding (or eager extra var) is returned by name; the lazy slot
+  # is returned as a thunk over the extra's RHS.
+  defp render_slot(slot, %{extra: %{mode: :lazy, slot: slot, rhs: rhs}}),
+    do: "fn -> #{Sourceror.to_string(rhs)} end"
+
+  defp render_slot(slot, _plan), do: Atom.to_string(slot)
+
+  # The helper's returned tuple shape: live bindings plus, for a near
+  # match, the extra's slot (the eager var, or the lazy `*_fun` thunk
+  # name). Sorted for a deterministic, monomorphic shape across sites.
+  defp return_slots(%{live: live, extra: nil}), do: live
+
+  defp return_slots(%{live: live, extra: %{slot: slot}}),
+    do: [slot | live] |> Enum.uniq() |> Enum.sort()
 
   # --- helpers ---
 
