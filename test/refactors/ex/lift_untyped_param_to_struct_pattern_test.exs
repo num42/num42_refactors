@@ -190,13 +190,14 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPatternTest do
       refute Map.has_key?(p.receivers, {P, :f, 1})
     end
 
-    test "a private field-only lift does not leak to a PUBLIC def via delegation (#222)" do
-      # position-db dogfood regression: a PRIVATE `defp` is field-superset
-      # narrowed (allowed — its callers are all in-corpus), but a PUBLIC
-      # def that delegates the whole var to it must NOT inherit the struct
-      # type across the open public boundary. The private narrowing is
-      # field-origin (duck-typed), so an out-of-corpus caller of the public
-      # wrapper could still pass a bare map.
+    test "a private field-only lift does not leak to a PUBLIC def via delegation (#234)" do
+      # position-db dogfood regression (#234): a PUBLIC def delegating the
+      # whole var into a PRIVATE field-narrowed helper forwards its argument
+      # UNCHANGED. Narrowing the private helper to `%Position{}` would break
+      # the public wrapper's open contract at runtime — an out-of-corpus
+      # caller passing a bare map crashes inside the helper (FunctionClause).
+      # So the private helper must NOT be field-narrowed when a public def
+      # delegates into it, and the public wrapper stays bare too.
       modules = [
         {"M",
          "  def public_wrapper(attr), do: build(attr)\n" <>
@@ -204,11 +205,76 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPatternTest do
       ]
 
       p = plan(modules)
-      # the private helper still narrows on field-superset
-      assert %{struct: Position, via: :fields} = lift(p, :build)
-      # but the public wrapper must NOT be narrowed — the field origin must
-      # not propagate across the public boundary through delegation
+      # the private helper must NOT narrow — a public def forwards a bare map
+      # straight into it (#234)
+      assert %{reason: :public_field_delegation_target} = declined(p, :build)
+      # and the public wrapper itself stays bare (no struct type to borrow)
       assert %{reason: reason} = declined(p, :public_wrapper)
+      assert reason in [:public_field_delegation, :param_passed_to_call]
+    end
+
+    test "a public def delegating via do:-shorthand does not narrow its private helper (#234)" do
+      # The exact position-db shape: a one-line `def f(x), do: g(x)` public
+      # wrapper forwarding into a private `.field`-bodied helper. The
+      # shorthand form must be treated the same as the block form — the
+      # private helper stays bare.
+      modules = [
+        {"M",
+         "  def build_for_test(attr), do: build(attr)\n" <>
+           "  defp build(a), do: {a.parent_id, a.depth}\n"}
+      ]
+
+      p = plan(modules)
+      assert %{reason: :public_field_delegation_target} = declined(p, :build)
+      refute lift(p, :build)
+    end
+
+    test "a public def delegating via block form does not narrow its private helper (#234)" do
+      modules = [
+        {"M",
+         "  def build_for_test(attr) do\n    build(attr)\n  end\n" <>
+           "  defp build(a) do\n    {a.parent_id, a.depth}\n  end\n"}
+      ]
+
+      p = plan(modules)
+      assert %{reason: :public_field_delegation_target} = declined(p, :build)
+      refute lift(p, :build)
+    end
+
+    test "the for_test-wrapper -> private-helper leak is closed end-to-end (#234)" do
+      # full rewrite path: the rendered source must keep the private helper
+      # bare so the public wrapper can still forward a bare map into it.
+      src =
+        "defmodule M do\n" <>
+          "  def build_for_test(attr), do: build(attr)\n\n" <>
+          "  defp build(a), do: {a.parent_id, a.depth}\n" <>
+          "end\n"
+
+      assert_unchanged(Subject, src,
+        prepared:
+          plan([
+            {"M",
+             "  def build_for_test(attr), do: build(attr)\n" <>
+               "  defp build(a), do: {a.parent_id, a.depth}\n"}
+          ])
+      )
+    end
+
+    test "a private helper reached by a public def THROUGH a private hop stays bare (#234)" do
+      # wrapper2 (public) -> wrapper1 (private) -> build (private, .field).
+      # A bare map from an out-of-corpus caller of wrapper2 flows through
+      # wrapper1 unchanged into build. So build (and wrapper1) must stay bare.
+      modules = [
+        {"M",
+         "  def wrapper2(attr), do: wrapper1(attr)\n" <>
+           "  defp wrapper1(attr), do: build(attr)\n" <>
+           "  defp build(a), do: {a.parent_id, a.depth}\n"}
+      ]
+
+      p = plan(modules)
+      assert %{reason: :public_field_delegation_target} = declined(p, :build)
+      refute lift(p, :wrapper1)
+      assert %{reason: reason} = declined(p, :wrapper2)
       assert reason in [:public_field_delegation, :param_passed_to_call]
     end
 
@@ -229,10 +295,12 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPatternTest do
       assert %{struct: Position, via: :delegation_field} = lift(p, :wrapper)
     end
 
-    test "the field origin propagates transitively: defp -> defp -> PUBLIC def is caught" do
+    test "the public-delegation poison propagates transitively: PUBLIC -> defp -> defp (#234)" do
       # wrapper2 (public) delegates to wrapper1 (private) which delegates to
-      # build (private, field-narrowed). The field origin must survive both
-      # hops and still block the public boundary.
+      # build (private, .field). A bare map from an out-of-corpus caller of
+      # wrapper2 flows through both private hops unchanged into build, so the
+      # whole chain must stay bare — narrowing build (or wrapper1) would crash
+      # the public wrapper at runtime.
       modules = [
         {"M",
          "  def wrapper2(attr), do: wrapper1(attr)\n" <>
@@ -241,9 +309,39 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPatternTest do
       ]
 
       p = plan(modules)
+      assert %{reason: :public_field_delegation_target} = declined(p, :build)
+      refute lift(p, :wrapper1)
+      assert %{reason: reason} = declined(p, :wrapper2)
+      assert reason in [:public_field_delegation, :param_passed_to_call]
+    end
+
+    test "a @spec-proven public wrapper does NOT poison its private helper (#234)" do
+      # the open-boundary risk is the public param being a bare map. When the
+      # public param is statically proven a struct by @spec, what it forwards
+      # is proven too — the private helper may still narrow.
+      modules = [
+        {"M",
+         "  @spec pub(Position.t()) :: any()\n" <>
+           "  def pub(p), do: build(p)\n" <>
+           "  defp build(a), do: {a.parent_id, a.depth}\n"}
+      ]
+
+      p = plan(modules)
       assert %{struct: Position, via: :fields} = lift(p, :build)
-      assert %{struct: Position, via: :delegation_field} = lift(p, :wrapper1)
-      assert %{reason: :public_field_delegation} = declined(p, :wrapper2)
+      assert %{struct: Position, via: :spec} = lift(p, :pub)
+    end
+
+    test "a %Struct{}-headed public wrapper does NOT poison its private helper (#234)" do
+      # an explicit head pattern also proves the public param; the helper it
+      # forwards into may narrow (here the proven head even feeds the
+      # call-site source, so `build` lifts by proof rather than fields).
+      modules = [
+        {"M",
+         "  def pub(%Position{} = p), do: build(p)\n" <>
+           "  defp build(a), do: {a.parent_id, a.depth}\n"}
+      ]
+
+      assert %{struct: Position} = lift(plan(modules), :build)
     end
   end
 

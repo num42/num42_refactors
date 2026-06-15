@@ -71,6 +71,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `LiftUntypedParamToStructPattern` (#234): a field-superset narrowing of a
+  private helper no longer leaks to a public `def` that forwards a whole,
+  open param into it through delegation — including the one-line
+  `def f(x), do: g(x)` shorthand form, not just the block form. A
+  public-delegation poison set transitively marks every receiver position an
+  open public param flows into; narrowing any poisoned position is declined,
+  since an out-of-corpus caller can pass a bare map that flows unchanged into
+  the narrowed head and crashes. Positions a public head statically proves to
+  be a struct (`@spec`/`%Mod{}` pattern) are exempt. Closes a residual gap
+  from the #222/#231 delegation work surfaced by the position-db dogfood
+  (`build_attr_constraints_for_test/1` → `defp build_attr_constraints/1`).
 - `DelegateExactDuplicates` (#226): made idempotent at the destination
   module. The refactor no longer re-inserts a `defdelegate name(args), to:
   T` when the module already carries an AST-identical delegation (same
