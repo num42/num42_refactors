@@ -250,6 +250,7 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPattern do
           call_sites: Map.get(plan, :call_sites, %{}),
           dialyzer: Map.get(plan, :dialyzer, %{}),
           receivers: Map.get(plan, :receivers, %{}),
+          field_origins: Map.get(plan, :field_origins, MapSet.new()),
           min_fields: Map.get(plan, :min_fields, @default_min_fields)
         }
 
@@ -300,13 +301,15 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPattern do
       min_fields: min_fields
     }
 
-    {lifts, declined, receivers} = resolve_to_fixpoint(clauses, base_ctx, seed_receivers)
+    {lifts, declined, receivers, field_origins} =
+      resolve_to_fixpoint(clauses, base_ctx, seed_receivers)
 
     %{
       structs: structs,
       call_sites: call_sites,
       dialyzer: dialyzer,
       receivers: receivers,
+      field_origins: field_origins,
       min_fields: min_fields,
       lifts: lifts,
       declined: declined
@@ -944,17 +947,45 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPattern do
   # a round-count cap is a belt-and-braces guard against any non-monotone
   # surprise. Returns the final lifts/declines plus the enriched receiver
   # index (so the rewrite phase patches consistently with the last round).
-  defp resolve_to_fixpoint(clauses, base_ctx, receivers, round \\ 0) do
-    ctx = Map.put(base_ctx, :receivers, receivers)
+  defp resolve_to_fixpoint(
+         clauses,
+         base_ctx,
+         receivers,
+         field_origins \\ MapSet.new(),
+         round \\ 0
+       ) do
+    ctx = base_ctx |> Map.put(:receivers, receivers) |> Map.put(:field_origins, field_origins)
     {lifts, declined} = resolve_lifts(clauses, ctx)
 
     enriched = merge_lift_receivers(receivers, lifts)
+    enriched_origins = merge_field_origins(field_origins, lifts)
 
-    if enriched == receivers or round >= @max_fixpoint_rounds do
-      {lifts, declined, receivers}
+    if enriched == receivers and enriched_origins == field_origins do
+      {lifts, declined, receivers, field_origins}
     else
-      resolve_to_fixpoint(clauses, base_ctx, enriched, round + 1)
+      if round >= @max_fixpoint_rounds,
+        do: {lifts, declined, receivers, field_origins},
+        else: resolve_to_fixpoint(clauses, base_ctx, enriched, enriched_origins, round + 1)
     end
+  end
+
+  # The `{key, pos}` receiver positions whose struct type ultimately rests
+  # on field-superset (duck-typing) rather than proof. A `:delegation` lift
+  # borrowing such a position is itself field-origin (the type is only as
+  # sound as its field-superset root), so the origin must transitively
+  # propagate — that is how a private field lift reaching a public def
+  # through one or more delegation hops is caught at the boundary (#222).
+  defp merge_field_origins(field_origins, lifts) do
+    Enum.reduce(lifts, field_origins, fn
+      %{struct: struct}, acc when is_list(struct) ->
+        acc
+
+      %{via: via, pos: pos} = lift, acc when via in [:fields, :delegation_field] ->
+        MapSet.put(acc, {{lift.module, lift.name, lift.arity}, pos})
+
+      _lift, acc ->
+        acc
+    end)
   end
 
   # Fold this round's single-struct lifts into the receiver index: a lift
@@ -1099,10 +1130,36 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPattern do
 
   defp apply_delegation({:decline, _reason, param} = decline, _key, _pos, group, ctx) do
     case delegation_struct(group, param, ctx.receivers) do
-      {:ok, struct} -> {:lift, struct, :delegation, param}
-      :none -> decline
+      {:ok, struct, receiver_keys} ->
+        delegation_verdict(struct, param, group, receiver_keys, ctx.field_origins)
+
+      :none ->
+        decline
     end
   end
+
+  # A delegation that resolves to a receiver whose type is itself only
+  # field-superset-deep (duck-typed) is no firmer than that field origin.
+  # If the delegating clause group is a PUBLIC `def`, the type must not
+  # cross the open boundary — an out-of-corpus caller could still pass a
+  # bare map (#222). A private `defp` keeps inheriting it; the lift is then
+  # tagged `:delegation_field` so the origin propagates to its own callers.
+  defp delegation_verdict(struct, param, group, receiver_keys, field_origins) do
+    field_borrowed? = Enum.any?(receiver_keys, &MapSet.member?(field_origins, &1))
+
+    cond do
+      field_borrowed? and group_is_public?(group) ->
+        {:decline, :public_field_delegation, param}
+
+      field_borrowed? ->
+        {:lift, struct, :delegation_field, param}
+
+      true ->
+        {:lift, struct, :delegation, param}
+    end
+  end
+
+  defp group_is_public?(group), do: Enum.any?(group, &(&1.kind == :def))
 
   # The struct a passed-whole `param` must be, inferred by following it
   # into a receiver call. Every clause of the group must agree: for each
@@ -1111,29 +1168,43 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPattern do
   # ambiguity (the param flows to >1 distinct typed position), or any
   # clause with no typed receiver -> :none.
   defp delegation_struct(group, param, receivers) do
-    resolved =
+    per_clause =
       group
       |> Enum.map(fn clause -> clause_delegation_struct(clause, param, receivers) end)
-      |> Enum.uniq()
 
-    case resolved do
-      [struct] when not is_nil(struct) -> {:ok, struct}
-      _ -> :none
+    structs = per_clause |> Enum.map(fn {s, _keys} -> s end) |> Enum.uniq()
+
+    case structs do
+      [struct] when not is_nil(struct) ->
+        # the receiver `{key, pos}` positions this struct was borrowed from,
+        # so the caller can check whether any is a field-superset origin
+        keys = per_clause |> Enum.flat_map(fn {_s, ks} -> ks end) |> Enum.uniq()
+        {:ok, struct, keys}
+
+      _ ->
+        :none
     end
   end
 
   # Within one clause body: the distinct struct(s) the receivers of every
-  # call carrying `param` agree on. nil unless there's exactly one.
+  # call carrying `param` agree on, plus the `{key, pos}` positions they
+  # came from. `{nil, []}` unless there's exactly one struct.
   defp clause_delegation_struct(%{module: enclosing, body: body}, param, receivers) do
-    structs =
+    keyed =
       body
       |> receiver_calls(param, enclosing)
-      |> Enum.flat_map(fn {key, arg_pos} -> receiver_struct_at(receivers, key, arg_pos) end)
-      |> Enum.uniq()
+      |> Enum.flat_map(fn {key, arg_pos} ->
+        case receiver_struct_at(receivers, key, arg_pos) do
+          [struct] -> [{struct, {key, arg_pos}}]
+          [] -> []
+        end
+      end)
+
+    structs = keyed |> Enum.map(fn {s, _} -> s end) |> Enum.uniq()
 
     case structs do
-      [struct] -> struct
-      _ -> nil
+      [struct] -> {struct, keyed |> Enum.map(fn {_s, k} -> k end)}
+      _ -> {nil, []}
     end
   end
 
