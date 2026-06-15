@@ -96,19 +96,20 @@ defmodule Number42.Refactors.Ex.ExtractCommonProlog do
   statement is duplicated. So the observable order of side effects per
   call site is preserved.
 
-  ## Near matches — one boundary extra getter
+  ## Near matches — one extra binding (boundary or prolog-splitting)
 
   The prologs need not be byte-identical. Exactly **one** clause may
-  carry a single extra binding statement at the prolog boundary (right
-  after the shared run) — typically a getter the other clauses don't
-  need. That extra is pulled into the helper too, and threaded back
-  through its own return slot:
+  carry a single extra binding statement that the other clauses don't —
+  any data-independent binding (`x = <expr>`), not just a getter. That
+  extra is pulled into the helper too, and threaded back through its own
+  return slot:
 
-  - A **pure read** — a `param.field.field` chain (`socket.assigns.x`)
-    or any `pure?/1`-true RHS (`Map.get`, arithmetic) — stays **eager**:
-    it runs in the helper and is returned by value, exactly like a
-    normal live binding. The non-needing clauses underscore the slot.
-  - A **side-effect-possible getter** (`Repo.get`, a local `get_user/1`)
+  - A **pure binding** — a `param.field.field` chain (`socket.assigns.x`)
+    or any `pure?/1`-true RHS (a literal, `Map.get`, arithmetic) — stays
+    **eager**: it runs in the helper and is returned by value, exactly
+    like a normal live binding. The non-needing clauses underscore the
+    slot.
+  - A **side-effect-possible binding** (`Repo.get`, a local `get_user/1`)
     is **lazy**: the helper returns a thunk (`fn -> … end`) in a
     `*_fun` slot. The needing clause forces it (`x = x_fun.()`); the
     others underscore the slot and never run it. Laziness here is a
@@ -116,13 +117,29 @@ defmodule Number42.Refactors.Ex.ExtractCommonProlog do
     eagerly in the helper would execute it for clauses that don't need
     it (an extra query, a possible crash).
 
+  The extra need not sit at the prolog **boundary**: a clause may insert
+  it in the **middle** of the shared run, and the statements after it
+  still count toward the shared prolog (so `a; b; c` vs `a; c` shares
+  `a` THEN `c`, with `b` as the one inserted extra). The shared prolog is
+  recognised by aligning the clauses while allowing one clause to skip
+  exactly one position.
+
   The near match qualifies only when the extra is **safely deferrable**:
-  it sits at the boundary, its binding is read solely in the bearer's
-  own tail (no shared follow-up consumes it), it reads only helper
-  params or shared-prolog bindings, and there is exactly one bearer. If
-  any of these fail, the near-match layer declines and the exact-match
-  path runs unchanged — never a relaxation of the exact-match guards,
-  always an extra qualification on top of them.
+  there is exactly one bearer; its binding is read solely in the bearer's
+  own tail (not by a sibling, not by the shared statements that follow
+  it); it reads only helper params or shared-prolog bindings; and — since
+  the extra is evaluated at the end of the shared run (eager) or behind a
+  thunk forced after it (lazy) — it reads no name a later shared
+  statement rebinds, so its inputs hold the same value as at its original
+  position. A **lazy** extra that splits the prolog (sits mid-run) carries
+  one more requirement: every shared statement after it must be `pure?/1`-
+  true. The thunk is forced after the shared run, so deferring it past a
+  *side-effecting* later shared statement would reorder its side effect
+  past that statement's — a violation of the "## Side-effect ordering"
+  contract above. An eager extra is pure by construction and so is never
+  constrained this way. If any of these fail, the near-match layer declines
+  and the exact-match path runs unchanged — never a relaxation of the
+  exact-match guards, always an extra qualification on top of them.
 
   ## Helper placement & clause families
 
@@ -261,36 +278,78 @@ defmodule Number42.Refactors.Ex.ExtractCommonProlog do
 
   # --- per-group analysis ---
 
+  # A group may align two ways: a near-match split that extends the shared
+  # run through one clause's inserted extra, or the plain exact run. The
+  # split is preferred, but it only holds if its extra classifies (a pure
+  # value or a safely-deferrable thunk); when it doesn't, the split would
+  # leave the bearer's extra statement unaccounted for, so we fall back to
+  # the exact run. Each candidate is planned independently; the first that
+  # fully qualifies wins.
   defp plan_group(group, existing, min_prolog) do
-    with {:ok, prolog_len} <- shared_prolog_length(group, min_prolog),
-         :ok <- ensure_no_control_flow(group, prolog_len),
-         :ok <- ensure_divergent_tail(group, prolog_len),
-         {:ok, params} <- helper_params(group, prolog_len),
-         extra = detect_boundary_extra(group, prolog_len, params),
-         {:ok, live} <- live_bindings(group, prolog_len, extra),
+    group
+    |> alignment_candidates(min_prolog)
+    |> Enum.find_value(:skip, fn align -> plan_alignment(group, existing, align) end)
+  end
+
+  defp plan_alignment(group, existing, align) do
+    prolog_len = align.len
+    shared = shared_prolog_stmts(group, align)
+
+    with :ok <- ensure_no_control_flow(shared),
+         :ok <- ensure_divergent_tail(group, align),
+         {:ok, params} <- helper_params(group, shared),
+         {:ok, extra} <- resolve_extra(group, align, shared, params),
+         {:ok, live} <- live_bindings(group, prolog_len, shared, extra),
          {:ok, helper_name} <- helper_name(group, existing) do
       {:ok,
        %{
          prolog_len: prolog_len,
+         shared: shared,
          params: params,
          live: live,
          extra: extra,
          helper_name: helper_name
        }}
+    else
+      _ -> nil
     end
   end
 
-  # --- near-match: a single boundary extra getter ---
+  # A split alignment carries its bearer/extra-index structurally: the extra
+  # MUST classify, else the split is invalid (its extra statement would be
+  # left dangling) and the candidate is rejected so the exact run is tried.
+  # An exact alignment detects an OPTIONAL boundary extra; `nil` there is
+  # fine (the exact-match path runs unchanged).
+  defp resolve_extra(group, %{bearer: bearer} = align, shared, params) when bearer != nil do
+    case build_extra(group, align, shared, params) do
+      %{} = extra -> {:ok, extra}
+      nil -> :skip
+    end
+  end
+
+  defp resolve_extra(group, align, shared, params),
+    do: {:ok, detect_boundary_extra(group, align, shared, params)}
+
+  # --- near-match: a single extra binding (boundary or prolog-splitting) ---
   #
-  # Beyond the shared prolog, exactly one clause may carry ONE extra
-  # binding statement at the prolog boundary (index `prolog_len`). That
-  # extra is pulled into the helper too: a pure read stays eager in the
-  # return tuple; a side-effect-possible getter is deferred behind a
+  # Exactly one clause may carry ONE extra binding statement at ONE
+  # position. Two cases share this machinery:
+  #
+  #   * **Boundary extra** — the extra sits right after the shared run
+  #     (index `len`); the divergent tail follows it. Detected here on the
+  #     exact alignment.
+  #   * **Prolog-splitting extra** — the extra sits in the MIDDLE of the
+  #     shared run (index `extra_idx < len`); statements after it still
+  #     count toward the shared prolog. Located structurally by the
+  #     alignment, then validated/classified through `build_extra`.
+  #
+  # The extra is pulled into the helper too: a pure binding stays eager in
+  # the return tuple; a side-effect-possible binding is deferred behind a
   # thunk so the non-bearing clauses never run it.
   #
-  # Returns the extra descriptor map, or `nil` when no qualifying single
-  # boundary extra exists — in which case the exact-match path runs
-  # unchanged. The descriptor:
+  # Returns the extra descriptor map, or `nil` when no qualifying extra
+  # exists — in which case the exact-match path runs unchanged. The
+  # descriptor:
   #
   #   %{bearer: def, var: atom, rhs: ast, slot: atom, mode: :eager | :lazy}
   #
@@ -298,73 +357,128 @@ defmodule Number42.Refactors.Ex.ExtractCommonProlog do
   # (the value is returned directly); for `:lazy` it is `:"#{var}_fun"`
   # (a thunk the bearer forces). Qualification (all must hold):
   #
-  #   * exactly one clause has a statement at `prolog_len`; every other
-  #     clause's tail begins there (its statement at `prolog_len` is the
-  #     first of its divergent tail, never a second extra). "Exactly one
-  #     bearer" — two clauses with extras disqualifies.
-  #   * the extra is a binding `var = rhs` (a bare side-effecting call
-  #     with no binding has nothing to thread back → disqualifies).
-  #   * `var` is read only in the bearer's own tail, not by any shared
-  #     follow-up the other clauses also run (deferrable to one clause).
+  #   * exactly one clause is the bearer; two clauses with extras
+  #     disqualifies.
+  #   * the extra is a binding `var = rhs` (a bare side-effecting call with
+  #     no binding has nothing to thread back → disqualifies).
+  #   * `var` is read only in the bearer's own tail — not by any sibling,
+  #     and not by the shared prolog statements that FOLLOW the extra and
+  #     run for everyone (deferrable to one clause).
   #   * every var `rhs` reads is a helper param or bound by the shared
-  #     prolog (so the helper can evaluate it at call time).
-  #   * `rhs` is either a pure field-access chain over a helper param
-  #     (eager) or `pure?/1`-true (eager) or otherwise side-effect
-  #     possible (lazy thunk). Anything that can't be classified — e.g.
-  #     control flow — disqualifies.
-  defp detect_boundary_extra(group, prolog_len, params) do
-    available = MapSet.union(MapSet.new(params), prolog_binds(hd(group), prolog_len))
+  #     prolog BEFORE the extra (so the helper can evaluate it).
+  #   * `rhs` reads no name a shared statement AFTER the extra rebinds — the
+  #     extra moves to the end of the shared run (eager) or is captured by a
+  #     thunk that runs after it (lazy), so a name rebound in between would
+  #     give the extra a different value than at its original position.
+  #   * `rhs` is a pure field-access chain over a helper param (eager) or
+  #     `pure?/1`-true (eager) or otherwise side-effect possible (lazy
+  #     thunk). Anything that can't be classified — e.g. control flow —
+  #     disqualifies.
+  #   * when the classification is LAZY and the extra splits the prolog
+  #     (mid-run), every shared statement AFTER it must be `pure?/1`-true —
+  #     the thunk is forced after the shared run, so deferring it past a
+  #     side-effecting later shared statement would reorder its side effect
+  #     (## Side-effect ordering). See `lazy_split_effect_safe?/3`.
+  defp detect_boundary_extra(group, %{len: len} = align, shared, params) do
+    available = available_before_extra(shared, len, params)
 
-    case Enum.filter(group, &qualifying_bearer?(&1, group, prolog_len, available)) do
-      [bearer] -> build_extra(bearer, prolog_len, params)
+    case Enum.filter(group, &qualifying_bearer?(&1, group, len, len, available, shared)) do
+      [bearer] -> build_extra(group, %{align | bearer: bearer, extra_idx: len}, shared, params)
       _ -> nil
     end
   end
 
-  # Whether `def` is a viable single-extra bearer: its statement at the
-  # boundary is a binding `var = rhs` where `rhs` reads only available
-  # names (params + shared-prolog bindings), and `var` is read in this
-  # clause's own tail but nowhere else (not by any sibling's tail, not by
-  # the shared prolog). "Read only here" is what makes the value safe to
-  # defer to this one clause. Two qualifying clauses ⇒ caller declines.
-  defp qualifying_bearer?(def, group, prolog_len, available) do
-    with {:=, _, [lhs, rhs]} <- Enum.at(def.stmts, prolog_len),
+  # The split path: bearer and `extra_idx` are already known structurally.
+  # Re-runs the same qualification (read-locality, RHS availability) and
+  # classifies; `nil` if any check fails, which rejects the split candidate.
+  defp build_extra(group, %{len: len, bearer: bearer, extra_idx: idx}, shared, params) do
+    available = available_before_extra(shared, idx, params)
+
+    with true <- qualifying_bearer?(bearer, group, idx, len, available, shared),
+         {:=, _, [lhs, rhs]} = stmt <- Enum.at(bearer.stmts, idx),
          {:ok, var} <- bare_var(lhs),
-         true <- MapSet.subset?(used_var_names(rhs), available) do
-      var_read_only_in?(group, def, prolog_len, var)
+         {:ok, mode} <- classify_extra_rhs(rhs, MapSet.new(params)),
+         true <- lazy_split_effect_safe?(mode, idx, shared) do
+      %{bearer: bearer, var: var, rhs: rhs, stmt: stmt, slot: slot_name(var, mode), mode: mode}
+    else
+      _ -> nil
+    end
+  end
+
+  # A LAZY extra is forced after the shared run, so a mid-prolog lazy extra
+  # (`idx < len`, with shared statements following it) would run its side
+  # effect AFTER those later shared statements. If any of them is itself
+  # side-effecting, that reorders one observable side effect past another —
+  # a violation of the "## Side-effect ordering" contract. So a mid-prolog
+  # lazy extra qualifies only when every shared statement after it is
+  # `pure?`-true. An EAGER extra is pure by construction, so reordering it
+  # past pure-or-impure shared statements is observationally invisible — it
+  # is never constrained here. A boundary lazy extra (`idx == len`) has
+  # nothing after it (`Enum.drop` is empty), so it is unaffected too.
+  defp lazy_split_effect_safe?(:eager, _idx, _shared), do: true
+
+  defp lazy_split_effect_safe?(:lazy, idx, shared),
+    do: shared |> Enum.drop(idx) |> Enum.all?(&pure_stmt?/1)
+
+  # Side-effect purity of a shared prolog statement: a binding is
+  # side-effect-free iff its RHS is `pure?`-true (the LHS bind itself has no
+  # effect); any other statement is judged whole. Mirrors
+  # `CanonicalStatementOrder.pure_statement?` — `pure?/1` on a raw `:=` node
+  # would reject every binding (an assignment is an operator node), so the
+  # RHS must be unwrapped to ask the meaningful question.
+  defp pure_stmt?({:=, _, [_lhs, rhs]}), do: pure?(rhs)
+  defp pure_stmt?(stmt), do: pure?(stmt)
+
+  # Names the helper can read when evaluating the extra at `extra_idx`:
+  # the helper params plus the bindings of the shared statements BEFORE the
+  # extra (a later shared binding isn't in scope where the extra is moved).
+  defp available_before_extra(shared, extra_idx, params),
+    do: MapSet.union(MapSet.new(params), shared |> Enum.take(extra_idx) |> prolog_binds())
+
+  # Whether `def` is a viable single-extra bearer at `extra_idx`: its
+  # statement there is a binding `var = rhs` where `rhs` reads only
+  # available names (params + shared bindings before the extra), and `var`
+  # is read in this clause's own tail but nowhere else. Two qualifying
+  # clauses ⇒ caller declines.
+  defp qualifying_bearer?(def, group, extra_idx, len, available, shared) do
+    with {:=, _, [lhs, rhs]} <- Enum.at(def.stmts, extra_idx),
+         {:ok, var} <- bare_var(lhs),
+         true <- MapSet.subset?(used_var_names(rhs), available),
+         true <- rhs_inputs_stable?(rhs, extra_idx, shared) do
+      var_read_only_in?(group, def, extra_idx, len, var, shared)
     else
       _ -> false
     end
   end
 
-  defp build_extra(bearer, prolog_len, params) do
-    {:=, _, [lhs, rhs]} = Enum.at(bearer.stmts, prolog_len)
-    {:ok, var} = bare_var(lhs)
-
-    case classify_extra_rhs(rhs, MapSet.new(params)) do
-      {:ok, mode} ->
-        %{bearer: bearer, var: var, rhs: rhs, slot: slot_name(var, mode), mode: mode}
-
-      :skip ->
-        nil
-    end
+  # The extra's RHS reads no name a shared statement after it rebinds — so
+  # deferring the extra to the end of the shared run (or behind a thunk
+  # forced after it) reads the same values it would have at its original
+  # position. For a boundary extra (`extra_idx == len`) there is nothing
+  # after it, so this always holds.
+  defp rhs_inputs_stable?(rhs, extra_idx, shared) do
+    rebound_after = shared |> Enum.drop(extra_idx) |> prolog_binds()
+    MapSet.disjoint?(used_var_names(rhs), rebound_after)
   end
 
-  # `var` (bound by the bearer's boundary extra) must be read in the
-  # bearer's OWN tail and nowhere else: not by any sibling clause (which
-  # never even runs the extra) and not by the shared prolog (which runs
-  # for everyone). That read-locality is what lets the value be deferred
-  # to this single clause.
-  defp var_read_only_in?(group, bearer, prolog_len, var) do
-    read_in_bearer_tail? = bearer.stmts |> Enum.drop(prolog_len + 1) |> free_reads(var)
+  # `var` (bound by the bearer's extra) must be read in the bearer's OWN
+  # tail and nowhere else: not by any sibling clause (which never runs the
+  # extra), and not by the shared prolog statements after the extra (which
+  # run for everyone — a non-bearer would read an unbound `var`). That
+  # read-locality is what lets the value be deferred to this one clause.
+  # The bearer's prolog region is `len + 1` statements (the shared run plus
+  # its inserted extra), so its tail starts at `len + 1`.
+  defp var_read_only_in?(group, bearer, extra_idx, len, var, shared) do
+    read_in_bearer_tail? = bearer.stmts |> Enum.drop(len + 1) |> free_reads(var)
+    read_by_shared_after? = shared |> Enum.drop(extra_idx) |> free_reads(var)
 
     read_elsewhere? =
       Enum.any?(group, fn
         ^bearer -> false
-        %{stmts: stmts} -> stmts |> Enum.drop(prolog_len) |> free_reads(var)
+        %{stmts: stmts} -> stmts |> Enum.drop(len) |> free_reads(var)
       end)
 
-    read_in_bearer_tail? and not read_elsewhere?
+    read_in_bearer_tail? and not read_by_shared_after? and not read_elsewhere?
   end
 
   defp free_reads(stmts, var),
@@ -404,17 +518,93 @@ defmodule Number42.Refactors.Ex.ExtractCommonProlog do
   defp slot_name(var, :eager), do: var
   defp slot_name(var, :lazy), do: :"#{var}_fun"
 
+  # The shared-prolog alignments to try, in priority order: how the group's
+  # leading statements line up into one common run, allowing ONE clause to
+  # insert ONE extra statement at ONE position. Each is
+  #
+  #   %{len: shared_count, bearer: def | nil, extra_idx: idx | nil}
+  #
+  # where `len` counts the statements EVERY clause shares (in the non-bearer
+  # contiguous indexing) and, for a near-match split, `bearer` inserted its
+  # extra at the bearer's index `extra_idx` (`0..len`). A pure exact match
+  # has `bearer: nil, extra_idx: nil`.
+  #
+  # `base` is the plain longest leading run where all clauses agree. If the
+  # run can be EXTENDED by hypothesising that one clause inserted one extra
+  # at index `base` — skipping that statement, the clauses keep agreeing for
+  # at least one more position — the longer SPLIT alignment is tried first;
+  # if its extra fails to classify the planner falls back to the exact run.
+  # A boundary extra (one that does NOT extend the run) is left for the
+  # boundary-extra detector on the exact alignment.
+  defp alignment_candidates(group, min_prolog) do
+    base = exact_run_length(group)
+    exact = %{len: base, bearer: nil, extra_idx: nil}
+
+    split =
+      case split_extension(group, base) do
+        {:ok, bearer, len} -> [%{len: len, bearer: bearer, extra_idx: base}]
+        :none -> []
+      end
+
+    (split ++ [exact])
+    |> Enum.filter(&(&1.len >= min_prolog))
+  end
+
   # Longest leading run of AST-identical (metadata-stripped) statements
   # across every def in the group.
-  defp shared_prolog_length(group, min_prolog) do
+  defp exact_run_length(group) do
     max_len = group |> Enum.map(&length(&1.stmts)) |> Enum.min()
 
-    len =
-      Enum.reduce_while(0..(max_len - 1)//1, 0, fn i, acc ->
-        if all_agree_at?(group, i), do: {:cont, acc + 1}, else: {:halt, acc}
+    Enum.reduce_while(0..(max_len - 1)//1, 0, fn i, acc ->
+      if all_agree_at?(group, i), do: {:cont, acc + 1}, else: {:halt, acc}
+    end)
+  end
+
+  # Past the exact run, try to extend it by allowing exactly ONE clause to
+  # carry one inserted statement at index `base`. For each candidate bearer
+  # we skip its statement at `base` and re-check agreement against the other
+  # clauses; the run extends as long as the bearer's shifted statements keep
+  # matching. The extension is real only when it adds at least one shared
+  # statement (`len > base`) — a bearer whose extra sits at the boundary
+  # adds nothing here and is handled by the boundary-extra detector.
+  # Exactly one candidate may extend; two ⇒ ambiguous ⇒ no split.
+  defp split_extension(group, base) do
+    candidates =
+      Enum.flat_map(group, fn bearer ->
+        case extended_run_with_bearer(group, bearer, base) do
+          len when len > base -> [{bearer, len}]
+          _ -> []
+        end
       end)
 
-    if len >= min_prolog, do: {:ok, len}, else: :skip
+    case candidates do
+      [{bearer, len}] -> {:ok, bearer, len}
+      _ -> :none
+    end
+  end
+
+  # With `bearer` skipping its statement at index `base`, how many shared
+  # positions agree in total (counting the exact run `base` plus the
+  # extended tail). Bounded by the shortest non-bearer prolog and by the
+  # bearer's own length minus the one skipped statement.
+  defp extended_run_with_bearer(group, bearer, base) do
+    others = Enum.reject(group, &(&1 == bearer))
+    max_len = (others |> Enum.map(&length(&1.stmts))) ++ [length(bearer.stmts) - 1]
+    max_len = Enum.min(max_len)
+
+    Enum.reduce_while(base..(max_len - 1)//1, base, fn i, acc ->
+      if agree_with_split?(bearer, others, base, i), do: {:cont, acc + 1}, else: {:halt, acc}
+    end)
+  end
+
+  # All clauses agree at shared position `i` when the bearer inserted one
+  # extra at index `base`: the bearer's matching statement is shifted by one
+  # (`i + 1`), every other clause's is at `i`.
+  defp agree_with_split?(bearer, others, base, i) do
+    bearer_idx = if i < base, do: i, else: i + 1
+    ref = bearer.stmts |> Enum.at(bearer_idx) |> strip_meta()
+
+    Enum.all?(others, fn %{stmts: s} -> strip_meta(Enum.at(s, i)) == ref end)
   end
 
   defp all_agree_at?([%{stmts: first} | _] = group, i) do
@@ -422,24 +612,42 @@ defmodule Number42.Refactors.Ex.ExtractCommonProlog do
     Enum.all?(group, fn %{stmts: s} -> strip_meta(Enum.at(s, i)) == ref end)
   end
 
-  defp ensure_no_control_flow(group, prolog_len) do
-    [%{stmts: first} | _] = group
-    prolog = Enum.take(first, prolog_len)
-
-    if Enum.any?(prolog, &has_control_flow?/1), do: :skip, else: :ok
+  # The `len` statements (metadata-bearing) that form the shared prolog,
+  # taken from a clause that is NOT the near-match bearer (so its leading
+  # run is contiguous and excludes any inserted extra). For a pure exact
+  # match every clause works; the first is fine.
+  defp shared_prolog_stmts(group, %{len: len, bearer: bearer}) do
+    group
+    |> Enum.find(hd(group), &(&1 != bearer))
+    |> Map.fetch!(:stmts)
+    |> Enum.take(len)
   end
 
-  defp ensure_divergent_tail(group, prolog_len) do
-    if Enum.all?(group, fn %{stmts: s} -> length(s) > prolog_len end), do: :ok, else: :skip
+  defp ensure_no_control_flow(shared) do
+    if Enum.any?(shared, &has_control_flow?/1), do: :skip, else: :ok
   end
+
+  # Every clause must keep at least one statement past its shared prolog —
+  # the bearer past its prolog AND its inserted extra (it owns one more
+  # leading statement than the others).
+  defp ensure_divergent_tail(group, %{len: len, bearer: bearer}) do
+    ok? =
+      Enum.all?(group, fn def ->
+        length(def.stmts) > len + prolog_region_offset(def, bearer)
+      end)
+
+    if ok?, do: :ok, else: :skip
+  end
+
+  defp prolog_region_offset(def, bearer) when def == bearer, do: 1
+  defp prolog_region_offset(_def, _bearer), do: 0
 
   # Free vars of the prolog → helper params. Each must be a bare
   # parameter in every def of the group, else a call site can't pass it.
   # Flow-sensitive so a self-rebind (`socket = assign(socket, …)`) reads
   # `socket` as an input before binding it.
-  defp helper_params(group, prolog_len) do
-    [%{stmts: first} | _] = group
-    reads = first |> Enum.take(prolog_len) |> prolog_input_reads()
+  defp helper_params(group, shared) do
+    reads = prolog_input_reads(shared)
 
     if Enum.all?(group, fn def -> MapSet.subset?(reads, bare_param_names(def)) end) do
       {:ok, reads |> MapSet.to_list() |> Enum.sort()}
@@ -473,8 +681,8 @@ defmodule Number42.Refactors.Ex.ExtractCommonProlog do
   # statement at index `prolog_len`; its real tail begins one statement
   # later, so we drop the extra before scanning for reads (its own binding
   # is threaded back through the extra slot, not the live tuple).
-  defp live_bindings(group, prolog_len, extra) do
-    bound = group |> hd() |> prolog_binds(prolog_len)
+  defp live_bindings(group, prolog_len, shared, extra) do
+    bound = prolog_binds(shared)
 
     read_after =
       group
@@ -497,10 +705,8 @@ defmodule Number42.Refactors.Ex.ExtractCommonProlog do
 
   defp def_tail(%{stmts: stmts}, prolog_len, _extra), do: Enum.drop(stmts, prolog_len)
 
-  defp prolog_binds(%{stmts: stmts}, prolog_len) do
-    stmts
-    |> Enum.take(prolog_len)
-    |> Enum.reduce(MapSet.new(), fn s, acc -> MapSet.union(acc, bound_in(s)) end)
+  defp prolog_binds(shared) do
+    Enum.reduce(shared, MapSet.new(), fn s, acc -> MapSet.union(acc, bound_in(s)) end)
   end
 
   # Derive a non-colliding helper name. Prefer `prepare_<name>` when the
@@ -639,12 +845,9 @@ defmodule Number42.Refactors.Ex.ExtractCommonProlog do
 
   defp add_extra_read(read, _def, _tail_stmts, _extra), do: read
 
-  defp render_helper(group, plan) do
-    [first | _] = group
-
+  defp render_helper(_group, plan) do
     body =
-      first.stmts
-      |> Enum.take(plan.prolog_len)
+      plan.shared
       |> append_eager_extra(plan.extra)
       |> Enum.map_join("\n", &Sourceror.to_string/1)
 
@@ -656,13 +859,15 @@ defmodule Number42.Refactors.Ex.ExtractCommonProlog do
       "\n  end"
   end
 
-  # An eager extra runs verbatim inside the helper (its value is returned
-  # directly). A lazy extra is NOT a helper statement — it is captured by
-  # the returned thunk — so the body stays the shared prolog only.
-  defp append_eager_extra(prolog, %{mode: :eager, bearer: bearer}),
-    do: prolog ++ [Enum.at(bearer.stmts, length(prolog))]
-
-  defp append_eager_extra(prolog, _extra), do: prolog
+  # An eager extra runs verbatim inside the helper after the shared run (its
+  # value is returned directly). Appending after the shared prolog — rather
+  # than at its original mid-prolog position — is sound: the extra is pure,
+  # so reordering it past the pure shared statements is observationally
+  # invisible, and its inputs (params + earlier shared bindings) are all
+  # still in scope. A lazy extra is NOT a helper statement — it is captured
+  # by the returned thunk — so the body stays the shared prolog only.
+  defp append_eager_extra(shared, %{mode: :eager, stmt: stmt}), do: shared ++ [stmt]
+  defp append_eager_extra(shared, _extra), do: shared
 
   # Pattern for one call site. Positions follow the slot order (the
   # helper's returned tuple shape, identical everywhere); a position this
