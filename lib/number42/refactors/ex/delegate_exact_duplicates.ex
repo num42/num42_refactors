@@ -88,6 +88,11 @@ defmodule Number42.Refactors.Ex.DelegateExactDuplicates do
     doesn't define
   - Cycles: A delegates to B which would delegate to A (we never plan
     this, but defensive).
+  - Functions a module **already delegates**: if the destination already
+    has an AST-identical `defdelegate` (same name/arity/target), the
+    insertion is skipped. This keeps the refactor idempotent — a second
+    pass on its own output is a no-op rather than appending another
+    identical delegation (#226).
 
   ## Format
 
@@ -442,14 +447,59 @@ defmodule Number42.Refactors.Ex.DelegateExactDuplicates do
   defp module_patches(nil, _body_exprs), do: []
 
   defp module_patches(entries, body_exprs) do
+    # Idempotence guard (#226): a module may already carry the delegation we
+    # are about to emit — e.g. a prior pass delegated, then a leftover `def`
+    # of the same name/arity was re-introduced. Re-inserting would accumulate
+    # identical `defdelegate` clauses. Drop any entry the destination already
+    # delegates so a second pass on our own output is a no-op.
+    pending = Enum.reject(entries, &already_delegated?(&1, body_exprs))
+
     delegate_patches =
-      entries
+      pending
       |> Enum.flat_map(fn {name, arity, args, winner} ->
         patch_for_function(body_exprs, name, arity, args, winner)
       end)
 
-    cleanup_patches = dead_helper_patches(body_exprs, entries)
+    cleanup_patches = dead_helper_patches(body_exprs, pending)
     delegate_patches ++ cleanup_patches
+  end
+
+  defp already_delegated?({name, arity, _args, winner}, body_exprs),
+    do: Enum.any?(body_exprs, &defdelegate_matches?(&1, name, arity, winner))
+
+  defp defdelegate_matches?(
+         {:defdelegate, _, [head, opts]},
+         name,
+         arity,
+         winner
+       )
+       when is_list(opts) do
+    delegate_head_matches?(head, name, arity) and delegate_target?(opts, winner)
+  end
+
+  defp defdelegate_matches?(_, _name, _arity, _winner), do: false
+
+  defp delegate_head_matches?({name, _, args}, name, arity) when is_list(args),
+    do: length(args) == arity
+
+  defp delegate_head_matches?({name, _, nil}, name, 0), do: true
+  defp delegate_head_matches?(_, _name, _arity), do: false
+
+  defp delegate_target?(opts, winner) do
+    case Keyword.get(unwrap_opts(opts), :to) do
+      {:__aliases__, _, segments} -> Module.concat(segments) == winner
+      _ -> false
+    end
+  end
+
+  # Sourceror wraps keyword keys/values in `:__block__` nodes; unwrap to a
+  # plain keyword list so `Keyword.get(opts, :to)` works on both Sourceror
+  # and `Code.string_to_quoted` ASTs.
+  defp unwrap_opts(opts) do
+    Enum.map(opts, fn
+      {{:__block__, _, [key]}, value} -> {key, value}
+      {key, value} -> {key, value}
+    end)
   end
 
   defp module_segments(module) when is_atom(module) do
