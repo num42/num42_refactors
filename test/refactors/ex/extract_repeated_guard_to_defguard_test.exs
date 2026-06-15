@@ -270,4 +270,190 @@ defmodule Number42.Refactors.Ex.ExtractRepeatedGuardToDefguardTest do
       assert_idempotent(@subject, source)
     end
   end
+
+  # --- Source B: body-if conditions lifted into a named defguardp --------
+  #
+  # A `def f(x) do if COND, do: A, else: B end` whose COND is a *complex*
+  # guard expression (>= 2 guard operators) is lifted to a named defguardp
+  # plus two guard-driven clauses. Single-operator conditions are left to
+  # `ExtractCondIfGuardClauses` (inline `when`), which has no naming value.
+  describe "body-if condition lifted to a named defguardp" do
+    test "complex condition (>= 2 guard ops) is named and lifted to guard clauses" do
+      before_source = """
+      defmodule M do
+        def classify(n) do
+          if is_integer(n) and n > 0, do: :pos, else: :other
+        end
+      end
+      """
+
+      actual = apply_refactor(@subject, before_source)
+
+      assert actual =~ "defguardp is_valid_n(n) when is_integer(n) and n > 0"
+      assert actual =~ "def classify(n) when is_valid_n(n), do: :pos"
+      # `n` is unused in the catch-all body (`:other`), so it's underscored.
+      assert actual =~ "def classify(_n), do: :other"
+      assert_compiles(actual)
+    end
+
+    test "three-operator condition lifts" do
+      before_source = """
+      defmodule M do
+        def bucket(n) do
+          if is_integer(n) and n > 0 and n < 100, do: :small, else: :big
+        end
+      end
+      """
+
+      actual = apply_refactor(@subject, before_source)
+
+      assert actual =~ "defguardp is_valid_n(n) when is_integer(n) and n > 0 and n < 100"
+      assert actual =~ "def bucket(n) when is_valid_n(n), do: :small"
+      assert_compiles(actual)
+    end
+
+    test "block-body branches keep their do/end form" do
+      before_source = """
+      defmodule M do
+        def run(n) do
+          if is_integer(n) and n > 0 do
+            x = n * 2
+            x + 1
+          else
+            0
+          end
+        end
+      end
+      """
+
+      actual = apply_refactor(@subject, before_source)
+
+      assert actual =~ "defguardp is_valid_n(n) when is_integer(n) and n > 0"
+      assert actual =~ "def run(n) when is_valid_n(n) do"
+      assert_compiles(actual)
+    end
+
+    test "second parameter unused in the do-clause is underscored" do
+      before_source = """
+      defmodule M do
+        def pick(n, fallback) do
+          if is_integer(n) and n > 0, do: n, else: fallback
+        end
+      end
+      """
+
+      actual = apply_refactor(@subject, before_source)
+
+      assert actual =~ "defguardp is_valid_n(n) when is_integer(n) and n > 0"
+      # do-clause uses only n → fallback underscored; catch-all uses fallback.
+      assert actual =~ "def pick(n, _fallback) when is_valid_n(n), do: n"
+      assert actual =~ "def pick(_n, fallback), do: fallback"
+      assert_compiles(actual)
+    end
+  end
+
+  describe "body-if leaves alone" do
+    test "single-operator condition is left to inline lifting (no defguardp)" do
+      # `n < 0` is a single comparison — naming it adds no value, so this
+      # refactor declines and ExtractCondIfGuardClauses handles it inline.
+      source = """
+      defmodule M do
+        def classify(n) do
+          if n < 0, do: :neg, else: :pos
+        end
+      end
+      """
+
+      assert_unchanged(@subject, source)
+    end
+
+    test "single is_* predicate is left alone (one operator)" do
+      source = """
+      defmodule M do
+        def kind(x) do
+          if is_atom(x), do: :atom, else: :other
+        end
+      end
+      """
+
+      assert_unchanged(@subject, source)
+    end
+
+    test "non-guard-safe condition is left alone" do
+      source = """
+      defmodule M do
+        def valid(s) do
+          if String.length(s) > 3 and is_binary(s), do: :ok, else: :bad
+        end
+      end
+      """
+
+      assert_unchanged(@subject, source)
+    end
+
+    test "condition over a non-parameter (local binding) is left alone" do
+      source = """
+      defmodule M do
+        def run(x) do
+          y = x + 1
+
+          if is_integer(y) and y > 0, do: :a, else: :b
+        end
+      end
+      """
+
+      assert_unchanged(@subject, source)
+    end
+
+    test "if without an else branch is left alone" do
+      source = """
+      defmodule M do
+        def run(n) do
+          if is_integer(n) and n > 0, do: :pos
+        end
+      end
+      """
+
+      assert_unchanged(@subject, source)
+    end
+
+    test "if embedded in a larger body is left alone" do
+      source = """
+      defmodule M do
+        def run(n) do
+          log(n)
+          if is_integer(n) and n > 0, do: :pos, else: :other
+        end
+      end
+      """
+
+      assert_unchanged(@subject, source)
+    end
+
+    test "a head with an existing when-guard is left alone" do
+      source = """
+      defmodule M do
+        def run(n) when is_number(n) do
+          if is_integer(n) and n > 0, do: :pos, else: :other
+        end
+      end
+      """
+
+      assert_unchanged(@subject, source)
+    end
+  end
+
+  describe "body-if idempotence" do
+    test "running twice on a complex-cond body equals running once" do
+      source = """
+      defmodule M do
+        def classify(n) do
+          if is_integer(n) and n > 0, do: :pos, else: :other
+        end
+      end
+      """
+
+      assert_idempotent(@subject, source)
+    end
+  end
 end
