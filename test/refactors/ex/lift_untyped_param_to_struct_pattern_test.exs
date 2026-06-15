@@ -55,14 +55,16 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPatternTest do
 
   describe "lifting on a unique field-set match" do
     test "two distinctive fields pin one struct and lift the head" do
-      # parent_id + depth: both distinctive, only Position has them
-      src = "defmodule R do\n  def f(r), do: {r.parent_id, r.depth}\nend\n"
+      # parent_id + depth: both distinctive, only Position has them.
+      # defp: field-superset narrowing is duck-typing and only fires for
+      # PRIVATE functions, whose entire caller set is in project (#222).
+      src = "defmodule R do\n  defp f(r), do: {r.parent_id, r.depth}\nend\n"
       idx = plan([]).structs
 
       assert_rewrites(
         Subject,
         src,
-        "defmodule R do\n  def f(%Position{} = r), do: {r.parent_id, r.depth}\nend\n",
+        "defmodule R do\n  defp f(%Position{} = r), do: {r.parent_id, r.depth}\nend\n",
         prepared: %{structs: idx}
       )
     end
@@ -93,19 +95,21 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPatternTest do
     end
 
     test "a generic field plus enough distinctive ones still lifts" do
-      # name (generic) + parent_id + depth (distinctive) → 2 distinctive, lifts
-      src = "defmodule R do\n  def f(r), do: {r.name, r.parent_id, r.depth}\nend\n"
+      # name (generic) + parent_id + depth (distinctive) → 2 distinctive, lifts.
+      # defp: field-superset only narrows private functions (#222).
+      src = "defmodule R do\n  defp f(r), do: {r.name, r.parent_id, r.depth}\nend\n"
 
       assert Subject.transform(src, prepared: %{structs: plan([]).structs}) =~
-               "def f(%Position{} = r)"
+               "defp f(%Position{} = r)"
     end
 
     test "the body is left untouched, only the head changes" do
-      # sku + price: both distinctive, only Item — and not a struct builder
-      src = "defmodule R do\n  def f(r), do: %{out: r.sku, p: r.price}\nend\n"
+      # sku + price: both distinctive, only Item — and not a struct builder.
+      # defp: field-superset only narrows private functions (#222).
+      src = "defmodule R do\n  defp f(r), do: %{out: r.sku, p: r.price}\nend\n"
       out = Subject.transform(src, prepared: %{structs: plan([]).structs})
 
-      assert out =~ "def f(%Item{} = r)"
+      assert out =~ "defp f(%Item{} = r)"
       assert out =~ "%{out: r.sku, p: r.price}"
     end
 
@@ -113,9 +117,77 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPatternTest do
       idx =
         bp(sources([{"Catalog.Widget", "  defstruct [:gadget_id, :widget_label]\n"}])).structs
 
-      src = "defmodule R do\n  def f(r), do: {r.gadget_id, r.widget_label}\nend\n"
+      # defp: field-superset only narrows private functions (#222).
+      src = "defmodule R do\n  defp f(r), do: {r.gadget_id, r.widget_label}\nend\n"
 
-      assert Subject.transform(src, prepared: %{structs: idx}) =~ "def f(%Catalog.Widget{} = r)"
+      assert Subject.transform(src, prepared: %{structs: idx}) =~ "defp f(%Catalog.Widget{} = r)"
+    end
+  end
+
+  describe "public-def boundary on field-superset (#222)" do
+    # Field-superset is duck-typing: a pure `.field`-reading body proves
+    # the value HAS those fields, not that it IS that struct. A PUBLIC def
+    # has an open caller set the cross-file scan can't see in full, so an
+    # out-of-corpus caller could pass a bare map with the same fields. A
+    # `%Struct{}` head would reject it at runtime. So a public def is NOT
+    # narrowed on field-superset alone; a private defp still is.
+
+    test "a PUBLIC def with a pure .field body is NOT narrowed (#222)" do
+      # parent_id+depth uniquely fit Position — exactly one field-superset.
+      # As a private defp this lifts; as a public def it must stay bare so
+      # an out-of-corpus caller passing a bare map doesn't break.
+      src = "defmodule R do\n  def f(r), do: {r.parent_id, r.depth}\nend\n"
+      assert_unchanged(Subject, src, prepared: %{structs: plan([]).structs})
+
+      assert %{reason: :public_field_only} =
+               declined(plan([{"R", "  def f(r), do: {r.parent_id, r.depth}\n"}]), :f)
+    end
+
+    test "a PRIVATE defp with the same pure .field body IS still narrowed" do
+      # the field-superset mechanic is intact for private functions, whose
+      # entire caller set is in project and visible to the scan
+      src = "defmodule R do\n  defp f(r), do: {r.parent_id, r.depth}\nend\n"
+
+      assert Subject.transform(src, prepared: %{structs: plan([]).structs}) =~
+               "defp f(%Position{} = r)"
+
+      assert %{struct: Position, via: :fields} =
+               lift(plan([{"R", "  defp f(r), do: {r.parent_id, r.depth}\n"}]), :f)
+    end
+
+    test "a PUBLIC def IS narrowed when a call site proves the struct" do
+      # the field-only decline is rescued by real evidence: a caller passes
+      # %Position{}, so the open-boundary risk is gone.
+      modules = [
+        {"P", "  def f(r), do: {r.parent_id, r.depth}\n"},
+        {"Caller", "  def go, do: P.f(%Position{})\n"}
+      ]
+
+      assert %{struct: Position, via: :call_site} = lift(plan(modules), :f)
+    end
+
+    test "a PUBLIC def IS narrowed when an @spec names the struct" do
+      # an explicit @spec is binding proof regardless of public/private
+      src =
+        "defmodule R do\n  @spec f(Position.t()) :: any()\n  def f(r), do: {r.parent_id, r.depth}\nend\n"
+
+      assert Subject.transform(src, prepared: %{structs: plan([]).structs}) =~
+               "def f(%Position{} = r)"
+    end
+
+    test "a public field-only decline does not leak its type through delegation" do
+      # P.f is public, field-only (would-be Position) — DECLINED, so it is
+      # NOT registered as a delegation receiver. A caller H.h delegating to
+      # P.f therefore can't borrow the (unproven) Position type from it.
+      modules = [
+        {"P", "  def f(r), do: {r.parent_id, r.depth}\n"},
+        {"H", "  def h(x), do: P.f(x)\n"}
+      ]
+
+      p = plan(modules)
+      assert %{reason: :public_field_only} = declined(p, :f)
+      assert %{reason: :param_passed_to_call} = declined(p, :h)
+      refute Map.has_key?(p.receivers, {P, :f, 1})
     end
   end
 
@@ -242,13 +314,14 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPatternTest do
       idx =
         bp(sources([{"Widget", "  defstruct [:gizmo, :doohickey]\n"}])).structs
 
+      # defp: field-superset only narrows private functions (#222).
       lifted =
         Subject.transform(
-          "defmodule Widget do\n  defstruct [:gizmo, :doohickey]\nend\n\ndefmodule R do\n  def describe(w), do: {w.gizmo, w.doohickey}\nend\n",
+          "defmodule Widget do\n  defstruct [:gizmo, :doohickey]\nend\n\ndefmodule R do\n  defp describe(w), do: {w.gizmo, w.doohickey}\n  def go, do: describe(%Widget{})\nend\n",
           prepared: %{structs: idx}
         )
 
-      assert lifted =~ "def describe(%Widget{} = w)"
+      assert lifted =~ "defp describe(%Widget{} = w)"
       assert_compiles(lifted)
     end
 
@@ -273,20 +346,22 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPatternTest do
     end
 
     test "a call site overrides field inference to the same struct (via shifts)" do
-      # body fields uniquely fit Position; a caller confirms %Position{}
+      # body fields uniquely fit Position; a caller confirms %Position{}.
+      # defp so the field-superset fires (public defs decline on fields
+      # alone, #222); the local caller then confirms the same struct.
       modules = [
-        {"P", "  def f(r), do: {r.parent_id, r.depth}\n"},
-        {"Caller", "  def go, do: P.f(%Position{})\n"}
+        {"P", "  defp f(r), do: {r.parent_id, r.depth}\n  def go, do: f(%Position{})\n"}
       ]
 
       assert %{struct: Position, via: :call_site} = lift(plan(modules), :f)
     end
 
     test "a call site disagreeing with field inference declines as a conflict" do
-      # body fields say Position (parent_id+depth), caller passes %Item{}
+      # body fields say Position (parent_id+depth), caller passes %Item{}.
+      # defp so the field-superset fires and can be contradicted by the
+      # call site (public defs have no field opinion to conflict, #222).
       modules = [
-        {"P", "  def f(r), do: {r.parent_id, r.depth}\n"},
-        {"Caller", "  def go, do: P.f(%Item{})\n"}
+        {"P", "  defp f(r), do: {r.parent_id, r.depth}\n  def go, do: f(%Item{})\n"}
       ]
 
       assert %{reason: :call_site_field_conflict} = declined(plan(modules), :f)
@@ -528,7 +603,9 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPatternTest do
     test "does NOT override an existing field-inference lift" do
       # body fields uniquely prove Position; Dialyzer says Item — the
       # visible body wins, Dialyzer is the lowest-priority source.
-      modules = [{"P", "  def f(r), do: {r.parent_id, r.depth}\n"}]
+      # defp: field-superset only narrows private functions (#222), so use
+      # one here to get a real field lift for Dialyzer to (not) override.
+      modules = [{"P", "  defp f(r), do: {r.parent_id, r.depth}\n"}]
       index = %{{P, :f, 1} => %{0 => Item}}
 
       assert %{struct: Position, via: :fields} = lift(dz_plan(modules, index), :f)
@@ -834,7 +911,8 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPatternTest do
 
   describe "report/1" do
     test "lists liftable params with their inference source" do
-      report = Subject.report(plan([{"R", "  def f(r), do: {r.parent_id, r.depth}\n"}]))
+      # defp: field-superset only narrows private functions (#222).
+      report = Subject.report(plan([{"R", "  defp f(r), do: {r.parent_id, r.depth}\n"}]))
       assert report =~ "R.f/1 (r) -> %Position{} (via fields)"
     end
 
