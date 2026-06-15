@@ -498,9 +498,9 @@ defmodule Number42.Refactors.Ex.ExtractRepeatedGuardToDefguard do
     # un-underscored; other params follow the do-branch. Catch-all: the
     # guard is gone, so `var` follows the else-branch like any other param.
     guard_head =
-      "#{clause_head(kind, fn_name, params, [do_b], MapSet.new([var]))} when #{name}(#{var})"
+      "#{clause_head(kind, fn_name, params, [do_b], [var])} when #{name}(#{var})"
 
-    catch_head = clause_head(kind, fn_name, params, [else_b], MapSet.new())
+    catch_head = clause_head(kind, fn_name, params, [else_b], [])
 
     guard_clause = render_clause_body(guard_head, do_b)
     catch_all = render_clause_body(catch_head, else_b)
@@ -530,19 +530,19 @@ defmodule Number42.Refactors.Ex.ExtractRepeatedGuardToDefguard do
   defp boolean_guard?(_), do: false
 
   # A param is kept (not underscored) when it appears in the clause body or
-  # in `forced` (the guard arg, for the do-clause). Mirrors
+  # in `forced` (the guard arg names, for the do-clause). Mirrors
   # ExtractCondIfGuardClauses' unused-var underscoring.
   defp clause_head(kind, fn_name, params, body_asts, forced) do
-    used = body_asts |> collect_var_names() |> MapSet.union(forced)
+    used = MapSet.new(collect_var_names(body_asts) ++ forced)
     "#{kind} #{fn_name}(#{param_text(underscore_unused(params, used))})"
   end
 
   defp collect_var_names(asts) do
     asts
     |> Enum.flat_map(&Macro.prewalker/1)
-    |> Enum.reduce(MapSet.new(), fn
-      {name, _, ctx}, acc when is_atom(name) and is_atom(ctx) -> MapSet.put(acc, name)
-      _, acc -> acc
+    |> Enum.flat_map(fn
+      {name, _, ctx} when is_atom(name) and is_atom(ctx) -> [name]
+      _ -> []
     end)
   end
 
