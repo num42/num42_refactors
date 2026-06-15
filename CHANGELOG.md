@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `ExtractCommonProlog` (#232): now fires on **near matches**, not just
+  byte-identical prologs. When several contiguous functions share a prolog
+  and exactly **one** clause carries a single extra binding at the prolog
+  boundary (a getter the others don't need), that extra is pulled into the
+  helper too. A **pure read** — a `param.field.field` chain
+  (`socket.assigns.current_user`) or any `pure?/1`-true RHS — stays eager
+  in the return tuple. A **side-effect-possible getter** (`Repo.get`, a
+  local `get_user/1`) is wrapped in a **lazy thunk** (`fn -> … end`)
+  returned in a `*_fun` slot: the needing clause forces it (`u = u_fun.()`),
+  the others underscore the slot and never run it (laziness is a correctness
+  requirement here — an eager pull would run the getter for clauses that
+  don't need it). The near match qualifies only when the extra is safely
+  deferrable (at the boundary, read solely in the bearer's tail, reading
+  only params/shared-prolog bindings, exactly one bearer); otherwise the
+  exact-match path runs unchanged. A dedicated `field_access_over_param?`
+  predicate accepts the dotted field-access chain that `pure?/1` rejects
+  (its root is a dot-call, not an `__aliases__`).
 - LiftUntypedParamToStructPattern (#222 follow-up): close the delegation
   field-leak the first #222 fix missed. A private `defp` narrowed by
   field-superset is allowed, but the field origin now propagates through

@@ -602,4 +602,468 @@ defmodule Number42.Refactors.Ex.ExtractCommonPrologTest do
       assert_idempotent(@subject, source)
     end
   end
+
+  describe "near-match — one clause carries an extra boundary getter" do
+    # Slice 1: the extra is a PURE field-access chain over a helper param
+    # (`socket.assigns.current_user`). `pure?/1` rejects the dotted chain
+    # (its root is a dot-call, not an `__aliases__`), so a dedicated
+    # `field_access_over_param?` predicate accepts it. Pure reads stay
+    # EAGER in the return tuple — no thunk. The non-needing clause
+    # underscores the eager slot.
+    test "extra pure field-access read -> eager extra slot, non-bearer underscores it" do
+      before_source = """
+      defmodule M do
+        def handle_event("save", params, socket) do
+          socket = assign(socket, :loading, true)
+          socket = assign(socket, :error, nil)
+          current_user = socket.assigns.current_user
+          finish(socket, save(params, current_user))
+        end
+
+        def handle_event("delete", params, socket) do
+          socket = assign(socket, :loading, true)
+          socket = assign(socket, :error, nil)
+          finish(socket, delete(socket))
+        end
+      end
+      """
+
+      after_source = """
+      defmodule M do
+        def handle_event("save", params, socket) do
+          {current_user, socket} = prepare_handle_event(socket)
+          finish(socket, save(params, current_user))
+        end
+
+        def handle_event("delete", params, socket) do
+          {_current_user, socket} = prepare_handle_event(socket)
+          finish(socket, delete(socket))
+        end
+
+        defp prepare_handle_event(socket) do
+          socket = assign(socket, :loading, true)
+          socket = assign(socket, :error, nil)
+          current_user = socket.assigns.current_user
+          {current_user, socket}
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, after_source)
+    end
+
+    # Slice 2: the extra is a side-effect-possible getter (`Repo.get/2`).
+    # It must NOT run for the non-needing clause, so it is wrapped in a
+    # thunk (`fn -> ... end`) and forced (`u = u_fun.()`) only at the
+    # bearer. The non-bearer underscores the thunk slot and never forces.
+    test "extra DB getter -> lazy thunk slot, bearer forces, non-bearer underscores" do
+      before_source = """
+      defmodule M do
+        def handle_event("save", params, socket) do
+          socket = assign(socket, :loading, true)
+          socket = assign(socket, :error, nil)
+          user = Repo.get(User, socket.assigns.id)
+          finish(socket, save(params, user))
+        end
+
+        def handle_event("delete", params, socket) do
+          socket = assign(socket, :loading, true)
+          socket = assign(socket, :error, nil)
+          finish(socket, delete(socket))
+        end
+      end
+      """
+
+      after_source = """
+      defmodule M do
+        def handle_event("save", params, socket) do
+          {socket, user_fun} = prepare_handle_event(socket)
+          user = user_fun.()
+          finish(socket, save(params, user))
+        end
+
+        def handle_event("delete", params, socket) do
+          {socket, _user_fun} = prepare_handle_event(socket)
+          finish(socket, delete(socket))
+        end
+
+        defp prepare_handle_event(socket) do
+          socket = assign(socket, :loading, true)
+          socket = assign(socket, :error, nil)
+          {socket, fn -> Repo.get(User, socket.assigns.id) end}
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, after_source)
+    end
+
+    # Slice 2 again, with a LOCAL getter (`get_user/1`) instead of a
+    # remote one — also side-effect-possible, also lazy.
+    test "extra local getter -> lazy thunk slot" do
+      before_source = """
+      defmodule M do
+        def a(ctx) do
+          ctx = put(ctx, :loading, true)
+          ctx = put(ctx, :error, nil)
+          user = get_user(ctx)
+          render_a(ctx, user)
+        end
+
+        def b(ctx) do
+          ctx = put(ctx, :loading, true)
+          ctx = put(ctx, :error, nil)
+          render_b(ctx)
+        end
+      end
+      """
+
+      after_source = """
+      defmodule M do
+        def a(ctx) do
+          {ctx, user_fun} = prepare_common_prolog(ctx)
+          user = user_fun.()
+          render_a(ctx, user)
+        end
+
+        def b(ctx) do
+          {ctx, _user_fun} = prepare_common_prolog(ctx)
+          render_b(ctx)
+        end
+
+        defp prepare_common_prolog(ctx) do
+          ctx = put(ctx, :loading, true)
+          ctx = put(ctx, :error, nil)
+          {ctx, fn -> get_user(ctx) end}
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, after_source)
+    end
+
+    # Slice 3: ≥ 3 functions where only one carries the extra; the other
+    # two share the plain prolog. The lazy thunk slot coexists with the
+    # eager live binding (`ctx`).
+    test "three functions, only one carries the lazy extra getter" do
+      before_source = """
+      defmodule M do
+        def a(ctx) do
+          ctx = put(ctx, :loading, true)
+          ctx = put(ctx, :error, nil)
+          user = get_user(ctx)
+          render_a(ctx, user)
+        end
+
+        def b(ctx) do
+          ctx = put(ctx, :loading, true)
+          ctx = put(ctx, :error, nil)
+          render_b(ctx)
+        end
+
+        def c(ctx) do
+          ctx = put(ctx, :loading, true)
+          ctx = put(ctx, :error, nil)
+          render_c(ctx)
+        end
+      end
+      """
+
+      after_source = """
+      defmodule M do
+        def a(ctx) do
+          {ctx, user_fun} = prepare_common_prolog(ctx)
+          user = user_fun.()
+          render_a(ctx, user)
+        end
+
+        def b(ctx) do
+          {ctx, _user_fun} = prepare_common_prolog(ctx)
+          render_b(ctx)
+        end
+
+        def c(ctx) do
+          {ctx, _user_fun} = prepare_common_prolog(ctx)
+          render_c(ctx)
+        end
+
+        defp prepare_common_prolog(ctx) do
+          ctx = put(ctx, :loading, true)
+          ctx = put(ctx, :error, nil)
+          {ctx, fn -> get_user(ctx) end}
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, after_source)
+    end
+  end
+
+  describe "near-match — compiles, lazy slot is real, idempotent" do
+    test "lazy thunk output compiles clean under warnings-as-errors" do
+      before_source = """
+      defmodule M do
+        def a(state) do
+          state = Map.put(state, :loading, true)
+          state = Map.put(state, :error, nil)
+          extra = fetch_extra(state)
+          {:a, state, extra}
+        end
+
+        def b(state) do
+          state = Map.put(state, :loading, true)
+          state = Map.put(state, :error, nil)
+          {:b, state}
+        end
+
+        defp fetch_extra(state), do: map_size(state)
+      end
+      """
+
+      rewritten = apply_refactor(@subject, before_source)
+
+      assert rewritten =~ "fn -> fetch_extra(state) end"
+      assert rewritten =~ "extra = extra_fun.()"
+      # Slots are sorted (`extra_fun` < `state`); the non-bearer underscores
+      # the thunk slot and never forces it.
+      assert rewritten =~ "{_extra_fun, state} = prepare_common_prolog(state)"
+      assert_compiles(rewritten)
+    end
+
+    test "eager pure field-access output compiles clean" do
+      before_source = """
+      defmodule M do
+        def a(state) do
+          state = Map.put(state, :loading, true)
+          state = Map.put(state, :error, nil)
+          extra = Map.get(state, :extra)
+          {:a, state, extra}
+        end
+
+        def b(state) do
+          state = Map.put(state, :loading, true)
+          state = Map.put(state, :error, nil)
+          {:b, state}
+        end
+      end
+      """
+
+      rewritten = apply_refactor(@subject, before_source)
+
+      # `Map.get/2` is pure → eager, no thunk.
+      refute rewritten =~ "fn ->"
+      assert rewritten =~ "extra = Map.get(state, :extra)"
+      assert_compiles(rewritten)
+    end
+
+    test "near-match rewrite is idempotent (second pass is a no-op)" do
+      source = """
+      defmodule M do
+        def a(ctx) do
+          ctx = put(ctx, :loading, true)
+          ctx = put(ctx, :error, nil)
+          user = get_user(ctx)
+          render_a(ctx, user)
+        end
+
+        def b(ctx) do
+          ctx = put(ctx, :loading, true)
+          ctx = put(ctx, :error, nil)
+          render_b(ctx)
+        end
+      end
+      """
+
+      assert_idempotent(@subject, source)
+    end
+  end
+
+  describe "near-match — falls back to exact-match (no extraction)" do
+    # The extra getter sits in the MIDDLE of the shared prolog, not at the
+    # boundary — it interrupts the common run, so it isn't a deferrable
+    # boundary extra. No extraction.
+    test "extra getter mid-prolog is not deferrable" do
+      source = """
+      defmodule M do
+        def a(ctx) do
+          ctx = put(ctx, :loading, true)
+          user = get_user(ctx)
+          ctx = put(ctx, :error, nil)
+          render_a(ctx, user)
+        end
+
+        def b(ctx) do
+          ctx = put(ctx, :loading, true)
+          ctx = put(ctx, :error, nil)
+          render_b(ctx)
+        end
+      end
+      """
+
+      assert_unchanged(@subject, source)
+    end
+
+    # The extra getter's value is consumed by a statement the other clauses
+    # ALSO share after the boundary — so the value is needed everywhere and
+    # can't be deferred to one clause. Falls back.
+    test "extra getter consumed by a shared follow-up line is not deferrable" do
+      source = """
+      defmodule M do
+        def a(ctx) do
+          ctx = put(ctx, :loading, true)
+          user = get_user(ctx)
+          ctx = with_user(ctx, user)
+          render_a(ctx)
+        end
+
+        def b(ctx) do
+          ctx = put(ctx, :loading, true)
+          ctx = with_user(ctx, user)
+          render_b(ctx)
+        end
+      end
+      """
+
+      assert_unchanged(@subject, source)
+    end
+
+    # Two clauses each carry a (different) extra statement. The near-match
+    # path allows exactly one bearer; two disqualifies. Falls back to the
+    # exact-match path: the shared `put;put` prolog is still extracted, and
+    # each clause's extra stays inline in its own tail.
+    test "two clauses carrying extras falls back to exact-match (extras stay inline)" do
+      before_source = """
+      defmodule M do
+        def a(ctx) do
+          ctx = put(ctx, :loading, true)
+          ctx = put(ctx, :error, nil)
+          user = get_user(ctx)
+          render_a(ctx, user)
+        end
+
+        def b(ctx) do
+          ctx = put(ctx, :loading, true)
+          ctx = put(ctx, :error, nil)
+          token = get_token(ctx)
+          render_b(ctx, token)
+        end
+      end
+      """
+
+      after_source = """
+      defmodule M do
+        def a(ctx) do
+          ctx = prepare_common_prolog(ctx)
+          user = get_user(ctx)
+          render_a(ctx, user)
+        end
+
+        def b(ctx) do
+          ctx = prepare_common_prolog(ctx)
+          token = get_token(ctx)
+          render_b(ctx, token)
+        end
+
+        defp prepare_common_prolog(ctx) do
+          ctx = put(ctx, :loading, true)
+          ctx = put(ctx, :error, nil)
+          ctx
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, after_source)
+    end
+
+    # The extra is a bare side-effecting call with no binding (`log(ctx)`).
+    # There is no value to thread back, so the near-match path declines and
+    # the exact-match path runs, leaving `log(ctx)` inline in `a`.
+    test "bare side-effecting extra call (no binding) falls back to exact-match" do
+      before_source = """
+      defmodule M do
+        def a(ctx) do
+          ctx = put(ctx, :loading, true)
+          ctx = put(ctx, :error, nil)
+          log(ctx)
+          render_a(ctx)
+        end
+
+        def b(ctx) do
+          ctx = put(ctx, :loading, true)
+          ctx = put(ctx, :error, nil)
+          render_b(ctx)
+        end
+      end
+      """
+
+      after_source = """
+      defmodule M do
+        def a(ctx) do
+          ctx = prepare_common_prolog(ctx)
+          log(ctx)
+          render_a(ctx)
+        end
+
+        def b(ctx) do
+          ctx = prepare_common_prolog(ctx)
+          render_b(ctx)
+        end
+
+        defp prepare_common_prolog(ctx) do
+          ctx = put(ctx, :loading, true)
+          ctx = put(ctx, :error, nil)
+          ctx
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, after_source)
+    end
+
+    # The extra getter reads a var that is neither a helper param nor bound
+    # by the shared prolog (`token` is a param of `a` only, the helper takes
+    # only `ctx`). It can't be evaluated inside the helper, so the near-match
+    # path declines and the exact-match path leaves it inline in `a`.
+    test "extra getter reading a non-param, non-prolog var falls back to exact-match" do
+      before_source = """
+      defmodule M do
+        def a(ctx, token) do
+          ctx = put(ctx, :loading, true)
+          ctx = put(ctx, :error, nil)
+          user = get_user(token)
+          render_a(ctx, user)
+        end
+
+        def b(ctx) do
+          ctx = put(ctx, :loading, true)
+          ctx = put(ctx, :error, nil)
+          render_b(ctx)
+        end
+      end
+      """
+
+      after_source = """
+      defmodule M do
+        def a(ctx, token) do
+          ctx = prepare_common_prolog(ctx)
+          user = get_user(token)
+          render_a(ctx, user)
+        end
+
+        def b(ctx) do
+          ctx = prepare_common_prolog(ctx)
+          render_b(ctx)
+        end
+
+        defp prepare_common_prolog(ctx) do
+          ctx = put(ctx, :loading, true)
+          ctx = put(ctx, :error, nil)
+          ctx
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, after_source)
+    end
+  end
 end
