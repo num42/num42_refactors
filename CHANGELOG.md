@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `ExtractCommonProlog` (#241): the single near-match extra may now sit in the **middle** of the shared prolog, not only at its boundary — statements after the inserted extra still count toward the shared run (so `a; b; c` vs `a; c` shares `a` then `c` with `b` as the lone extra). The prolog is aligned by allowing exactly one clause to skip one position; the split is taken only when the extra is safely deferrable (its inputs are not rebound by a later shared statement, and — for a **lazy** extra — every shared statement after it is `pure?`-true, so its deferred side effect is not reordered past another), else the exact-match path runs unchanged.
 - `ExtractCommonProlog` (#232): now fires on **near matches**, not just
   byte-identical prologs. When several contiguous functions share a prolog
   and exactly **one** clause carries a single extra binding at the prolog
