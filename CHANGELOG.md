@@ -21,6 +21,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already taken, and the wrapper's `_` at the dropped position keeps the
   rewrite idempotent. `defp` behaviour and the default (`public: false`,
   every `def` skipped) are unchanged. (#83)
+- LiftUntypedParamToStructPattern (#222): field-superset narrowing (a pure
+  `.field`-reading body) now fires only on a **private `defp`**, whose
+  caller set is fully in project. A **public `def`** is no longer narrowed
+  on field-superset alone (`:public_field_only` decline) — an out-of-corpus
+  caller could pass a bare map with the same fields that a `%Struct{}` head
+  would reject at runtime. The decline still flows to the stronger sources
+  (call sites, AST delegation, Dialyzer), which rescue a public def when
+  they have real evidence of the struct; a `@spec` still binds. A declined
+  public field-only lift is also kept out of the delegation receiver index
+  so it can't leak its unproven type to delegating callers.
 
 ### Added
 

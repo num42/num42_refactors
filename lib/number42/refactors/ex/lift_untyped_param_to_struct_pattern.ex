@@ -44,6 +44,16 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPattern do
      struct's is*, that is the type. Two or more fit → ambiguous →
      decline. None fit → decline (the value is a map, not a struct — e.g.
      a `select`-projection with join/compute fields no struct carries).
+     This source is duck-typing — a pure `.field`-reading body proves the
+     value *has* those fields, not that it *is* that struct. It therefore
+     narrows only a **private `defp`**, whose entire caller set is in
+     project and visible to the cross-file scan. A **public `def`** is
+     left untouched on field-superset alone (`:public_field_only`): an
+     out-of-corpus caller could pass a bare map with the same fields, and
+     a `%Struct{}` head would reject it at runtime (#222). The decline
+     still flows to sources 2/4/5, which rescue the public def when they
+     have real evidence (a struct-passing call site, a typed receiver, or
+     a Dialyzer success typing).
   4. **AST delegation.** A param the body proves nothing about but passes
      **whole** into a call (`f(arg), do: Shared.g(arg)`) borrows its type
      from the receiver's head: if `g/1` pattern-matches `%Scope{}` at that
@@ -853,9 +863,10 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPattern do
 
   # --- clause collection ---
 
-  # Each clause as `%{module:, name:, arity:, path:, params:, body:,
-  # spec:}`; `params` is the head arg list, `spec` the arg-type list from
-  # a matching `@spec` (or nil).
+  # Each clause as `%{module:, name:, arity:, kind:, path:, params:, body:,
+  # spec:}`; `kind` is `:def` (public) or `:defp` (private), `params` is
+  # the head arg list, `spec` the arg-type list from a matching `@spec` (or
+  # nil).
   defp clauses_in_source({path, src}) do
     case Sourceror.parse_string(src) do
       {:ok, ast} -> ast |> Macro.prewalker() |> Enum.flat_map(&module_clauses(&1, path))
@@ -886,6 +897,7 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPattern do
             module: module,
             name: name,
             arity: length(args),
+            kind: kind,
             path: path,
             params: args,
             body: clause_body(rest),
@@ -958,6 +970,13 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPattern do
 
   defp add_lift_receiver(receivers, %{struct: struct}) when is_list(struct), do: receivers
 
+  # A public def narrowed by field-superset alone is duck-typing across an
+  # open boundary (#222): it must not become a delegation receiver, or it
+  # would leak the (unproven) struct type to delegating callers in the next
+  # fixpoint round. Public defs lifted by real evidence (`:call_site`,
+  # `:delegation`, `:dialyzer`, `:spec`) DO register — their type is proven.
+  defp add_lift_receiver(receivers, %{kind: :def, via: :fields}), do: receivers
+
   defp add_lift_receiver(receivers, %{pos: pos, struct: struct} = lift) do
     key = {lift.module, lift.name, lift.arity}
     Map.update(receivers, key, %{pos => struct}, &Map.put_new(&1, pos, struct))
@@ -1011,6 +1030,7 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPattern do
       module: ref.module,
       name: ref.name,
       arity: ref.arity,
+      kind: ref.kind,
       pos: pos,
       param: param,
       struct: struct,
@@ -1332,7 +1352,7 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPattern do
         {:decline, :builds_struct_from_param, var}
 
       true ->
-        infer_from_fields(clause.body, var, ctx.structs, ctx.min_fields)
+        infer_from_fields(clause.body, var, clause.kind, ctx.structs, ctx.min_fields)
     end
   end
 
@@ -1359,7 +1379,7 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPattern do
     end)
   end
 
-  defp infer_from_fields(body, var, structs, min_fields) do
+  defp infer_from_fields(body, var, kind, structs, min_fields) do
     accesses = field_accesses(body, var)
     distinctive = Enum.reject(accesses, &(&1 in @generic_fields))
 
@@ -1370,12 +1390,24 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPattern do
       {:decline, :too_few_distinctive_fields, var}
     else
       case unique_superset(MapSet.new(accesses), structs) do
-        {:ok, struct} -> {:lift, struct, :fields, var}
+        {:ok, struct} -> field_verdict(struct, var, kind)
         :ambiguous -> {:decline, :ambiguous_struct, var}
         :none -> {:decline, :no_struct_fits, var}
       end
     end
   end
+
+  # Field-superset is duck-typing: a pure `.field`-reading body proves the
+  # value carries those fields, NOT that it is *that* struct. For a private
+  # `defp` every caller is in-project and visible to the cross-file scan,
+  # so a unique field-superset is safe to narrow. For a PUBLIC `def` the
+  # caller set is open — an out-of-corpus caller may pass a bare map with
+  # the same fields, which a `%Struct{}` head would reject at runtime (#222).
+  # So a public def DECLINES on field-superset alone; the decline still
+  # flows to the later sources (call sites, delegation, Dialyzer), which
+  # rescue it when they have real evidence the value is that struct.
+  defp field_verdict(struct, var, :defp), do: {:lift, struct, :fields, var}
+  defp field_verdict(_struct, var, :def), do: {:decline, :public_field_only, var}
 
   # The struct a `@spec` names for this position, if it is an in-project
   # struct (`Position.t()` → `Position` when `Position` has a defstruct).
