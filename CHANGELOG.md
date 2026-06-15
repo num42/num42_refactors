@@ -72,6 +72,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `ExtractSharedModule` (#243): no longer appends a `def name/arity` to an
+  existing `*.Shared` destination that already provides that signature via
+  `defdelegate` — the appended clause was dead (the delegate matches first) and
+  broke `mix compile --warnings-as-errors`. The destination-dedup now counts
+  `defdelegate` heads alongside `def`/`defp`. `mix refactor --auto` also commits
+  cross-file side-writes that land during an otherwise-unchanged unit, so a
+  legitimate append to a tracked destination is no longer left uncommitted.
 - `mix refactor --auto` (#237): files a refactor *generates* are now staged
   in the per-unit commit, so cross-file extraction converges. Refactors like
   `ExtractSharedModule` write a new `*.Shared` host in `prepare/1`; the

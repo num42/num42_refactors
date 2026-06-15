@@ -1102,6 +1102,56 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
       assert defs_count == 1,
              "expected exactly one `def shared_op(x, y)` clause (existing wins), got #{defs_count}\n#{shared_source}"
     end
+
+    test "existing defdelegate of same name/arity blocks the appended def (#243)", %{tmp: tmp} do
+      shared_path = Path.join(tmp, "lib/my_app/items/shared.ex")
+      File.mkdir_p!(Path.dirname(shared_path))
+
+      # The Shared module already delegates `shared_op/2` to another
+      # winner (e.g. emitted by DelegateExactDuplicates in an earlier
+      # pass and committed). The same-name/arity `defdelegate` already
+      # provides the function — appending a `def shared_op/2` here would
+      # create a DEAD second clause (the defdelegate matches first),
+      # warning under --warnings-as-errors. The refactor must detect the
+      # destination already provides the signature and decline. (#243)
+      existing = """
+      defmodule MyApp.Items.Shared do
+        defdelegate shared_op(x, y), to: MyApp.Other.Impl
+      end
+      """
+
+      File.write!(shared_path, existing)
+
+      a = """
+      defmodule MyApp.Items.A do
+        def shared_op(x, y) do
+          x
+          |> Kernel.+(y)
+          |> Kernel.*(2)
+        end
+      end
+      """
+
+      b = """
+      defmodule MyApp.Items.B do
+        def shared_op(x, y) do
+          x
+          |> Kernel.+(y)
+          |> Kernel.*(2)
+        end
+      end
+      """
+
+      _plan = prepared([{"a.ex", a}, {"b.ex", b}], write_root: tmp)
+
+      shared_source = File.read!(shared_path)
+
+      assert shared_source =~ "defdelegate shared_op(x, y)",
+             "existing defdelegate was clobbered:\n#{shared_source}"
+
+      refute shared_source =~ ~r/\bdef shared_op\(x, y\)/,
+             "a dead `def shared_op/2` was appended next to the defdelegate:\n#{shared_source}"
+    end
   end
 
   describe "regression — lift completes into the canonical Shared (#6 + #9)" do

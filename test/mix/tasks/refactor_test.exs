@@ -91,6 +91,22 @@ defmodule Mix.Tasks.RefactorTest do
       refute "stray.txt" in staged
     end
 
+    test "stages a side-write generated during an unchanged unit (#243)", %{repo: repo} do
+      # The unit's own input file does NOT change, but a refactor's
+      # `prepare/1` appended to an existing tracked destination. With no
+      # input paths to stage, the baseline delta must still surface the
+      # modified destination so it can be committed instead of orphaned.
+      baseline = Refactor.git_porcelain_paths(repo)
+      assert baseline == MapSet.new()
+
+      File.write!(Path.join(repo, "a.ex"), "defmodule A do\n  def y, do: 2\nend\n")
+
+      generated = Refactor.stage_paths([], baseline, repo)
+
+      assert "a.ex" in generated,
+             "a destination modified during an unchanged unit was not detected: #{inspect(generated)}"
+    end
+
     test "after staging + commit, the generated file is tracked and the tree converges", %{
       repo: repo
     } do
