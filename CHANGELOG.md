@@ -31,6 +31,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   they have real evidence of the struct; a `@spec` still binds. A declined
   public field-only lift is also kept out of the delegation receiver index
   so it can't leak its unproven type to delegating callers.
+- ExtractRepeatedGuardToDefguard: now also lifts a body `if` whose
+  condition is a **complex** guard expression (≥ 2 guard operators) into a
+  named `defguardp` plus two guard-driven clauses
+  (`def f(x) do if COND, do: A, else: B end` → `defguardp valid_x(x) when
+  COND` + `def f(x) when valid_x(x), do: A` / `def f(x), do: B`). A
+  one-operator condition is declined and left to `ExtractCondIfGuardClauses`
+  (inline `when`), which has no naming value; runs at priority 70 so the
+  named form wins on complex conditions before the inline lifter sees them.
+  Truthiness is preserved (non-boolean conditions wrapped in
+  `not in [nil, false]`) and unused params in the lifted clauses are
+  underscored. The existing repeated-head-guard extraction is unchanged.
 
 ### Added
 
