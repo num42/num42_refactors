@@ -71,6 +71,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `mix refactor --auto` (#237): files a refactor *generates* are now staged
+  in the per-unit commit, so cross-file extraction converges. Refactors like
+  `ExtractSharedModule` write a new `*.Shared` host in `prepare/1`; the
+  auto-stager only knew about the per-unit input paths, so the generated file
+  stayed untracked, got re-created from scratch every fixpoint pass, and the
+  run never settled. `--auto` now snapshots the working tree
+  (`git status --porcelain`) *before* each unit and stages the delta — the
+  files this unit actually created/touched — alongside the input paths.
+  Untracked files that already existed before the unit ran are excluded, so
+  unrelated dirty files in the tree are left alone (no `git add -A`). Together
+  with the #226 delegate-idempotence fix, the position-db fixpoint dogfood now
+  converges instead of accumulating an untracked host every pass.
 - `LiftUntypedParamToStructPattern` (#234): a field-superset narrowing of a
   private helper no longer leaks to a public `def` that forwards a whole,
   open param into it through delegation — including the one-line
