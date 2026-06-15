@@ -54,6 +54,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `CanonicalStatementOrder` (#233): reorders independent statements
+  inside a `def`/`defp` body into a deterministic **canonical order** so
+  two bodies that differ only in the ordering of order-independent
+  statements collapse to the same normalized-AST fingerprint — making
+  them detectable as clones by `DelegateExactDuplicates` (which hashes
+  an order-sensitive statement list). Builds a def-use + side-effect
+  dependency DAG per body (RAW/WAW/WAR hazards, rebinding chains,
+  destructuring patterns) and emits a Kahn topological order whose
+  tie-break is a three-stage total key: a variable-name-independent
+  `:erlang.phash2` of the normalized statement, then the structural
+  `Sourceror.to_string`, then the original index — so the output is
+  unique and idempotent. Two not-provably-pure statements keep their
+  relative source order (conservative side-effect ordering);
+  control-flow forms (`case`/`cond`/`if`/`with`/`for`/…), pins (`^x`),
+  and dynamic pattern keys are barriers that segment the body and stay
+  fixed; the trailing return value is never sorted forward. Statements
+  are sliced verbatim and reassembled as one Sourceror patch (no
+  re-rendering, so string escapes/pipes survive). **Default-OFF**
+  (`enabled: true` to opt in), `priority: 300` so it runs before the
+  clone detectors, configurable `min_block_statements` (default 3).
 - InlineDefdelegate (#225): the inverse of the move-method delegations —
   rewrites every in-corpus call site of a `defdelegate`'d function to call
   the delegated target directly (alias-aware: short form when the caller
