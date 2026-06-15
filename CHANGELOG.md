@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- LiftUntypedParamToStructPattern (#222 follow-up): close the delegation
+  field-leak the first #222 fix missed. A private `defp` narrowed by
+  field-superset is allowed, but the field origin now propagates through
+  `:delegation` (tagged `:delegation_field`), so a PUBLIC `def` delegating
+  the whole var into that helper — directly or through a chain of private
+  hops — is no longer narrowed (`:public_field_delegation` decline). A bare
+  map from an out-of-corpus caller of the public wrapper would otherwise be
+  rejected by the injected `%Struct{}` head at runtime. Found dogfooding
+  position-db (`build_attr_constraints_for_test` → `build_attr_constraints`).
 - `PushParamIntoCallee`: added a `public: true` mode that also rewrites
   public `def` callees (previously `defp`-only). Dropping a public
   function's parameter is an arity change external callers can't see, so

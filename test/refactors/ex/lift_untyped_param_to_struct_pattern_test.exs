@@ -189,6 +189,62 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPatternTest do
       assert %{reason: :param_passed_to_call} = declined(p, :h)
       refute Map.has_key?(p.receivers, {P, :f, 1})
     end
+
+    test "a private field-only lift does not leak to a PUBLIC def via delegation (#222)" do
+      # position-db dogfood regression: a PRIVATE `defp` is field-superset
+      # narrowed (allowed — its callers are all in-corpus), but a PUBLIC
+      # def that delegates the whole var to it must NOT inherit the struct
+      # type across the open public boundary. The private narrowing is
+      # field-origin (duck-typed), so an out-of-corpus caller of the public
+      # wrapper could still pass a bare map.
+      modules = [
+        {"M",
+         "  def public_wrapper(attr), do: build(attr)\n" <>
+           "  defp build(a), do: {a.parent_id, a.depth}\n"}
+      ]
+
+      p = plan(modules)
+      # the private helper still narrows on field-superset
+      assert %{struct: Position, via: :fields} = lift(p, :build)
+      # but the public wrapper must NOT be narrowed — the field origin must
+      # not propagate across the public boundary through delegation
+      assert %{reason: reason} = declined(p, :public_wrapper)
+      assert reason in [:public_field_delegation, :param_passed_to_call]
+    end
+
+    test "a private field-only lift STILL propagates to a private def via delegation" do
+      # the boundary only applies to PUBLIC defs; a private-to-private
+      # delegation of a field-narrowed type stays a valid lift. It is tagged
+      # `:delegation_field` (not plain `:delegation`) so the field origin
+      # keeps propagating — a PUBLIC def further up the chain would still be
+      # caught at the boundary.
+      modules = [
+        {"M",
+         "  defp wrapper(attr), do: build(attr)\n" <>
+           "  defp build(a), do: {a.parent_id, a.depth}\n"}
+      ]
+
+      p = plan(modules)
+      assert %{struct: Position, via: :fields} = lift(p, :build)
+      assert %{struct: Position, via: :delegation_field} = lift(p, :wrapper)
+    end
+
+    test "the field origin propagates transitively: defp -> defp -> PUBLIC def is caught" do
+      # wrapper2 (public) delegates to wrapper1 (private) which delegates to
+      # build (private, field-narrowed). The field origin must survive both
+      # hops and still block the public boundary.
+      modules = [
+        {"M",
+         "  def wrapper2(attr), do: wrapper1(attr)\n" <>
+           "  defp wrapper1(attr), do: build(attr)\n" <>
+           "  defp build(a), do: {a.parent_id, a.depth}\n"}
+      ]
+
+      p = plan(modules)
+      assert %{struct: Position, via: :fields} = lift(p, :build)
+      assert %{struct: Position, via: :delegation_field} = lift(p, :wrapper1)
+      assert %{reason: :public_field_delegation} = declined(p, :wrapper2)
+    end
   end
 
   describe "lifting via an existing @spec" do
