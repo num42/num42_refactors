@@ -776,7 +776,7 @@ defmodule Number42.Refactors.Ex.ExtractSharedModule do
 
   defp canonical_public_keys(body_exprs) do
     body_exprs
-    |> Enum.filter(&match?({:def, _, _}, &1))
+    |> Enum.filter(&match?({kind, _, _} when kind in [:def, :defdelegate], &1))
     |> Enum.map(&clause_name_arity/1)
     |> Enum.reject(&match?({nil, _}, &1))
     |> MapSet.new()
@@ -867,10 +867,14 @@ defmodule Number42.Refactors.Ex.ExtractSharedModule do
     |> MapSet.new()
   end
 
+  # A `defdelegate name/arity` already provides that signature. Counting
+  # it here means the append path drops a same-name/arity clone instead
+  # of writing a `def` next to the delegate — which would shadow it as a
+  # dead clause and warn under --warnings-as-errors (#243).
   defp existing_function_keys(body_exprs) do
     body_exprs
     |> Enum.filter(fn
-      {kind, _, _} when kind in [:def, :defp] -> true
+      {kind, _, _} when kind in [:def, :defp, :defdelegate] -> true
       _ -> false
     end)
     |> Enum.map(&clause_name_arity/1)

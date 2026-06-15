@@ -690,9 +690,43 @@ defmodule Mix.Tasks.Refactor do
           decide_file_step(file, applied, reformat?, baseline, new_acc, halt?, run_opts)
 
         :unchanged ->
+          # The engine still ran `prepare/1` for every refactor on this
+          # file (Engine.run resolves all plans up front), so a cross-file
+          # side-write (e.g. ExtractSharedModule appending to an existing
+          # `*.Shared` host) can land here even though THIS file did not
+          # change. With no commit on the unchanged branch that write is
+          # orphaned: it's already dirty by the time any later changed
+          # unit snapshots its baseline, so #237's `after − before` delta
+          # excludes it and it never gets staged. Commit the delta as its
+          # own unit so no refactor-authored change is left behind (#243).
+          commit_generated_orphans(baseline, run_opts)
           {:cont, acc}
       end
     end)
+  end
+
+  # Stage + commit any working-tree change that appeared during an
+  # otherwise-unchanged unit. These are side-writes from a refactor's
+  # `prepare/1` (cross-file destinations) that no per-file commit would
+  # otherwise pick up.
+  defp commit_generated_orphans(_baseline, %{auto?: false}), do: :ok
+  defp commit_generated_orphans(_baseline, %{dry_run?: true}), do: :ok
+
+  defp commit_generated_orphans(baseline, run_opts) do
+    case stage_paths([], baseline) do
+      [] ->
+        :ok
+
+      generated ->
+        validate_or_halt!(generated, run_opts)
+
+        git_commit!(
+          generated,
+          "refactor(auto): generated #{length(generated)} cross-file destination(s)",
+          generated |> Enum.join("\n"),
+          [{"Refactored-By", "mix refactor"}, {"Refactor-Mode", "generated"}]
+        )
+    end
   end
 
   defp decide_file_step(file, applied, reformat?, baseline, new_acc, halt?, run_opts) do
