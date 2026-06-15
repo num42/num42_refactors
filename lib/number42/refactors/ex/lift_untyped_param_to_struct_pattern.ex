@@ -251,6 +251,7 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPattern do
           dialyzer: Map.get(plan, :dialyzer, %{}),
           receivers: Map.get(plan, :receivers, %{}),
           field_origins: Map.get(plan, :field_origins, MapSet.new()),
+          public_targets: Map.get(plan, :public_targets, MapSet.new()),
           min_fields: Map.get(plan, :min_fields, @default_min_fields)
         }
 
@@ -293,12 +294,14 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPattern do
     call_sites = call_site_index(visible, structs, getters)
     dialyzer = dialyzer_index(opts, structs)
     seed_receivers = receiver_index(clauses, structs)
+    public_targets = public_delegation_targets(clauses, structs)
 
     base_ctx = %{
       structs: structs,
       call_sites: call_sites,
       dialyzer: dialyzer,
-      min_fields: min_fields
+      min_fields: min_fields,
+      public_targets: public_targets
     }
 
     {lifts, declined, receivers, field_origins} =
@@ -310,6 +313,7 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPattern do
       dialyzer: dialyzer,
       receivers: receivers,
       field_origins: field_origins,
+      public_targets: public_targets,
       min_fields: min_fields,
       lifts: lifts,
       declined: declined
@@ -726,6 +730,108 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPattern do
 
   defp param_struct(_node, _structs), do: nil
 
+  # --- public-delegation poison set (#234) ---
+
+  # The receiver `{key, pos}` positions a PUBLIC def forwards a whole, OPEN
+  # param into, transitively across delegation hops. A field-superset
+  # narrowing of any such position is unsound: the public def's caller set is
+  # open, so an out-of-corpus caller can pass a bare map that flows UNCHANGED
+  # down the chain into the narrowed head and crashes (FunctionClause).
+  #
+  # Only OPEN public positions seed the set — a public param statically
+  # proven to be a struct (`@spec Mod.t()` or an explicit `%Mod{}` head
+  # pattern) cannot receive a bare map, so values it forwards are proven and
+  # downstream narrowing stays sound. (Call-site/Dialyzer proof is
+  # fixpoint-dependent and not consulted here; a public wrapper proven only
+  # that way still poisons its receivers — a safe over-approximation that
+  # merely forgoes a lift, never narrows an open contract.)
+  defp public_delegation_targets(clauses, structs) do
+    edges = delegation_edges(clauses)
+    seed = public_seed(clauses, structs)
+
+    seed
+    |> close_targets(%{}, edges)
+    |> Map.keys()
+    |> MapSet.new()
+  end
+
+  # Breadth-first closure over a plain list worklist: a poisoned `{key, pos}`
+  # poisons every receiver position it forwards its own param into. `seen` is
+  # a plain set-map (`%{pos => true}`) — a MapSet accumulator trips Dialyzer's
+  # opaque check across the recursion. The worklist is finite and each
+  # position is expanded at most once, so this terminates.
+  defp close_targets([], seen, _edges), do: seen
+
+  defp close_targets([pos | rest], seen, edges) when is_map_key(seen, pos),
+    do: close_targets(rest, seen, edges)
+
+  defp close_targets([pos | rest], seen, edges) do
+    next = Map.get(edges, pos, [])
+    close_targets(next ++ rest, Map.put(seen, pos, true), edges)
+  end
+
+  # `%{ {caller_key, caller_head_pos} => [{receiver_key, receiver_pos}] }`
+  # — for every clause, each head param and the call positions it flows into
+  # whole. The receiver `arity` keys the call, not whether it's typed yet, so
+  # this is purely structural.
+  defp delegation_edges(clauses) do
+    clauses
+    |> Enum.flat_map(&clause_edges/1)
+    |> Enum.group_by(fn {from, _to} -> from end, fn {_from, to} -> to end)
+    |> Map.new(fn {from, tos} -> {from, Enum.uniq(tos)} end)
+  end
+
+  defp clause_edges(%{module: enclosing, name: name, arity: arity, params: params, body: body}) do
+    key = {enclosing, name, arity}
+
+    params
+    |> Enum.with_index()
+    |> Enum.flat_map(fn {param_ast, head_pos} ->
+      param_edges(param_ast, {key, head_pos}, body, enclosing)
+    end)
+  end
+
+  defp param_edges(param_ast, from, body, enclosing) do
+    case bare_var(param_ast) do
+      {:ok, var} ->
+        body
+        |> receiver_calls(var, enclosing)
+        |> Enum.map(fn {receiver_key, arg_pos} -> {from, {receiver_key, arg_pos}} end)
+
+      :skip ->
+        []
+    end
+  end
+
+  # The receiver positions a PUBLIC def forwards an OPEN whole param into —
+  # the seed of the transitive poison set. A public head position statically
+  # proven to be a struct (`@spec`/head pattern) is excluded: it cannot carry
+  # a bare map, so what it forwards is proven.
+  defp public_seed(clauses, structs) do
+    clauses
+    |> Enum.filter(&(&1.kind == :def))
+    |> Enum.flat_map(fn clause -> open_clause_edges(clause, structs) end)
+    |> Enum.map(fn {_from, to} -> to end)
+    |> Enum.uniq()
+  end
+
+  # `clause_edges/1` restricted to head positions that are NOT statically
+  # proven a struct — those positions could receive a bare map.
+  defp open_clause_edges(clause, structs) do
+    clause
+    |> clause_edges()
+    |> Enum.reject(fn {{_key, head_pos}, _to} ->
+      proven_position?(clause, head_pos, structs)
+    end)
+  end
+
+  # A head position carries a proven struct when an explicit `%Mod{}` head
+  # pattern pins it or a matching `@spec Mod.t()` names it.
+  defp proven_position?(%{params: params, spec: spec}, pos, structs) do
+    not is_nil(param_struct(Enum.at(params, pos), structs)) or
+      not is_nil(spec_struct(spec, pos, structs))
+  end
+
   # --- project-wide struct index ---
 
   # `%{module => MapSet(field_atoms)}` for every `defstruct` in the
@@ -1038,6 +1144,7 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPattern do
       |> apply_call_sites(key, pos, group, ctx)
       |> apply_delegation(key, pos, group, ctx)
       |> apply_dialyzer(key, pos, group, ctx)
+      |> guard_public_target(key, pos, ctx)
 
     case decided do
       {:lift, struct, via, param} ->
@@ -1293,6 +1400,30 @@ defmodule Number42.Refactors.Ex.LiftUntypedParamToStructPattern do
       struct -> {:ok, struct}
     end
   end
+
+  # The public-boundary backstop (#234). A PUBLIC def declines its own
+  # field-superset narrowing (`field_verdict/3`) and a delegation INTO a
+  # field-origin receiver (`delegation_verdict/5`) — but neither protects a
+  # PRIVATE receiver that a public def forwards a whole param into. The
+  # public wrapper's head stays bare, yet it passes its (possibly bare-map)
+  # argument UNCHANGED into the private helper; narrowing that helper to
+  # `%Struct{}` breaks the open public contract at runtime (FunctionClause).
+  #
+  # `ctx.public_targets` holds every `{key, pos}` a public def reaches by
+  # forwarding a whole param, transitively through delegation hops. A
+  # field-superset lift (`:fields`/`:delegation_field`) landing on such a
+  # position is demoted to a decline — its type rests on duck-typing the
+  # public def can't vouch for. PROVEN lifts (`@spec`/`:call_site`/`:dialyzer`/
+  # plain `:delegation`) stand: the value genuinely is that struct, so
+  # narrowing is sound no matter who forwards into it.
+  defp guard_public_target({:lift, _struct, via, param} = lift, key, pos, ctx)
+       when via in [:fields, :delegation_field] do
+    if MapSet.member?(ctx.public_targets, {key, pos}),
+      do: {:decline, :public_field_delegation_target, param},
+      else: lift
+  end
+
+  defp guard_public_target(decided, _key, _pos, _ctx), do: decided
 
   # A polymorphic lift duplicates one clause into N struct-typed heads. It
   # is only sound when:
