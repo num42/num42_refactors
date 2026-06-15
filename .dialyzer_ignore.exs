@@ -137,6 +137,14 @@
   # `@spec ... :: MapSet.t()` — which instead produces a `contract_with_opaque`
   # error because the success typing builds the struct concretely. Neither is a
   # clean, low-risk change, so these specific findings are scoped out per file.
+  #
+  # `lib/mix/tasks/refactor.ex` joins this list for the same reason: the
+  # `--auto` staging fix (#237) snapshots the working tree with
+  # `git_porcelain_paths/1` (a `MapSet`) and diffs it in `stage_paths/3`.
+  # The locally-built baseline crosses into `stage_paths/3`, whose spec
+  # expects the opaque `MapSet.t()`, so Dialyzer pins the concrete struct
+  # and reports `call_without_opaque`. Same false positive, same scoping.
+  {"lib/mix/tasks/refactor.ex", :call_without_opaque},
   {"lib/number42/refactors/block_segmentation.ex", :call_without_opaque},
   {"lib/number42/refactors/ex/expand_short_form_functions.ex", :call_without_opaque},
   {"lib/number42/refactors/ex/extract_parametric_clone.ex", :call_without_opaque},

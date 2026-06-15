@@ -90,9 +90,13 @@ defmodule Mix.Tasks.Refactor do
   touched). On validation failure the changes are *kept on disk*
   (not reverted) and the loop stops, so the user can inspect and fix
   manually. `--auto` always commits with `--no-verify` to avoid hooks
-  reformatting and re-staging mid-loop, and stages **only** the files
-  the refactor touched (via `git add <path>`), so unrelated dirty
-  files in the working tree are left alone. The one caveat: if your
+  reformatting and re-staging mid-loop, and stages the files the
+  refactor touched plus any file it *generated* this unit (e.g. a
+  cross-file refactor's new `*.Shared` host, written in `prepare/1`) —
+  the latter detected as the working-tree delta against a pre-unit
+  `git status --porcelain` snapshot. Untracked files that existed
+  *before* the unit ran are excluded, so unrelated dirty files in the
+  working tree are left alone. The one caveat: if your
   uncommitted changes happen to live in a file the refactor also
   modifies, those changes ride along in the auto-commit — review the
   diff before letting `--auto` run on a dirty tree. Combine with
@@ -272,7 +276,7 @@ defmodule Mix.Tasks.Refactor do
     {hits, reformat? and hits != []}
   end
 
-  defp auto_commit_file(path, applied, reformat?, run_opts) do
+  defp auto_commit_file(path, applied, reformat?, baseline, run_opts) do
     refactors_short = applied |> Enum.map(&short_name(&1.module)) |> Enum.uniq()
     subject = "refactor(auto): #{path}"
     body = ""
@@ -291,11 +295,11 @@ defmodule Mix.Tasks.Refactor do
     else
       if reformat?, do: reformat_files([path])
       validate_or_halt!([path], run_opts)
-      git_commit!([path], subject, body, trailers)
+      git_commit!(stage_paths([path], baseline), subject, body, trailers)
     end
   end
 
-  defp auto_commit_refactor(module, paths, reformat?, run_opts) do
+  defp auto_commit_refactor(module, paths, reformat?, baseline, run_opts) do
     name = short_name(module)
     subject = "refactor(auto): #{name} over #{length(paths)} file(s)"
     body = paths |> Enum.join("\n")
@@ -311,7 +315,7 @@ defmodule Mix.Tasks.Refactor do
     else
       if reformat?, do: reformat_files(paths)
       validate_or_halt!(paths, run_opts)
-      git_commit!(paths, subject, body, trailers)
+      git_commit!(stage_paths(paths, baseline), subject, body, trailers)
     end
   end
 
@@ -404,6 +408,62 @@ defmodule Mix.Tasks.Refactor do
     args = ["commit", "--no-verify", "-m", message] ++ trailer_args
 
     System.cmd("git", args, stderr_to_stdout: true) |> handle_git_commit_result(subject)
+  end
+
+  # Stage the input paths plus anything this unit newly created/touched.
+  # The engine writes generated files (e.g. ExtractSharedModule's
+  # `*.Shared` host) during `prepare/1`, before the per-file `paths` are
+  # known — so without picking up the working-tree delta they'd stay
+  # untracked, get re-created every fixpoint pass, and never converge
+  # (#237). The baseline is the pre-unit snapshot; the difference against
+  # the post-unit tree is exactly what this unit produced.
+  #
+  # `cwd` is a test seam (`stage_paths/3`); production passes the process
+  # cwd so git runs against the project repo, consistent with the rest of
+  # the `--auto` git calls.
+  @doc false
+  @spec stage_paths([String.t()], MapSet.t(String.t()), Path.t()) :: [String.t()]
+  def stage_paths(paths, baseline, cwd \\ ".") do
+    appeared = MapSet.difference(git_porcelain_paths(cwd), baseline) |> MapSet.to_list()
+    (paths ++ appeared) |> Enum.uniq()
+  end
+
+  # Untracked + modified + staged paths git reports for the working tree,
+  # as a set, so `stage_paths/3` can diff two snapshots. We pick up new
+  # files (??), modifications (?M), and renames — see `parse_porcelain/1`.
+  @doc false
+  @spec git_porcelain_paths(Path.t()) :: MapSet.t(String.t())
+  def git_porcelain_paths(cwd \\ ".") do
+    case System.cmd("git", ["status", "--porcelain"], cd: cwd, stderr_to_stdout: true) do
+      {output, 0} -> parse_porcelain(output)
+      {output, _} -> Mix.raise("--auto: git status failed:\n#{output}")
+    end
+  end
+
+  # Parse `git status --porcelain` (v1) into the set of affected paths.
+  # Each line is `XY <path>` or, for renames, `XY <orig> -> <new>` — we
+  # keep the destination path in the rename case (that's the file now on
+  # disk that needs staging).
+  @doc false
+  @spec parse_porcelain(String.t()) :: MapSet.t(String.t())
+  def parse_porcelain(output) do
+    output
+    |> String.split("\n", trim: true)
+    |> Enum.map(&porcelain_path/1)
+    |> MapSet.new()
+  end
+
+  defp porcelain_path(line) do
+    line
+    |> String.slice(3..-1//1)
+    |> rename_destination()
+  end
+
+  defp rename_destination(path) do
+    case String.split(path, " -> ", parts: 2) do
+      [_orig, dest] -> dest
+      [plain] -> plain
+    end
   end
 
   defp handle_amend_result({_, 0}),
@@ -617,10 +677,17 @@ defmodule Mix.Tasks.Refactor do
 
     files
     |> Enum.reduce_while({[], false}, fn file, {changed_acc, reformat_acc} = acc ->
+      # Snapshot the working tree *before* the engine runs: `prepare/1`
+      # of cross-file refactors (e.g. ExtractSharedModule) writes new
+      # `*.Shared` files here, which never appear in the per-file `paths`
+      # the auto-stager knows about. Capturing the baseline lets us stage
+      # exactly what this unit created (see #237).
+      baseline = if run_opts.auto?, do: git_porcelain_paths(), else: MapSet.new()
+
       case process_file(file, engine_opts, run_opts) do
         {:changed, reformat?, applied} ->
           new_acc = {[file | changed_acc], reformat_acc or reformat?}
-          decide_file_step(file, applied, reformat?, new_acc, halt?, run_opts)
+          decide_file_step(file, applied, reformat?, baseline, new_acc, halt?, run_opts)
 
         :unchanged ->
           {:cont, acc}
@@ -628,10 +695,10 @@ defmodule Mix.Tasks.Refactor do
     end)
   end
 
-  defp decide_file_step(file, applied, reformat?, new_acc, halt?, run_opts) do
+  defp decide_file_step(file, applied, reformat?, baseline, new_acc, halt?, run_opts) do
     cond do
       run_opts.auto? ->
-        auto_commit_file(file, applied, reformat?, run_opts)
+        auto_commit_file(file, applied, reformat?, baseline, run_opts)
         if run_opts.stop?, do: {:halt, new_acc}, else: {:cont, new_acc}
 
       halt? ->
@@ -655,24 +722,27 @@ defmodule Mix.Tasks.Refactor do
       # symbols (e.g. `import …` lines pointing at functions a prior
       # refactor renamed).
       Engine.invalidate_prepared_cache()
+      # See `process_files/3`: snapshot before the module runs so newly
+      # generated files (written in `prepare/1`) can be staged (#237).
+      baseline = if run_opts.auto?, do: git_porcelain_paths(), else: MapSet.new()
       {hits, reformat?} = apply_module_to_files(module, files, engine_opts, run_opts)
       print_module_step(module, hits, run_opts)
 
       new_changed = merge_unique(changed_acc, hits |> Enum.map(fn {path, _, _} -> path end))
       new_acc = {new_changed, reformat_acc or reformat?}
 
-      decide_module_step(module, hits, reformat?, new_acc, halt_on_hit?, run_opts)
+      decide_module_step(module, hits, reformat?, baseline, new_acc, halt_on_hit?, run_opts)
     end)
   end
 
-  defp decide_module_step(module, hits, reformat?, new_acc, halt_on_hit?, run_opts) do
+  defp decide_module_step(module, hits, reformat?, baseline, new_acc, halt_on_hit?, run_opts) do
     cond do
       hits == [] ->
         {:cont, new_acc}
 
       run_opts.auto? ->
         hit_paths = hits |> Enum.map(fn {p, _, _} -> p end)
-        auto_commit_refactor(module, hit_paths, reformat?, run_opts)
+        auto_commit_refactor(module, hit_paths, reformat?, baseline, run_opts)
         if run_opts.stop?, do: {:halt, new_acc}, else: {:cont, new_acc}
 
       halt_on_hit? ->
