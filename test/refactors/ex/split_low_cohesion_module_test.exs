@@ -160,6 +160,41 @@ defmodule Number42.Refactors.Ex.SplitLowCohesionModuleTest do
       moved = moved_sources(tmp, ["lib/my_app/acc.ex", "lib/my_app/web.ex"])
       assert_compiles(home <> "\n" <> moved <> "\n" <> result_caller)
     end
+
+    # Regression for #247: a cluster dominated by a predicate (`?`) or
+    # bang (`!`) function camelized straight to an invalid module alias
+    # (`ShapeMatch?`), so the emitted `defmodule` failed to compile.
+    test "predicate/bang dominant function yields a valid submodule name", %{tmp: tmp} do
+      src = """
+      defmodule MyApp.Shapes do
+        def shape_match?(a), do: a |> normalize_shape() |> compare_shape()
+        defp normalize_shape(a), do: a
+        defp compare_shape(a), do: same_dims?(a)
+        defp same_dims?(a), do: a
+
+        def render!(c), do: c |> layout() |> paint()
+        defp layout(c), do: c
+        defp paint(c), do: finalize(c)
+        defp finalize(c), do: c
+      end
+      """
+
+      paths = materialize([{"lib/my_app/shapes.ex", src}], tmp)
+      built = plan(paths, tmp)
+
+      assert map_size(built.splits) == 1
+
+      moved_mods = for {_h, s} <- built.splits, c <- s.moved, do: c.module
+
+      # No derived submodule name carries `?`/`!` punctuation.
+      Enum.each(moved_mods, fn mod ->
+        refute inspect(mod) =~ ~r/[?!]/, "submodule name has illegal punctuation: #{inspect(mod)}"
+      end)
+
+      home = apply_refactor(@subject, src, prepared: built, enabled: true)
+      moved = moved_sources(tmp, ["lib/my_app/shapes.ex"])
+      assert_compiles(home <> "\n" <> moved)
+    end
   end
 
   describe "rewrites — cross-cluster private calls (requalify)" do

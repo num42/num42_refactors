@@ -666,14 +666,29 @@ defmodule Number42.Refactors.Ex.SplitLowCohesionModule do
   # kind, then to a hash-stable `PartN`. Singular function verbs make
   # decent module names (`charge_card` → `ChargeCard`).
   defp derive_submodule_name(cluster, _home_cluster) do
+    fallback = "Part#{rem(stable_rank(cluster), 1000)}"
     pool = if cluster.public_defs != [], do: cluster.public_defs, else: cluster.defs
 
     pool
     |> Enum.sort_by(&{-MapSet.size(callees_within(&1, cluster.keys)), &1.name})
     |> List.first()
     |> case do
-      nil -> "Part#{rem(stable_rank(cluster), 1000)}"
-      d -> d.name |> Atom.to_string() |> Macro.camelize()
+      nil -> fallback
+      d -> module_name_from(d.name, fallback)
+    end
+  end
+
+  # Predicate/bang names (`same_outer_shape?`, `valid!`) and operator
+  # names carry punctuation that is illegal in a module alias, so
+  # `Macro.camelize` would yield e.g. `SameOuterShape?` and the emitted
+  # `defmodule` would fail to compile. Strip every non-alias character
+  # first; if nothing usable survives, fall back to the hash-stable name.
+  defp module_name_from(fun_name, fallback) do
+    stripped = fun_name |> Atom.to_string() |> String.replace(~r/[^A-Za-z0-9_]/, "")
+
+    case Macro.camelize(stripped) do
+      "" -> fallback
+      camelized -> camelized
     end
   end
 
