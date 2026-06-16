@@ -103,6 +103,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `lib/mix/tasks/refactor.ex`. The tie-break now serialises the normalised term
   with `inspect/1` — a deterministic structural serialisation that needs no
   source re-render.
+- `Heex.Tree` (#260): `node_byte_range/2` and the `assign_event_offsets/2` cursor now clamp byte positions to `[0, byte_size(body)]` (and keep the range non-inverted / the cursor non-backward), so a tag whose final attribute is a `{...}` interpolation or a self-closing element at the very end of the body no longer reports an out-of-bounds range or a negative `:binary.match` scope that crashed the scan.
 - `ExtractSharedModule` (#243): no longer appends a `def name/arity` to an
   existing `*.Shared` destination that already provides that signature via
   `defdelegate` — the appended clause was dead (the delegate matches first) and

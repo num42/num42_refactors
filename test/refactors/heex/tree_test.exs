@@ -171,4 +171,39 @@ defmodule Number42.Refactors.Heex.TreeTest do
       assert kinds == [:element, :element, :text, :element, :text]
     end
   end
+
+  describe "cursor never overruns the body (issue #260)" do
+    test "tag whose `{...}` attribute reaches the body end does not crash the offset scan" do
+      # Reduced from a real position-db flash component: an element whose
+      # attributes are `{...}` interpolations containing `||`, `%{}`, `#{}`
+      # and a pipe — the tag-end scanner walked past byte_size(body), and the
+      # next event's offset lookup got a negative `:binary.match` scope length.
+      body = ~S"""
+      <div
+        :if={msg = render_slot(@inner_block) || Phoenix.Flash.get(@flash, @kind)}
+        id={@id}
+        phx-click={JS.push("lv:clear-flash", value: %{key: @kind}) |> hide("##{@id}")}
+        role="alert"
+        class="toast toast-top toast-end z-[9999] top-16"
+        {@rest}
+      >
+        <div class={[
+          "alert w-80 sm:w-96",
+          @kind == :info && "alert-info",
+          @kind == :error && "alert-error"
+        ]}>
+          <p :if={@title} class="font-semibold">{@title}</p>
+          <p>{msg}</p>
+        </div>
+      </div>
+      """
+
+      assert {:ok, [{:element, "div", _attrs, _kids, _meta}]} = Tree.parse_body(body)
+    end
+
+    test "self-closing tag at the very end of the body does not overrun" do
+      body = ~s(<.icon name="x" />)
+      assert {:ok, [{:element, ".icon", _, _, _}]} = Tree.parse_body(body)
+    end
+  end
 end
