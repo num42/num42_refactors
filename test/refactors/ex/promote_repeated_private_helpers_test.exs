@@ -151,6 +151,125 @@ defmodule Number42.Refactors.Ex.PromoteRepeatedPrivateHelpersTest do
       assert_compiles(support_source <> "\n" <> result_a)
     end
 
+    # Regression for #257: a multi-clause private helper must be promoted as
+    # ONE multi-clause def, and every call site rewritten — but the trailing
+    # clause heads of the original defp must be DELETED, not mangled into a
+    # dangling `.Support.do_body(_)` call (empty module qualifier).
+    test "multi-clause helper is promoted as one def, no dangling clause heads", %{tmp: tmp} do
+      a = """
+      defmodule MyApp.Items.A do
+        def caller(x), do: do_body(x)
+
+        defp do_body(body_kw) when is_list(body_kw) do
+          body_kw
+          |> Keyword.values()
+          |> Enum.map(&Map.delete(&1, :line))
+        end
+
+        defp do_body(_), do: :skip
+      end
+      """
+
+      b = """
+      defmodule MyApp.Items.B do
+        def other(y), do: do_body(y)
+
+        defp do_body(body_kw) when is_list(body_kw) do
+          body_kw
+          |> Keyword.values()
+          |> Enum.map(&Map.delete(&1, :line))
+        end
+
+        defp do_body(_), do: :skip
+      end
+      """
+
+      plan = prepared([{"a.ex", a}, {"b.ex", b}], write_root: tmp)
+
+      result_a = apply_refactor(@subject, a, prepared: plan, enabled: true)
+      result_b = apply_refactor(@subject, b, prepared: plan, enabled: true)
+
+      # No clause of the local defp survives in either module.
+      refute result_a =~ "defp do_body"
+      refute result_b =~ "defp do_body"
+
+      # No dangling empty-qualifier clause head left behind.
+      refute result_a =~ ~r/(?<![\w.])\.Support\.do_body/
+      refute result_b =~ ~r/(?<![\w.])\.Support\.do_body/
+
+      # The real call site is rewritten with the intact qualifier.
+      assert result_a =~ "MyApp.Items.Support.do_body(x)"
+      assert result_b =~ "MyApp.Items.Support.do_body(y)"
+
+      # The support module carries BOTH clauses as one public def.
+      support_source = File.read!(Path.join(tmp, "lib/my_app/items/support.ex"))
+      assert support_source =~ "def do_body(body_kw) when is_list(body_kw)"
+      assert support_source =~ "def do_body(_), do: :skip"
+
+      # Everything compiles together.
+      assert_compiles(support_source <> "\n" <> result_a <> "\n" <> result_b)
+    end
+
+    # A self-recursive multi-clause helper: the external call site is
+    # rewritten to the remote call, both clauses are deleted from the
+    # source, and the recursive call inside the moved body stays
+    # *unqualified* (it resolves to the support module's own def). Guards
+    # against the fix (#257) over-rewriting either the clause heads or the
+    # in-body recursive call.
+    test "self-recursive multi-clause helper relocates with recursion intact", %{tmp: tmp} do
+      a = """
+      defmodule MyApp.Items.A do
+        def caller(x), do: walk(x, 0)
+
+        defp walk([], acc), do: acc
+
+        defp walk([h | t], acc) do
+          new_acc =
+            acc
+            |> Kernel.+(h)
+            |> Kernel.*(2)
+            |> Kernel.-(1)
+
+          walk(t, new_acc)
+        end
+      end
+      """
+
+      b = """
+      defmodule MyApp.Items.B do
+        def caller(x), do: walk(x, 0)
+
+        defp walk([], acc), do: acc
+
+        defp walk([h | t], acc) do
+          new_acc =
+            acc
+            |> Kernel.+(h)
+            |> Kernel.*(2)
+            |> Kernel.-(1)
+
+          walk(t, new_acc)
+        end
+      end
+      """
+
+      plan = prepared([{"a.ex", a}, {"b.ex", b}], write_root: tmp)
+
+      result_a = apply_refactor(@subject, a, prepared: plan, enabled: true)
+
+      refute result_a =~ "defp walk"
+      assert result_a =~ "MyApp.Items.Support.walk(x, 0)"
+
+      support_source = File.read!(Path.join(tmp, "lib/my_app/items/support.ex"))
+      assert support_source =~ "def walk([], acc)"
+      assert support_source =~ "def walk([h | t], acc)"
+      # The recursive call stays unqualified inside the support module.
+      assert support_source =~ "walk(t, new_acc)"
+      refute support_source =~ "Support.walk(t"
+
+      assert_compiles(support_source <> "\n" <> result_a)
+    end
+
     test "near-identical (var renamed) helpers are still detected as clones", %{tmp: tmp} do
       a = """
       defmodule MyApp.Items.A do

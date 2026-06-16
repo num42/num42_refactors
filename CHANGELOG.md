@@ -93,6 +93,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `PromoteRepeatedPrivateHelpers` (#257): promoting a **multi-clause** private
+  helper no longer mangles the source. The helper's own `defp` clauses are now
+  excluded from call-site scanning before rewriting — a clause *head*
+  (`do_body(_)`) is structurally a local call, so the trailing clauses of a
+  multi-clause helper were patched as call sites and collided with the
+  wholesale delete range, leaving a dangling `.Support.do_body(_), do: :skip`
+  (empty module qualifier, non-parsing). All clauses are now deleted as one
+  unit and the real call sites are rewritten with the qualifier intact; the
+  helper lands in `*.Support` as a single multi-clause `def`, with any
+  self-recursive call inside its body left unqualified.
 - `CanonicalStatementOrder` (#256): no longer crashes with a `CaseClauseError`
   while computing a statement's canonical sort key. The tie-break rendered the
   *normalised* AST (meta-stripped + synthetic `{:"$var", [], [idx]}` variable
