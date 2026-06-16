@@ -82,8 +82,13 @@ defmodule Number42.Refactors.Heex.Tree do
   @spec node_byte_range(node_t(), String.t()) ::
           {non_neg_integer(), non_neg_integer()}
   def node_byte_range(node, body) do
-    start_byte = node_start_byte(node, body)
-    end_byte = scan_node_end(node, body, start_byte)
+    limit = byte_size(body)
+    start_byte = node_start_byte(node, body) |> max(0) |> min(limit)
+    # A tag-end scanner for a self-closing element at the very end of the
+    # body (e.g. `<input … />` with no trailing markup) can report a
+    # position one or two bytes past the end; clamp so the returned range
+    # is always a valid slice and never inverted.
+    end_byte = scan_node_end(node, body, start_byte) |> max(start_byte) |> min(limit)
     {start_byte, end_byte}
   end
 
@@ -837,11 +842,17 @@ defmodule Number42.Refactors.Heex.Tree do
   # cursor — this disambiguates same-line siblings and nested elements
   # that the old line + first-marker lookup could not tell apart.
   defp assign_event_offsets(events, body) do
+    limit = byte_size(body)
+
     {events, _cursor} =
       events
       |> Enum.map_reduce(0, fn event, cursor ->
         {offset, next} = locate_event(event, body, cursor)
-        {put_event_offset(event, offset), next}
+        # An end-finder for a malformed/complex tag (e.g. a final `{@rest}`
+        # attribute before `>`) can report a position past the body end;
+        # clamp so the next event's `:binary.match` scope stays valid and
+        # never runs backwards.
+        {put_event_offset(event, min(offset, limit)), next |> min(limit) |> max(cursor)}
       end)
 
     events
