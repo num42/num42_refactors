@@ -162,6 +162,127 @@ defmodule Number42.Refactors.Ex.SplitLowCohesionModuleTest do
     end
   end
 
+  describe "rewrites — cross-cluster private calls (requalify)" do
+    # The community partition cuts by communication *density*, not by
+    # call reachability — so a cluster boundary can fall between two
+    # private functions that call each other. The emitter must promote
+    # the callee to `def` and qualify the call site, in every direction,
+    # or the output fails to compile with `undefined function`.
+
+    # A moved cluster calls a private function that stays in the HOME
+    # module. The home `defp` must be promoted to `def` (remote-callable)
+    # and the moved body must qualify the call to the home module.
+    test "moved → home: home defp callee is promoted, call qualified", %{tmp: tmp} do
+      src = """
+      defmodule MyApp.MovedToHome do
+        def alpha(x), do: x |> a1() |> a2()
+        defp a1(x), do: a3(x)
+        defp a2(x), do: a3(x)
+        defp a3(x), do: bridge(x)
+
+        def beta(y), do: y |> b1() |> b2()
+        defp b1(y), do: b3(y)
+        defp b2(y), do: b3(y)
+        defp b3(y), do: y
+        defp bridge(z), do: b1(z)
+      end
+      """
+
+      paths = materialize([{"lib/my_app/moved_to_home.ex", src}], tmp)
+      built = plan(paths, tmp)
+
+      assert map_size(built.splits) == 1
+
+      home = apply_refactor(@subject, src, prepared: built, enabled: true)
+      moved = moved_sources(tmp, ["lib/my_app/moved_to_home.ex"])
+
+      # bridge stays home and is reached from the moved cluster, so it is
+      # promoted to a public def and the moved body calls MyApp.MovedToHome.bridge.
+      assert_compiles(home <> "\n" <> moved)
+      refute moved =~ "MyApp.MovedToHome.MyApp"
+    end
+
+    # Two clusters both move out, and a function in one calls a private
+    # function in the other. The callee is promoted to `def` in its
+    # submodule and the caller's body qualifies the call to that submodule.
+    test "moved → moved: cross-submodule private callee promoted + qualified", %{tmp: tmp} do
+      src = """
+      defmodule MyApp.MovedToMoved do
+        def p1(x), do: x |> h1() |> h2()
+        def p2(x), do: x |> h1() |> h2()
+        defp h1(x), do: h2(x)
+        defp h2(x), do: x
+
+        def go_a(x), do: x |> a1() |> a2()
+        defp a1(x), do: a2(x)
+        defp a2(x), do: cross_to_b(x)
+
+        defp go_b(x), do: x |> b1() |> b2()
+        defp b1(x), do: b2(x)
+        defp b2(x), do: x
+        defp cross_to_b(x), do: b1(x)
+      end
+      """
+
+      paths = materialize([{"lib/my_app/moved_to_moved.ex", src}], tmp)
+      built = plan(paths, tmp)
+
+      assert map_size(built.splits) == 1
+      assert length(built.splits[MyApp.MovedToMoved].moved) == 2
+
+      home = apply_refactor(@subject, src, prepared: built, enabled: true)
+      moved = moved_sources(tmp, ["lib/my_app/moved_to_moved.ex"])
+
+      assert_compiles(home <> "\n" <> moved)
+    end
+
+    # The real bug report: CommunityDetection itself splits into .Detect
+    # and .BestMerge, with greedy_merge (Detect) → best_merge (BestMerge)
+    # and detect (Detect) → total_weight (home). Must compile.
+    test "the CommunityDetection self-dogfood case compiles", %{tmp: tmp} do
+      src = File.read!(Path.join(File.cwd!(), "lib/number42/refactors/community_detection.ex"))
+      rel = "lib/number42/refactors/community_detection.ex"
+      paths = materialize([{rel, src}], tmp)
+      built = plan(paths, tmp)
+
+      assert map_size(built.splits) == 1
+
+      home = apply_refactor(@subject, src, prepared: built, enabled: true)
+      moved = moved_sources(tmp, [rel])
+
+      combined = home <> "\n" <> moved
+
+      # The boundary-crossing call greedy_merge → best_merge is now
+      # qualified to the submodule, and best_merge is promoted to def.
+      assert combined =~ ~r/CommunityDetection\.BestMerge\.best_merge\(/
+      assert combined =~ ~r/\bdef best_merge\(/
+      # Compilation is the real proof: no `undefined function` survives.
+      assert_compiles(combined)
+    end
+
+    # A clean two-island split has NO cross-cluster private calls, so the
+    # requalify pass must leave intra-cluster private calls untouched: the
+    # moved submodule keeps its helpers private and unqualified.
+    test "self-contained split is not over-qualified", %{tmp: tmp} do
+      src = two_island_module()
+      paths = materialize([{"lib/my_app/acc.ex", src}], tmp)
+      built = plan(paths, tmp)
+
+      home = apply_refactor(@subject, src, prepared: built, enabled: true)
+      moved = moved_sources(tmp, ["lib/my_app/acc.ex"])
+
+      # No call inside the moved submodule is qualified with the home
+      # module path — intra-cluster calls stay bare.
+      refute moved =~ "MyApp.Acc.store_user"
+      refute moved =~ "MyApp.Acc.ledger"
+      refute moved =~ "MyApp.Acc.validate_user"
+      # And the moved submodule keeps a private helper (nothing promoted).
+      assert moved =~ "defp"
+
+      assert_compiles(home <> "\n" <> moved)
+    end
+  end
+
   describe "idempotence" do
     test "applying the split twice with a fixed plan is stable", %{tmp: tmp} do
       src = two_island_module()

@@ -73,10 +73,14 @@ defmodule Number42.Refactors.Ex.PromoteRepeatedPrivateHelpers do
       compile-time state and would vanish in the support module;
     * references `__MODULE__`/`__ENV__`/`__DIR__`/`__CALLER__` — these
       resolve against the *defining* module and change meaning when moved;
-    * **calls another local function** (`def`/`defp`) of its own module —
-      the callee would not exist in the support module, so the relocated
-      body would fail to compile. (Self-recursion is likewise excluded:
-      the recursive call would resolve to nothing in the support module.)
+    * **makes any unqualified call other than to itself** — every
+      unqualified call in the body must resolve to a clause of the helper
+      group being moved (self/co-recursion). Anything else — another
+      local `def`/`defp`, *or* a function injected by `use` in the source
+      module (e.g. `AstHelpers` brought in via `use …Refactor`) — would be
+      undefined in the bare support module, so the relocated body would
+      fail to compile. Remote/qualified calls and Kernel special forms are
+      fine (they resolve identically anywhere).
 
   The cross-module match also requires structural identity of the helper
   body itself; an alias used inside the body is only safe when it resolves
@@ -276,22 +280,21 @@ defmodule Number42.Refactors.Ex.PromoteRepeatedPrivateHelpers do
 
   defp helpers_in_module(module, body_exprs, cfg) do
     aliases = collect_aliases(body_exprs)
-    local_keys = local_def_keys(body_exprs)
 
     body_exprs
     |> Enum.filter(&defp_clause?/1)
     |> Enum.group_by(&defp_name_arity_or_skip/1)
     |> Enum.reject(fn {key, _} -> key == :skip end)
     |> Enum.flat_map(fn {{name, arity}, clauses} ->
-      build_helper_entry(module, name, arity, clauses, aliases, local_keys, cfg)
+      build_helper_entry(module, name, arity, clauses, aliases, cfg)
     end)
   end
 
-  defp build_helper_entry(module, name, arity, clauses, aliases, local_keys, cfg) do
+  defp build_helper_entry(module, name, arity, clauses, aliases, cfg) do
     cond do
       total_mass(clauses) < cfg.min_mass -> []
       references_module_attr_or_reserved?(clauses) -> []
-      calls_other_local?(clauses, local_keys) -> []
+      calls_unmigratable?(clauses) -> []
       true -> [helper_entry(module, name, arity, clauses, aliases)]
     end
   end
@@ -664,25 +667,24 @@ defmodule Number42.Refactors.Ex.PromoteRepeatedPrivateHelpers do
     end
   end
 
-  # Every `{name, arity}` locally defined in the module (def + defp). Used
-  # to detect a helper that calls another local function.
-  defp local_def_keys(body_exprs) do
-    body_exprs
-    |> collect_definitions()
-    |> Enum.flat_map(fn %{name: name, min_arity: min, arity: arity} ->
-      for a <- min..arity, do: {name, a}
-    end)
-    |> MapSet.new()
-  end
-
-  defp calls_other_local?(clauses, local_keys) do
+  # A helper is only relocatable when its body is self-contained in the
+  # support module: every *unqualified* call it makes must resolve to a
+  # clause of the helper itself (self/co-recursion within the migrated
+  # `{name, arity}` group). Any other unqualified call — whether it
+  # names another local `def`/`defp` *or* a function injected by `use`
+  # in the source module (e.g. AstHelpers via `use ...Refactor`) — would
+  # be undefined once the body moves into the bare support module. The
+  # earlier `local_keys`-only check missed the `use`-injected case, since
+  # those names are absent from the source module's local definitions.
+  # `collect_calls_in_clauses/1` already excludes remote/qualified calls
+  # and Kernel special forms, so what remains is exactly the unqualified
+  # local surface.
+  defp calls_unmigratable?(clauses) do
     own_keys = clauses |> Enum.map(&clause_name_arity/1) |> MapSet.new()
 
     clauses
     |> collect_calls_in_clauses()
-    |> Enum.any?(fn {name, arity} = call ->
-      MapSet.member?(local_keys, call) and not MapSet.member?(own_keys, {name, arity})
-    end)
+    |> Enum.any?(fn {name, arity} -> not MapSet.member?(own_keys, {name, arity}) end)
   end
 
   defp references_module_attr_or_reserved?(clauses) do

@@ -306,6 +306,50 @@ defmodule Number42.Refactors.Ex.PromoteRepeatedPrivateHelpersTest do
       assert_unchanged(@subject, a, prepared: plan, enabled: true)
     end
 
+    # Regression for #246: the helper calls `sanitize_node/1`, which is
+    # NOT defined locally — it comes from `use MyApp.Base`. The old
+    # `local_keys`-only guard waved this through (the name isn't a local
+    # def), so the relocated body referenced a function the bare support
+    # module can't see → `undefined function`. The self-contained guard
+    # must reject any unqualified call to a non-self name.
+    test "helper calling a use-injected function (not a local def) is skipped", %{tmp: tmp} do
+      a = """
+      defmodule MyApp.Items.A do
+        use MyApp.Base
+
+        def caller(x), do: strip(x)
+
+        defp strip(node) do
+          node
+          |> sanitize_node()
+          |> Map.delete(:line)
+          |> Map.delete(:column)
+          |> Map.delete(:meta)
+        end
+      end
+      """
+
+      b = """
+      defmodule MyApp.Items.B do
+        use MyApp.Base
+
+        def caller(x), do: strip(x)
+
+        defp strip(ast) do
+          ast
+          |> sanitize_node()
+          |> Map.delete(:line)
+          |> Map.delete(:column)
+          |> Map.delete(:meta)
+        end
+      end
+      """
+
+      plan = prepared([{"a.ex", a}, {"b.ex", b}], write_root: tmp)
+      assert plan == %{}
+      assert_unchanged(@subject, a, prepared: plan, enabled: true)
+    end
+
     test "trivial helper below min_mass is not promoted", %{tmp: tmp} do
       a = """
       defmodule MyApp.Items.A do
