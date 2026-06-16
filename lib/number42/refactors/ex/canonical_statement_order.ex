@@ -43,8 +43,10 @@ defmodule Number42.Refactors.Ex.CanonicalStatementOrder do
        renaming). Two statements that do the same work under different
        variable names get the same hash, so the order does not depend
        on incidental naming.
-    2. `Sourceror.to_string(strip_meta(stmt))` lexicographically — a
-       total tie-break for genuine hash collisions.
+    2. `inspect(normalize_for_sort(stmt))` lexicographically — a
+       structural serialisation of the *normalised* term (not a
+       re-render of source) that gives a total tie-break for genuine
+       hash collisions.
     3. the statement's original index — the final, always-unique
        fallback.
 
@@ -293,9 +295,18 @@ defmodule Number42.Refactors.Ex.CanonicalStatementOrder do
 
   # Canonical, total sort key — variable-name independent hash first,
   # then a structural string, then the original index.
+  #
+  # The tie-break serialises the *normalised* term via `inspect/1`, not
+  # `Sourceror.to_string/1`. The normalised form carries synthetic,
+  # meta-less nodes (`{:"$var", [], [idx]}` from positional variable
+  # renaming) that are not valid Elixir source: re-rendering them drives
+  # the formatter into a `CaseClauseError` on the bare integer arg (e.g.
+  # a map/keyword value or a `{:-, _, [n]}` unary op) — see #256.
+  # `inspect/1` serialises the term structurally and deterministically,
+  # which is exactly what a hash-collision tie-break needs.
   defp canonical_key(stmt, index) do
     normalized = normalize_for_sort(stmt)
-    {:erlang.phash2(normalized), Sourceror.to_string(normalized), index}
+    {:erlang.phash2(normalized), inspect(normalized, limit: :infinity), index}
   end
 
   # Strip meta and rename variables positionally so the key does not
