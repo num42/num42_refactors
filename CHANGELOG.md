@@ -103,6 +103,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unit and the real call sites are rewritten with the qualifier intact; the
   helper lands in `*.Support` as a single multi-clause `def`, with any
   self-recursive call inside its body left unqualified.
+- `CanonicalStatementOrder` (#256): no longer crashes with a `CaseClauseError`
+  while computing a statement's canonical sort key. The tie-break rendered the
+  *normalised* AST (meta-stripped + synthetic `{:"$var", [], [idx]}` variable
+  nodes) via `Sourceror.to_string/1`, but those internal nodes are not valid
+  Elixir source and drove the formatter's `force_args?/2` into a `CaseClauseError`
+  on a bare integer arg (e.g. a map/keyword value, or a `{:-, _, [n]}` unary op
+  from a `3..-1//1` range). Reproduced on the library's own
+  `lib/mix/tasks/refactor.ex`. The tie-break now serialises the normalised term
+  with `inspect/1` — a deterministic structural serialisation that needs no
+  source re-render.
 - `Heex.Tree` (#260): `node_byte_range/2` and the `assign_event_offsets/2` cursor now clamp byte positions to `[0, byte_size(body)]` (and keep the range non-inverted / the cursor non-backward), so a tag whose final attribute is a `{...}` interpolation or a self-closing element at the very end of the body no longer reports an out-of-bounds range or a negative `:binary.match` scope that crashed the scan.
 - `ExtractSharedModule` (#243): no longer appends a `def name/arity` to an
   existing `*.Shared` destination that already provides that signature via
