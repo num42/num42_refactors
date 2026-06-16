@@ -21,6 +21,19 @@ defmodule Number42.Refactors.Heex.TreeByteRangeTest do
       assert binary_part(body, s, e - s) == String.trim(body)
     end
 
+    test "every node range stays inside the body for a tag ending in `{...}` (issue #260)" do
+      body = ~s(<input type="hidden" id={@id} name={@name} value={@value} {@rest} />\n)
+      {:ok, tree} = Tree.parse_body(body)
+
+      bad =
+        Tree.walk(tree, [], fn node, acc ->
+          {s, e} = Tree.node_byte_range(node, body)
+          if s < 0 or e > byte_size(body) or e < s, do: [{elem(node, 0), s, e} | acc], else: acc
+        end)
+
+      assert bad == [], "nodes with out-of-bounds ranges: #{inspect(bad)}"
+    end
+
     test "outer element range covers nested children too" do
       body = ~s(<div>\n  <span>{@x}</span>\n  <p>{@y}</p>\n</div>\n)
       {:ok, [div]} = Tree.parse_body(body)
