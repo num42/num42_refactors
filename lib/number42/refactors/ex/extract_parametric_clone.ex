@@ -549,7 +549,7 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
        when is_list(args) do
     arg_bindings = args |> Enum.map(&extract_arg_binding/1)
 
-    if clause_unparametrisable?(arg_bindings, clause, body_kw, min_mass) do
+    if clause_unparametrisable?(arg_bindings, args, clause, body_kw, min_mass) do
       []
     else
       [build_parametric_entry(name, args, arg_bindings, clause, body_kw, ctx)]
@@ -560,17 +560,62 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
 
   # A clause is skipped when any of these hold:
   #   * an argument isn't a plain/var-bindable pattern (default arg, bare literal)
+  #   * an `=`-pattern arg (`%{body: body} = sigil`) binds a variable that
+  #     the body uses. The helper head is rebuilt from the single chosen
+  #     name (`sigil`), dropping the `%{body: body}` pattern — so the body's
+  #     reference to `body` would compile to an unbound variable in the
+  #     extracted helper.
   #   * the clause is below the minimum-mass threshold
   #   * its body uses a binding macro (`from(bind in …)`) — bind/keys must be
   #     compile-time atoms, so it can't be parametrised
   #   * its body uses an unsafe lexical macro (`__ENV__`/`__CALLER__`/…) — no
   #     runtime value to thread through as a parameter. `__MODULE__` is NOT in
   #     this set; the cross-file emitter parametrises it.
-  defp clause_unparametrisable?(arg_bindings, clause, body_kw, min_mass) do
+  defp clause_unparametrisable?(arg_bindings, args, clause, body_kw, min_mass) do
     Enum.any?(arg_bindings, &(&1 == :error)) or
+      pattern_binding_used_in_body?(arg_bindings, args, body_kw) or
       clause_mass(clause) < min_mass or
       contains_binding_macro_call?(body_kw) or
       contains_unsafe_lexical_macro?(body_kw)
+  end
+
+  # For every `pattern = var` argument, the chosen binding name (`var`)
+  # survives into the rebuilt helper head but the pattern's *other*
+  # variables do not. If any dropped variable is referenced in the body,
+  # the extracted helper would not compile — refuse the clause.
+  defp pattern_binding_used_in_body?(arg_bindings, args, body_kw) do
+    used = body_vars(body_kw)
+
+    arg_bindings
+    |> Enum.zip(args)
+    |> Enum.any?(fn
+      {{:ok, kept}, arg} ->
+        arg
+        |> arg_vars()
+        |> MapSet.delete(kept)
+        |> MapSet.intersection(used)
+        |> MapSet.size() > 0
+
+      _ ->
+        false
+    end)
+  end
+
+  defp arg_vars(arg), do: arg |> collect_vars() |> MapSet.new()
+
+  defp body_vars(body_kw),
+    do: body_kw |> Keyword.values() |> Enum.flat_map(&collect_vars/1) |> MapSet.new()
+
+  defp collect_vars(ast) do
+    ast
+    |> Macro.prewalker()
+    |> Enum.flat_map(fn
+      {name, _, ctx} when is_atom(name) and is_atom(ctx) ->
+        if underscore?(name), do: [], else: [name]
+
+      _ ->
+        []
+    end)
   end
 
   defp build_parametric_entry(name, args, arg_bindings, clause, body_kw, ctx) do
