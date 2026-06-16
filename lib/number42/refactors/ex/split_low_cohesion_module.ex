@@ -128,11 +128,21 @@ defmodule Number42.Refactors.Ex.SplitLowCohesionModule do
   use Number42.Refactors.Refactor
 
   alias Number42.Refactors.CommunityDetection
+  alias Number42.Refactors.VocabularyClassifier
 
   @default_min_modularity 0.3
   @default_max_cut_ratio 0.25
   @default_min_cluster_size 2
   @default_min_module_functions 6
+
+  # A module whose god-probability (see `VocabularyClassifier`) is below
+  # this is treated as single-concern and left alone. This is what breaks
+  # the non-idempotence of issue #258: a freshly-split submodule has a
+  # concentrated vocabulary, scores low, and is not re-split — so the
+  # fixpoint converges. Default `0.5` (the classifier's decision
+  # boundary); raise it to split more conservatively, set to `0.0` to
+  # disable the gate.
+  @default_vocab_split_threshold 0.5
 
   @excluded_path_prefixes ["test/", "dev/"]
 
@@ -287,7 +297,9 @@ defmodule Number42.Refactors.Ex.SplitLowCohesionModule do
       max_cut_ratio: Keyword.get(opts, :max_cut_ratio, @default_max_cut_ratio),
       min_cluster_size: Keyword.get(opts, :min_cluster_size, @default_min_cluster_size),
       min_module_functions:
-        Keyword.get(opts, :min_module_functions, @default_min_module_functions)
+        Keyword.get(opts, :min_module_functions, @default_min_module_functions),
+      vocab_split_threshold:
+        Keyword.get(opts, :vocab_split_threshold, @default_vocab_split_threshold)
     }
   end
 
@@ -424,6 +436,19 @@ defmodule Number42.Refactors.Ex.SplitLowCohesionModule do
   # ── Clustering + ambiguity gate ──────────────────────────────────
 
   defp cluster(mod, defs, thresholds) do
+    p_god = VocabularyClassifier.god_probability(Enum.map(defs, & &1.clauses))
+
+    if p_god < thresholds.vocab_split_threshold do
+      declined(
+        mod,
+        "single-concern vocabulary: god-probability #{Float.round(p_god, 3)} below split threshold #{thresholds.vocab_split_threshold}"
+      )
+    else
+      cluster_by_communities(mod, defs, thresholds)
+    end
+  end
+
+  defp cluster_by_communities(mod, defs, thresholds) do
     keys = Enum.map(defs, &{&1.name, &1.arity})
     key_set = MapSet.new(keys)
     edges = build_edges(defs, key_set)

@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `SplitLowCohesionModule` (#258): fixed non-convergence and the per-module
+  detection cost. **Idempotence** — modularity is *relative*, so the splitter
+  re-split its own freshly-created submodules every fixpoint pass and ran all
+  `@max_passes`. A new `VocabularyClassifier` gates clustering on the module's
+  working **vocabulary**: a freshly-split, single-concern submodule repeats a
+  small identifier vocabulary, a real god module spreads a diverse one. The
+  gate is a small logistic model over four AST-token features (MATTR, Shannon
+  entropy, diversity×repeat-rate, hapax ratio), derived per file with no
+  marker, no file-tree lookup, and no cross-pass state — every pass computes
+  it identically, so `2 runs == 1 run + 1 run` holds. Configurable via
+  `:vocab_split_threshold` (default `0.5`; raise to split less). **Performance**
+  — `CommunityDetection.detect/2` was O(N⁴) (communities held as a list with
+  `Enum.at` in the candidate-pair loop, recomputing between/incident weight
+  every merge). Rewritten as Clauset-Newman-Moore on incremental
+  community-level aggregates (`members`/`a`/`between` maps, a merge folds only
+  the touched neighbours): a 50-node clique drops from ~56 ms to ~2.7 ms (21×),
+  and the 10→50 scaling factor from 338× to 72×. ΔQ ties now break on the
+  smaller node-id pair (was list index) — partition-stable across input
+  permutation; on an exact tie a different but equally-valid partition is
+  possible.
+
 - `ExtractCommonProlog` (#241): the single near-match extra may now sit in the **middle** of the shared prolog, not only at its boundary — statements after the inserted extra still count toward the shared run (so `a; b; c` vs `a; c` shares `a` then `c` with `b` as the lone extra). The prolog is aligned by allowing exactly one clause to skip one position; the split is taken only when the extra is safely deferrable (its inputs are not rebound by a later shared statement, and — for a **lazy** extra — every shared statement after it is `pure?`-true, so its deferred side effect is not reordered past another), else the exact-match path runs unchanged.
 - `ExtractCommonProlog` (#232): now fires on **near matches**, not just
   byte-identical prologs. When several contiguous functions share a prolog

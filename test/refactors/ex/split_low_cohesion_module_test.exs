@@ -45,21 +45,28 @@ defmodule Number42.Refactors.Ex.SplitLowCohesionModuleTest do
     |> Enum.map_join("\n\n", &File.read!/1)
   end
 
-  # A clean two-island god module: a "create_user" cluster and a
-  # "charge" cluster that never call across. Eight functions clears the
-  # min-module-functions floor.
+  # A clean two-island god module: an account-registration cluster and a
+  # dashboard-rendering cluster that never call across. Two concerns with
+  # *distinct, rich vocabulary* — so the VocabularyClassifier scores it
+  # god-like (p ≈ 0.84) and it clears the split gate. (A toy module with a
+  # tiny repeated vocabulary scores single-concern and is declined, which
+  # is the #258 fix; fixtures must look like real god modules.)
   defp two_island_module do
     """
     defmodule MyApp.Acc do
-      def create_user(a), do: a |> validate_user() |> persist_user()
-      defp validate_user(a), do: a
-      defp persist_user(a), do: store_user(a)
-      defp store_user(a), do: a
+      def create_user(signup_form), do: signup_form |> validate_user() |> persist_user()
+      defp validate_user(form), do: %{login: String.downcase(form.email), secret: hash_password(form.password)}
+      defp hash_password(plaintext), do: :crypto.hash(:sha256, plaintext)
+      defp persist_user(credentials), do: Map.merge(credentials, %{created: now(), role: default_role()})
+      defp now, do: :calendar.universal_time()
+      defp default_role, do: :member
 
-      def charge(c), do: c |> authorize() |> settle()
-      defp authorize(c), do: c
-      defp settle(c), do: ledger(c)
-      defp ledger(c), do: c
+      def charge(checkout), do: checkout |> authorize() |> settle()
+      defp authorize(cart), do: %{amount: total_cents(cart), processor: choose_gateway(cart)}
+      defp total_cents(cart), do: Enum.reduce(cart.items, 0, fn item, sum -> sum + item.price end)
+      defp choose_gateway(cart), do: if cart.currency == :eur, do: :stripe, else: :adyen
+      defp settle(charge), do: Map.put(charge, :receipt, build_invoice(charge))
+      defp build_invoice(charge), do: %{ref: charge.processor, paid: charge.amount}
     end
     """
   end
@@ -180,7 +187,9 @@ defmodule Number42.Refactors.Ex.SplitLowCohesionModuleTest do
       """
 
       paths = materialize([{"lib/my_app/shapes.ex", src}], tmp)
-      built = plan(paths, tmp)
+      # Mechanics test (submodule naming), not detection — bypass the
+      # vocabulary gate so the toy fixture reaches the split path.
+      built = plan(paths, tmp, vocab_split_threshold: 0.0)
 
       assert map_size(built.splits) == 1
 
@@ -224,7 +233,8 @@ defmodule Number42.Refactors.Ex.SplitLowCohesionModuleTest do
       """
 
       paths = materialize([{"lib/my_app/moved_to_home.ex", src}], tmp)
-      built = plan(paths, tmp)
+      # Mechanics test (cross-cluster promotion/requalify), not detection.
+      built = plan(paths, tmp, vocab_split_threshold: 0.0)
 
       assert map_size(built.splits) == 1
 
@@ -260,7 +270,8 @@ defmodule Number42.Refactors.Ex.SplitLowCohesionModuleTest do
       """
 
       paths = materialize([{"lib/my_app/moved_to_moved.ex", src}], tmp)
-      built = plan(paths, tmp)
+      # Mechanics test (cross-submodule promotion/requalify), not detection.
+      built = plan(paths, tmp, vocab_split_threshold: 0.0)
 
       assert map_size(built.splits) == 1
       assert length(built.splits[MyApp.MovedToMoved].moved) == 2
@@ -271,26 +282,53 @@ defmodule Number42.Refactors.Ex.SplitLowCohesionModuleTest do
       assert_compiles(home <> "\n" <> moved)
     end
 
-    # The real bug report: CommunityDetection itself splits into .Detect
-    # and .BestMerge, with greedy_merge (Detect) → best_merge (BestMerge)
-    # and detect (Detect) → total_weight (home). Must compile.
+    # The bug report's shape, frozen as a fixture (NOT the live
+    # community_detection.ex — that would re-break on every rewrite of it):
+    # a graph-detection module that splits into a "build" cluster and a
+    # "score" cluster, where the build cluster's private helper calls a
+    # private helper that lands in the score cluster. The boundary-crossing
+    # private call must be promoted to `def` and qualified to its submodule,
+    # or compilation fails with `undefined function`.
     test "the CommunityDetection self-dogfood case compiles", %{tmp: tmp} do
-      src = File.read!(Path.join(File.cwd!(), "lib/number42/refactors/community_detection.ex"))
-      rel = "lib/number42/refactors/community_detection.ex"
-      paths = materialize([{rel, src}], tmp)
-      built = plan(paths, tmp)
+      src = """
+      defmodule MyApp.GraphCluster do
+        # build cluster: assemble a weighted adjacency from raw edges
+        def build_adjacency(nodes, edges), do: nodes |> seed_nodes() |> absorb_edges(edges)
+        defp seed_nodes(nodes), do: Map.new(nodes, fn vertex -> {vertex, %{}} end)
+        defp absorb_edges(adjacency, edges), do: Enum.reduce(edges, adjacency, &insert_edge/2)
+        defp insert_edge({{origin, target}, weight}, adjacency), do: link_pair(adjacency, origin, target, weight)
+        defp link_pair(adjacency, origin, target, weight), do: normalize_weight(adjacency, origin, target, weight)
+
+        # score cluster: compute modularity over a partition
+        def modularity(partition, edges), do: partition |> tally_communities(edges) |> sum_contributions()
+        defp tally_communities(partition, edges), do: Enum.map(partition, fn community -> community_score(community, edges) end)
+        defp community_score(community, edges), do: intra_density(community, edges)
+        defp intra_density(community, edges), do: incident_fraction(community, edges)
+        defp sum_contributions(scores), do: Enum.sum(scores)
+        defp incident_fraction(community, edges), do: {community, edges}
+
+        # the boundary-crossing private call: a build helper reaches into
+        # the score cluster's private helper.
+        defp normalize_weight(adjacency, origin, target, weight), do: incident_fraction({adjacency, origin, target}, weight)
+      end
+      """
+
+      paths = materialize([{"lib/my_app/graph_cluster.ex", src}], tmp)
+      built = plan(paths, tmp, vocab_split_threshold: 0.0)
 
       assert map_size(built.splits) == 1
 
       home = apply_refactor(@subject, src, prepared: built, enabled: true)
-      moved = moved_sources(tmp, [rel])
+      moved = moved_sources(tmp, ["lib/my_app/graph_cluster.ex"])
 
       combined = home <> "\n" <> moved
 
-      # The boundary-crossing call greedy_merge → best_merge is now
-      # qualified to the submodule, and best_merge is promoted to def.
-      assert combined =~ ~r/CommunityDetection\.BestMerge\.best_merge\(/
-      assert combined =~ ~r/\bdef best_merge\(/
+      # Wherever the cut falls, the boundary-crossing private call is
+      # qualified across the module boundary (either home→submodule or
+      # submodule→home) and its callee promoted from `defp` to `def`. The
+      # cut here promotes `normalize_weight` and qualifies the call to it.
+      assert combined =~ ~r/MyApp\.GraphCluster(\.\w+)?\.normalize_weight\(/
+      assert combined =~ ~r/\bdef normalize_weight\(/
       # Compilation is the real proof: no `undefined function` survives.
       assert_compiles(combined)
     end
@@ -325,6 +363,67 @@ defmodule Number42.Refactors.Ex.SplitLowCohesionModuleTest do
       built = plan(paths, tmp)
 
       assert_idempotent(@subject, src, prepared: built, enabled: true)
+    end
+  end
+
+  describe "vocabulary gate — convergence (issue #258)" do
+    # The root of #258: modularity is relative, so the splitter re-splits
+    # its own freshly-created submodules forever. A submodule is a single
+    # concern with a concentrated vocabulary; the classifier scores it low
+    # and declines, so the fixpoint converges. See `VocabularyClassifier`.
+    test "a single-concern module (concentrated vocabulary) is NOT split", %{tmp: tmp} do
+      # Two non-communicating islands (clean seam, high modularity) but a
+      # tiny, heavily-repeated vocabulary — the shape of a split artefact.
+      concentrated = """
+      defmodule MyApp.Conc do
+        def a1(x), do: x |> a2() |> a3()
+        defp a2(x), do: a4(x)
+        defp a3(x), do: x
+        defp a4(x), do: x
+
+        def b1(x), do: x |> b2() |> b3()
+        defp b2(x), do: b4(x)
+        defp b3(x), do: x
+        defp b4(x), do: x
+      end
+      """
+
+      paths = materialize([{"lib/my_app/conc.ex", concentrated}], tmp)
+      built = plan(paths, tmp)
+
+      assert built.splits == %{}
+      assert_unchanged(@subject, concentrated, prepared: built, enabled: true)
+      assert Enum.any?(built.declined, &(&1.reason =~ "vocabulary"))
+    end
+
+    test "the vocabulary threshold is configurable (0.0 disables the gate)", %{tmp: tmp} do
+      concentrated = """
+      defmodule MyApp.Conc do
+        def a1(x), do: x |> a2() |> a3()
+        defp a2(x), do: a4(x)
+        defp a3(x), do: x
+        defp a4(x), do: x
+
+        def b1(x), do: x |> b2() |> b3()
+        defp b2(x), do: b4(x)
+        defp b3(x), do: x
+        defp b4(x), do: x
+      end
+      """
+
+      paths = materialize([{"lib/my_app/conc.ex", concentrated}], tmp)
+
+      # Gate on (default): declined. Gate off (0.0): splits.
+      assert plan(paths, tmp).splits == %{}
+      assert map_size(plan(paths, tmp, vocab_split_threshold: 0.0).splits) == 1
+    end
+
+    test "a real god module clears the gate and still splits", %{tmp: tmp} do
+      src = two_island_module()
+      paths = materialize([{"lib/my_app/acc.ex", src}], tmp)
+
+      # Default threshold — the rich-vocabulary fixture is split-worthy.
+      assert map_size(plan(paths, tmp).splits) == 1
     end
   end
 
@@ -459,7 +558,9 @@ defmodule Number42.Refactors.Ex.SplitLowCohesionModuleTest do
       """
 
       paths = materialize([{"lib/my_app/shared.ex", src}], tmp)
-      built = plan(paths, tmp)
+      # Tests the shared-@attr guard specifically — bypass the vocabulary
+      # gate so this toy fixture reaches that guard.
+      built = plan(paths, tmp, vocab_split_threshold: 0.0)
 
       assert built.splits == %{}
       assert_unchanged(@subject, src, prepared: built, enabled: true)
@@ -487,7 +588,10 @@ defmodule Number42.Refactors.Ex.SplitLowCohesionModuleTest do
       """
 
       paths = materialize([{"lib/my_app/attr_edge.ex", src}], tmp)
-      built = plan(paths, tmp)
+      # Tests the shared-@attr guard specifically — bypass the vocabulary
+      # gate so this toy fixture reaches that guard rather than declining
+      # earlier on vocabulary.
+      built = plan(paths, tmp, vocab_split_threshold: 0.0)
 
       assert built.splits == %{}
       assert_unchanged(@subject, src, prepared: built, enabled: true)
