@@ -287,6 +287,52 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone.CrossFileTest do
       refute File.exists?(Path.join(tmp, "lib/shared.ex"))
     end
 
+    # Regression: a module with `use <Macro>` may rely on functions the
+    # macro imports (e.g. `import AstHelpers` from `use Refactor`). The
+    # bare `*.Shared` host has no `use`, so an extracted body calling such
+    # a function would compile to `undefined function ...`. The clone is
+    # refused; both modules stay untouched, no Shared file is written.
+    test "module carrying `use` is refused for cross-file extraction", %{tmp: tmp} do
+      a = """
+      defmodule MyApp.Items.Foo do
+        use MyApp.SomeMacro
+
+        def emit(node) do
+          stripped = strip_meta(node)
+          {:emit, stripped}
+        end
+      end
+      """
+
+      b = """
+      defmodule MyApp.Items.Bar do
+        use MyApp.SomeMacro
+
+        def emit(node) do
+          stripped = strip_meta(node)
+          {:other, stripped}
+        end
+      end
+      """
+
+      sources = [
+        {Path.join(tmp, "lib/my_app/items/foo.ex"), a},
+        {Path.join(tmp, "lib/my_app/items/bar.ex"), b}
+      ]
+
+      sources
+      |> Enum.each(fn {p, src} ->
+        File.mkdir_p!(Path.dirname(p))
+        File.write!(p, src)
+      end)
+
+      assert_unchanged(@subject, a, prepared: prepared(sources, write_root: tmp, min_mass: 3))
+      assert_unchanged(@subject, b, prepared: prepared(sources, write_root: tmp, min_mass: 3))
+
+      refute File.exists?(Path.join(tmp, "lib/my_app/items/shared.ex")),
+             "must not write a Shared host from `use`-carrying modules"
+    end
+
     test "predicate function name keeps `?` after the `_shared` suffix", %{tmp: tmp} do
       # `?` and `!` are valid only at the END of an Elixir identifier.
       # Naively appending `_shared` to `references_var?` produces
