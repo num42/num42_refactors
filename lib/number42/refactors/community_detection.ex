@@ -73,7 +73,7 @@ defmodule Number42.Refactors.CommunityDetection do
 
     case total do
       +0.0 -> Enum.map(nodes, &MapSet.new([&1]))
-      _ -> greedy_merge(initial_communities(nodes), adjacency, total)
+      _ -> greedy_merge(nodes, adjacency, total)
     end
   end
 
@@ -107,92 +107,145 @@ defmodule Number42.Refactors.CommunityDetection do
   end
 
   # ── Greedy agglomeration ─────────────────────────────────────────
+  #
+  # Clauset-Newman-Moore on community-level aggregates, so a merge never
+  # re-scans node membership:
+  #
+  #   * `members`  — `%{cid => MapSet(node)}`, the live communities
+  #   * `a`        — `%{cid => incident weight}` of each community
+  #   * `between`  — `%{cid => %{neighbour_cid => cross weight}}`, the
+  #     weight on edges between two distinct communities (symmetric)
+  #
+  # `cid`s are the node-keyed singleton ids at the start; a merge keeps
+  # the smaller id and folds the larger into it, so ids stay stable for
+  # the deterministic tie-break (`{gain, -i, -j}` on the original
+  # node-derived ids). Each merge touches only the union of the two
+  # communities' neighbours — O(degree), not O(N).
 
-  defp initial_communities(nodes), do: Enum.map(nodes, &MapSet.new([&1]))
+  defp greedy_merge(nodes, adjacency, total) do
+    members = Map.new(nodes, &{&1, MapSet.new([&1])})
+    a = Map.new(nodes, &{&1, node_incident(&1, adjacency)})
+    between = initial_between(nodes, adjacency)
 
-  defp greedy_merge(communities, adjacency, total) do
-    case best_merge(communities, adjacency, total) do
-      :none -> communities
-      {i, j} -> communities |> merge_at(i, j) |> greedy_merge(adjacency, total)
+    {final_members, _a, _between} = merge_loop(members, a, between, total)
+    Map.values(final_members)
+  end
+
+  defp merge_loop(members, a, between, total) do
+    case best_merge(between, a, total) do
+      :none ->
+        {members, a, between}
+
+      {i, j} ->
+        {members, a, between} = apply_merge(members, a, between, i, j)
+        merge_loop(members, a, between, total)
     end
   end
 
-  # The best (highest positive ΔQ) pair of community indices to merge,
-  # or `:none` when no merge improves modularity. Only adjacent
-  # community pairs (those with at least one connecting edge) can have
-  # positive ΔQ, so we restrict candidates to them.
-  defp best_merge(communities, adjacency, total) do
-    indexed = Enum.with_index(communities)
+  # The best (highest positive ΔQ) pair of community ids to merge, or
+  # `:none` when no merge improves modularity. Only adjacent community
+  # pairs can have positive ΔQ, and `between` holds exactly those, so we
+  # scan its entries directly. ΔQ comes straight from the aggregates:
+  #   ΔQ = 2 * (e_uv/total − a_u a_v / (2·total)²)
+  # The `e_uv > 0` invariant of `between` lets us pre-divide once.
+  defp best_merge(between, a, total) do
+    two_total = 2 * total
 
-    indexed
-    |> candidate_pairs(adjacency)
-    |> Enum.map(fn {i, j} ->
-      {merge_gain(Enum.at(communities, i), Enum.at(communities, j), adjacency, total), i, j}
+    best =
+      Enum.reduce(between, :none, fn {i, neighbours}, outer ->
+        Enum.reduce(neighbours, outer, fn {j, e_uv}, acc ->
+          if i < j do
+            a_u = Map.fetch!(a, i) / two_total
+            a_v = Map.fetch!(a, j) / two_total
+            gain = 2 * (e_uv / total - a_u * a_v)
+            better?(acc, {gain, i, j})
+          else
+            acc
+          end
+        end)
+      end)
+
+    case best do
+      {gain, i, j} when gain > 0.0 -> {i, j}
+      _ -> :none
+    end
+  end
+
+  # Keep the candidate with the larger gain. On a gain tie the pair with
+  # the lexicographically smaller `{i, j}` wins — a total, input-order-
+  # independent order over the node-id pairs (ids being `{name, arity}`),
+  # so the partition is deterministic regardless of how `between` happens
+  # to enumerate.
+  defp better?(:none, candidate), do: candidate
+
+  defp better?({g0, i0, j0} = current, {g1, i1, j1} = candidate) do
+    cond do
+      g1 > g0 -> candidate
+      g1 < g0 -> current
+      {i1, j1} < {i0, j0} -> candidate
+      true -> current
+    end
+  end
+
+  # Merge community `j` into `i` (i kept). Updates incident weights, the
+  # member sets, and rewrites every neighbour's `between` entry to point
+  # at `i`, folding any edge they had to both `i` and `j`.
+  defp apply_merge(members, a, between, i, j) do
+    members =
+      members
+      |> Map.update!(i, &MapSet.union(&1, Map.fetch!(members, j)))
+      |> Map.delete(j)
+
+    a = a |> Map.update!(i, &(&1 + Map.fetch!(a, j))) |> Map.delete(j)
+
+    between = rewire_between(between, i, j)
+    {members, a, between}
+  end
+
+  # Fold j's cross-edges into i's, drop j everywhere, and remove the
+  # now-internal i↔j edge. `between` stays symmetric throughout.
+  defp rewire_between(between, i, j) do
+    i_neighbours = Map.get(between, i, %{})
+    j_neighbours = Map.get(between, j, %{})
+
+    # New i row: union of i's and j's external neighbours, summed,
+    # excluding i and j themselves (the i↔j edge becomes internal).
+    merged_row =
+      j_neighbours
+      |> Map.drop([i, j])
+      |> Enum.reduce(Map.drop(i_neighbours, [i, j]), fn {k, w}, acc ->
+        Map.update(acc, k, w, &(&1 + w))
+      end)
+
+    # Point every external neighbour `k` back at `i`: add its weight to k,
+    # remove its old j entry, and (for k that touched both) sum them.
+    neighbours = merged_row |> Map.keys()
+
+    between
+    |> Map.put(i, merged_row)
+    |> Map.delete(j)
+    |> redirect_neighbours(neighbours, i, j, merged_row)
+  end
+
+  defp redirect_neighbours(between, neighbours, i, j, merged_row) do
+    Enum.reduce(neighbours, between, fn k, acc ->
+      Map.update(acc, k, %{i => Map.fetch!(merged_row, k)}, fn row ->
+        row |> Map.delete(j) |> Map.put(i, Map.fetch!(merged_row, k))
+      end)
     end)
-    |> best_positive_gain()
   end
 
-  defp candidate_pairs(indexed_communities, adjacency) do
-    for {ci, i} <- indexed_communities,
-        {cj, j} <- indexed_communities,
-        i < j,
-        connected?(ci, cj, adjacency),
-        do: {i, j}
+  # ── Aggregate construction ───────────────────────────────────────
+
+  # Weight incident to a single node (its singleton community's `a`).
+  defp node_incident(node, adjacency) do
+    adjacency |> Map.get(node, %{}) |> Map.values() |> Enum.sum()
   end
 
-  defp connected?(ci, cj, adjacency) do
-    Enum.any?(ci, fn u ->
-      neighbours = Map.get(adjacency, u, %{})
-      Enum.any?(cj, &Map.has_key?(neighbours, &1))
-    end)
-  end
-
-  defp best_positive_gain([]), do: :none
-
-  defp best_positive_gain(gains) do
-    {gain, i, j} = Enum.max_by(gains, fn {g, i, j} -> {g, -i, -j} end)
-    if gain > 0.0, do: {i, j}, else: :none
-  end
-
-  # ΔQ for merging communities `u` and `v`:
-  #   ΔQ = 2 * (e_uv − a_u * a_v)
-  # where e_uv is the fraction of total weight on edges *between* u and
-  # v, and a_x is the fraction of total weight incident to community x.
-  defp merge_gain(u, v, adjacency, total) do
-    e_uv = between_weight(u, v, adjacency) / total
-    a_u = incident_weight(u, adjacency) / (2 * total)
-    a_v = incident_weight(v, adjacency) / (2 * total)
-    2 * (e_uv - a_u * a_v)
-  end
-
-  defp merge_at(communities, i, j) do
-    {ci, cj} = {Enum.at(communities, i), Enum.at(communities, j)}
-    merged = MapSet.union(ci, cj)
-
-    communities
-    |> Enum.with_index()
-    |> Enum.reject(fn {_c, idx} -> idx in [i, j] end)
-    |> Enum.map(fn {c, _idx} -> c end)
-    |> List.insert_at(0, merged)
-  end
-
-  # ── Weight aggregates ────────────────────────────────────────────
-
-  # Sum of edge weights with exactly one endpoint in `u` and the other
-  # in `v` (the cut weight between the two communities).
-  defp between_weight(u, v, adjacency) do
-    Enum.reduce(u, 0.0, fn node, acc ->
-      neighbours = Map.get(adjacency, node, %{})
-      acc + Enum.reduce(v, 0.0, fn other, inner -> inner + Map.get(neighbours, other, 0) end)
-    end)
-  end
-
-  # Total weight incident to community `c` (each intra-community edge
-  # counted twice, matching the degree-sum convention `a_c`).
-  defp incident_weight(c, adjacency) do
-    Enum.reduce(c, 0.0, fn node, acc ->
-      acc + (adjacency |> Map.get(node, %{}) |> Map.values() |> Enum.sum())
-    end)
+  # `%{cid => %{neighbour_cid => weight}}` for the singleton partition:
+  # this is just the adjacency, since every node is its own community.
+  defp initial_between(nodes, adjacency) do
+    Map.new(nodes, fn node -> {node, Map.get(adjacency, node, %{})} end)
   end
 
   # ── Adjacency / totals ───────────────────────────────────────────
