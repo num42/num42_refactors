@@ -137,21 +137,28 @@ defmodule Number42.Refactors.Ex.SplitLowCohesionModule do
   @excluded_path_prefixes ["test/", "dev/"]
 
   @typedoc """
-  A planned split for one home module: the home module name, the list
-  of clusters that move out (each `%{module, functions, publics}`), and
-  the resolved aliases for body qualification.
+  A planned split for one home module: the home module name, the list of
+  clusters that move out, the resolved aliases for body qualification,
+  the `{name, arity} => module` index that drives boundary-crossing call
+  requalification, and the home-side keys/promotions that index implies.
   """
   @type split :: %{
           home: module(),
           home_path: String.t(),
           aliases: %{atom() => module()},
-          moved: [moved_cluster()]
+          moved: [moved_cluster()],
+          target_index: %{{atom(), arity()} => module()},
+          home_keys: MapSet.t({atom(), arity()}),
+          home_promote: MapSet.t({atom(), arity()})
         }
 
   @type moved_cluster :: %{
           module: module(),
+          keys: MapSet.t({atom(), arity()}),
           clauses: [term()],
-          public_keys: MapSet.t({atom(), arity()})
+          public_keys: MapSet.t({atom(), arity()}),
+          promote_keys: MapSet.t({atom(), arity()}),
+          path: String.t()
         }
 
   @impl Number42.Refactors.Refactor
@@ -490,15 +497,123 @@ defmodule Number42.Refactors.Ex.SplitLowCohesionModule do
         declined(mod, "derived submodule names collide")
 
       true ->
+        finalize_split(mod, path, aliases, def_index, home_cluster, moved)
+    end
+  end
+
+  # Resolve every private call edge that crosses a cluster boundary
+  # (the partition cuts by communication density, not by reachability,
+  # so two mutually-calling privates can land in different modules). For
+  # each crossing edge the callee is promoted to a public `def` (made
+  # remote-callable) and the call site is qualified to the callee's new
+  # home. Encode that as a per-module promote set + a global target index
+  # the body rewriter consults; decline if an edge can't be requalified.
+  defp finalize_split(mod, path, aliases, def_index, home_cluster, moved) do
+    target_index = build_target_index(mod, home_cluster, moved)
+
+    case cross_edge_promotions(def_index, target_index, mod) do
+      {:error, reason} ->
+        declined(mod, reason)
+
+      {:ok, promote} ->
+        moved =
+          Enum.map(moved, fn cluster ->
+            Map.put(cluster, :promote_keys, MapSet.intersection(cluster.keys, promote))
+          end)
+
         {:ok,
          %{
            home: mod,
            home_path: path,
            aliases: aliases,
-           moved: moved
+           moved: moved,
+           target_index: target_index,
+           home_keys: home_cluster.keys,
+           home_promote: MapSet.intersection(home_cluster.keys, promote)
          }}
     end
   end
+
+  # `{name, arity} => module` over every local def: home defs map to the
+  # home module, moved defs to their submodule.
+  defp build_target_index(mod, home_cluster, moved) do
+    home_entries = Enum.map(home_cluster.keys, &{&1, mod})
+
+    moved_entries =
+      Enum.flat_map(moved, fn cluster ->
+        Enum.map(cluster.keys, &{&1, cluster.module})
+      end)
+
+    Map.new(home_entries ++ moved_entries)
+  end
+
+  # The set of callee keys reached by at least one boundary-crossing
+  # private call. A crossing whose callee can't be statically resolved
+  # to a target module aborts the whole split — a wrong requalify is
+  # worse than no split.
+  defp cross_edge_promotions(def_index, target_index, mod) do
+    def_index
+    |> Map.values()
+    |> Enum.reduce_while({:ok, MapSet.new()}, fn def_info, {:ok, acc} ->
+      from_module = Map.fetch!(target_index, {def_info.name, def_info.arity})
+
+      case crossing_callees(def_info, target_index, from_module) do
+        {:ok, callees} ->
+          {:cont, {:ok, MapSet.union(acc, callees)}}
+
+        :error ->
+          {:halt, {:error, "cross-cluster call site cannot be requalified in #{inspect(mod)}"}}
+      end
+    end)
+  end
+
+  defp crossing_callees(def_info, target_index, from_module) do
+    def_info.calls
+    |> Enum.filter(&Map.has_key?(target_index, &1))
+    |> Enum.filter(&(Map.fetch!(target_index, &1) != from_module))
+    |> Enum.reduce_while({:ok, MapSet.new()}, fn callee, {:ok, acc} ->
+      if requalifiable?(def_info, callee),
+        do: {:cont, {:ok, MapSet.put(acc, callee)}},
+        else: {:halt, :error}
+    end)
+  end
+
+  # Every clause body must carry a position for each crossing call so the
+  # renderer/patcher can rewrite it. Source built via `Sourceror.parse`
+  # always has positions; a synthesised node (no range) would be
+  # unrewritable — decline rather than emit a broken call.
+  defp requalifiable?(def_info, {name, arity}) do
+    def_info.clauses
+    |> Enum.flat_map(&clause_body_asts/1)
+    |> Enum.all?(&calls_have_positions?(&1, name, arity))
+  end
+
+  defp calls_have_positions?(ast, name, arity) do
+    ast
+    |> Macro.prewalker()
+    |> Enum.all?(fn node ->
+      if call_node_for?(node, name, arity), do: node_has_position?(node), else: true
+    end)
+  end
+
+  defp node_has_position?({_, meta, _}), do: Keyword.has_key?(meta, :line)
+  defp node_has_position?(_), do: false
+
+  # The three call shapes the requalifier rewrites: a direct call, a pipe
+  # right-hand side (implicit first arg → arity+1), and an `&name/arity`
+  # capture.
+  defp call_node_for?({:&, _, [{:/, _, [{name, _, ctx}, arity]}]}, name, arity)
+       when is_atom(ctx) and is_integer(arity),
+       do: true
+
+  defp call_node_for?({:|>, _, [_lhs, {name, _, args}]}, name, arity)
+       when is_list(args),
+       do: length(args) + 1 == arity
+
+  defp call_node_for?({name, _, args}, name, arity) when is_list(args),
+    do: length(args) == arity
+
+  defp call_node_for?(_, _, _), do: false
 
   defp cluster_info(key_set, def_index) do
     cluster_defs =
@@ -648,15 +763,17 @@ defmodule Number42.Refactors.Ex.SplitLowCohesionModule do
     Enum.each(split.moved, fn cluster ->
       unless File.exists?(cluster.path) do
         File.mkdir_p!(Path.dirname(cluster.path))
-        File.write!(cluster.path, render_module(cluster, split.aliases))
+        File.write!(cluster.path, render_module(cluster, split))
       end
     end)
   end
 
-  defp render_module(cluster, aliases) do
+  defp render_module(cluster, split) do
     body =
       cluster.clauses
-      |> Enum.map(&qualify_aliases(&1, aliases))
+      |> Enum.map(&promote_clause(&1, cluster.promote_keys))
+      |> Enum.map(&requalify_clause(&1, cluster.module, split.target_index))
+      |> Enum.map(&qualify_aliases(&1, split.aliases))
       |> Enum.map_join("\n\n", &Sourceror.to_string/1)
 
     """
@@ -665,6 +782,98 @@ defmodule Number42.Refactors.Ex.SplitLowCohesionModule do
     end
     """
   end
+
+  # A boundary-crossing private callee is published so callers in other
+  # modules can reach it; intra-cluster privates keep `defp`.
+  defp promote_clause({:defp, meta, args} = clause, promote_keys) do
+    if MapSet.member?(promote_keys, clause_key(clause)),
+      do: {:def, meta, args},
+      else: clause
+  end
+
+  defp promote_clause(clause, _promote_keys), do: clause
+
+  # Rewrite every local call whose callee lives in a different module to
+  # `Target.callee(...)`; intra-module calls stay bare. Pipe right-hand
+  # sides carry an implicit first arg (`x |> f(y)` is `f/2`), so they are
+  # collected up front and arity-corrected — mirroring `collect_calls`.
+  defp requalify_clause(clause, self_module, target_index) do
+    pipe_rhs = pipe_rhs_nodes(clause)
+
+    Macro.prewalk(clause, fn node ->
+      requalify_call(node, self_module, target_index, pipe_rhs)
+    end)
+  end
+
+  defp pipe_rhs_nodes(ast) do
+    ast
+    |> Macro.prewalker()
+    |> Enum.flat_map(fn
+      {:|>, _, [_lhs, rhs]} -> [rhs]
+      _ -> []
+    end)
+    |> MapSet.new()
+  end
+
+  defp requalify_call(
+         {:&, meta, [{:/, sl, [{name, nmeta, ctx}, arity]}]} = node,
+         self,
+         index,
+         _pipe
+       )
+       when is_atom(name) and is_atom(ctx) and is_integer(arity) do
+    case cross_target({name, arity}, self, index) do
+      nil ->
+        node
+
+      target ->
+        {:&, meta, [{:/, sl, [{{:., nmeta, [alias_ast(target), name]}, nmeta, []}, arity]}]}
+    end
+  end
+
+  defp requalify_call({:|>, meta, [lhs, {name, rmeta, args}]} = node, self, index, _pipe)
+       when is_atom(name) and is_list(args) do
+    case cross_target({name, length(args) + 1}, self, index) do
+      nil -> node
+      target -> {:|>, meta, [lhs, {{:., rmeta, [alias_ast(target), name]}, rmeta, args}]}
+    end
+  end
+
+  defp requalify_call({name, meta, args} = node, self, index, pipe_rhs)
+       when is_atom(name) and is_list(args) do
+    if MapSet.member?(pipe_rhs, node) do
+      node
+    else
+      case cross_target({name, length(args)}, self, index) do
+        nil -> node
+        target -> {{:., meta, [alias_ast(target), name]}, meta, args}
+      end
+    end
+  end
+
+  defp requalify_call(node, _self, _index, _pipe), do: node
+
+  defp cross_target(key, self_module, target_index) do
+    case Map.get(target_index, key) do
+      nil -> nil
+      ^self_module -> nil
+      target -> target
+    end
+  end
+
+  defp alias_ast(module) do
+    {:__aliases__, [], module |> Module.split() |> Enum.map(&String.to_atom/1)}
+  end
+
+  defp clause_key({kind, _, [head | _]}) when kind in [:def, :defp] do
+    case strip_when(head) do
+      {name, _, args} when is_atom(name) and is_list(args) -> {name, length(args)}
+      {name, _, ctx} when is_atom(name) and is_atom(ctx) -> {name, 0}
+      _ -> nil
+    end
+  end
+
+  defp clause_key(_), do: nil
 
   # ── transform/2: apply one source ────────────────────────────────
 
@@ -706,11 +915,42 @@ defmodule Number42.Refactors.Ex.SplitLowCohesionModule do
   end
 
   # Home module: delete moved private clauses, replace each moved public
-  # function with a `defdelegate` to its new submodule.
+  # function with a `defdelegate` to its new submodule, and requalify /
+  # promote the functions that stay behind but participate in a
+  # boundary-crossing call.
   defp home_patches(nil, _body_exprs), do: []
 
   defp home_patches(split, body_exprs) do
-    Enum.flat_map(split.moved, &cluster_home_patches(&1, body_exprs))
+    Enum.flat_map(split.moved, &cluster_home_patches(&1, body_exprs)) ++
+      home_keep_patches(split, body_exprs)
+  end
+
+  # Functions that remain in the home module but either are called from a
+  # moved cluster (promote `defp` → `def`) or call into one (qualify the
+  # call site). Re-render the whole clause group so promote + qualify
+  # happen in one consistent patch.
+  defp home_keep_patches(split, body_exprs) do
+    split.home_keys
+    |> Enum.flat_map(fn {name, arity} ->
+      clauses = Enum.filter(body_exprs, &clause_matches?(&1, name, arity))
+      home_keep_patch(clauses, split)
+    end)
+  end
+
+  defp home_keep_patch([], _split), do: []
+
+  defp home_keep_patch([first | _] = clauses, split) do
+    rewritten =
+      clauses
+      |> Enum.map(&promote_clause(&1, split.home_promote))
+      |> Enum.map(&requalify_clause(&1, split.home, split.target_index))
+
+    if rewritten == clauses do
+      []
+    else
+      replacement = Enum.map_join(rewritten, "\n\n", &Sourceror.to_string/1)
+      group_patch(first, List.last(clauses), replacement)
+    end
   end
 
   defp cluster_home_patches(cluster, body_exprs) do
