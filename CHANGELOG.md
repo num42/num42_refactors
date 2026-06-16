@@ -93,6 +93,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `CanonicalStatementOrder` (#256): no longer crashes with a `CaseClauseError`
+  while computing a statement's canonical sort key. The tie-break rendered the
+  *normalised* AST (meta-stripped + synthetic `{:"$var", [], [idx]}` variable
+  nodes) via `Sourceror.to_string/1`, but those internal nodes are not valid
+  Elixir source and drove the formatter's `force_args?/2` into a `CaseClauseError`
+  on a bare integer arg (e.g. a map/keyword value, or a `{:-, _, [n]}` unary op
+  from a `3..-1//1` range). Reproduced on the library's own
+  `lib/mix/tasks/refactor.ex`. The tie-break now serialises the normalised term
+  with `inspect/1` — a deterministic structural serialisation that needs no
+  source re-render.
 - `ExtractSharedModule` (#243): no longer appends a `def name/arity` to an
   existing `*.Shared` destination that already provides that signature via
   `defdelegate` — the appended clause was dead (the delegate matches first) and

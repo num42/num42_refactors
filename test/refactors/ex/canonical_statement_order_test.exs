@@ -344,6 +344,79 @@ defmodule Number42.Refactors.Ex.CanonicalStatementOrderTest do
     end
   end
 
+  describe "Slice 6 — regression: sort key over the normalised AST (#256)" do
+    # The canonical sort key normalised each statement (meta stripped +
+    # positional variable renaming into synthetic `{:"$var", [], [idx]}`
+    # nodes) and then rendered it via `Sourceror.to_string/1` — the
+    # Elixir source formatter. The formatter cannot render those
+    # synthetic, meta-less internal nodes: its `force_args?/2` does a
+    # `case` over node shapes and falls through on the bare integer arg,
+    # raising `CaseClauseError`. Reduced from the library's own
+    # `lib/mix/tasks/refactor.ex` (a `run_opts = %{...}` map literal). The
+    # key must serialise the normalised term, not re-render it as source.
+
+    test "a map literal with variable values does not crash the sort key" do
+      source = """
+      defmodule M do
+        def f(a, b) do
+          opts = %{auto?: a, check?: b, dry?: a}
+          head = Map.put(%{}, :h, a)
+          body = Map.put(%{}, :b, b)
+
+          {opts, head, body}
+        end
+      end
+      """
+
+      result = apply_refactor(@subject, source, @on)
+
+      assert_idempotent(@subject, source, @on)
+      assert_compiles(result)
+    end
+
+    test "a keyword list with variable values does not crash the sort key" do
+      source = """
+      defmodule M do
+        def f(a, b) do
+          opts = [auto?: a, check?: b, dry?: a]
+          head = Map.put(%{}, :h, a)
+          body = Map.put(%{}, :b, b)
+
+          {opts, head, body}
+        end
+      end
+      """
+
+      result = apply_refactor(@subject, source, @on)
+
+      assert_idempotent(@subject, source, @on)
+      assert_compiles(result)
+    end
+
+    test "a stepped range with a unary-minus end (the original trace shape)" do
+      # The reported stack trace went through `unary_op_to_algebra/5`
+      # because the offending file also held `String.slice(path, 3..-1//1)`
+      # — a `{:-, _, [1]}` unary op on a bare integer. Same defect, same
+      # crash path through the formatter on a normalised node.
+      source = """
+      defmodule M do
+        def f(path, a, b) do
+          tail = %{slice: String.slice(path, 3..-1//1), a: a}
+          head = Map.put(%{}, :h, a)
+          body = Map.put(%{}, :b, b)
+
+          {tail, head, body}
+        end
+      end
+      """
+
+      result = apply_refactor(@subject, source, @on)
+
+      assert_idempotent(@subject, source, @on)
+      assert_compiles(result)
+    end
+  end
+
   # Compare just the def body, whitespace-squeezed.
   defp squeeze_body(source) do
     source
