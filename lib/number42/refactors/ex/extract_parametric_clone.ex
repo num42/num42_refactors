@@ -660,6 +660,7 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
       body_ast: body_ast,
       bucket_index: nil,
       clause: clause,
+      has_use?: has_use_statements?(ctx.body_exprs),
       helpers: migratable_helpers,
       helpers_rejected?: reject_helpers?,
       imports: ctx.imports,
@@ -876,6 +877,18 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
       _ -> []
     end)
     |> Enum.sort_by(fn {k, _} -> k end)
+  end
+
+  # Whether the module declares any `use <Macro>`. A `use` may inject
+  # imports/functions the migrated body relies on but that the bare
+  # `*.Shared` host wouldn't have — so a module with `use` is unsafe to
+  # extract from cross-file.
+  defp has_use_statements?(body_exprs) do
+    body_exprs
+    |> Enum.any?(fn
+      {:use, _, _} -> true
+      _ -> false
+    end)
   end
 
   defp collect_map_key_paths(skeleton) do
@@ -1139,6 +1152,16 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
 
   defp emit_cross_file_plan(_kind, entries, target_module, skeleton, holes, state) do
     cond do
+      # Reject if any source module carries a `use <Macro>`. The body (or
+      # a migrated helper) may call a function that `use` imported into
+      # the source module — `import AstHelpers` from `use Refactor`, say.
+      # The bare `*.Shared` host has no `use`, so those calls would be
+      # undefined there. We can't safely replay arbitrary `use` injection
+      # into the host, so we refuse the cross-file extraction — same
+      # stance as `ExtractSharedModule`.
+      entries |> Enum.any?(& &1.has_use?) ->
+        {[], state}
+
       # Reject if any source module's reachability analysis flagged a
       # defp shared between the clone and a non-clone caller.
       entries |> Enum.any?(& &1.helpers_rejected?) ->
