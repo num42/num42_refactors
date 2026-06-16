@@ -176,10 +176,43 @@ defmodule Number42.Refactors.Ex.RemoveDeadPrivateFunction do
       dynamic_quote_dispatch?(body_exprs) ->
         []
 
+      # A `use <Macro>` we can't expand may inject functions that call a
+      # local private (e.g. `use PatchRefactor` generates
+      # `__patch_refactor_apply__/2`, whose body calls `build_patches/1`).
+      # That call lives in the macro expansion, never in the source, so
+      # the call graph can't see it and the private looks dead. Keep
+      # every private when an opaque `use` is present — same conservative
+      # stance as the dynamic-dispatch guard.
+      injects_opaque_calls?(body_exprs) ->
+        []
+
       true ->
         delete_all_dead(definitions, reachable_defs(definitions, MapSet.new(roots)), body_exprs)
     end
   end
+
+  # `use <Module>` whose injected code we can't see. The library's own
+  # `Number42.Refactors.Refactor` only injects `@behaviour`/`import`/an
+  # attribute — no function that calls a local private — so it is the one
+  # known-safe exception. Every other `use` is treated as opaque.
+  @known_inert_use [Number42.Refactors.Refactor]
+
+  defp injects_opaque_calls?(body_exprs) do
+    body_exprs
+    |> Enum.any?(fn
+      {:use, _, [mod_ast | _]} -> use_target(mod_ast) not in @known_inert_use
+      _ -> false
+    end)
+  end
+
+  defp use_target({:__aliases__, _, _} = alias_ast) do
+    case alias_to_module(alias_ast) do
+      {:ok, mod} -> mod
+      :error -> :unknown
+    end
+  end
+
+  defp use_target(_), do: :unknown
 
   # Roots = public `def`s (external contract), any private named by a
   # qualified self-call `__MODULE__.fn(...)` / `ThisModule.fn(...)`, and
