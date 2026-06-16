@@ -176,12 +176,21 @@ defmodule Mix.Tasks.Refactor do
       |> Map.get(:configured_modules, [])
       |> inject_paths_for_cross_file_refactors(files)
 
+    # `--check` / `--ci` are read-only gates: they report drift and exit,
+    # but must write nothing. Cross-file refactors do their disk side
+    # write in `prepare/1` (the `*.Shared` / `*.Support` host), which only
+    # honours `dry_run`. So a check run has to thread `dry_run: true` too,
+    # or it leaves the generated host files behind on every invocation.
+    read_only? =
+      Keyword.get(opts, :dry_run, false) or Keyword.get(opts, :check, false) or
+        Keyword.get(opts, :ci, false)
+
     engine_opts = [
       only_modules: only_modules,
       skipped_modules: skipped_modules,
       configured_modules: configured_modules,
       project_config: config,
-      dry_run: Keyword.get(opts, :dry_run, false)
+      dry_run: read_only?
     ]
 
     run_opts = %{

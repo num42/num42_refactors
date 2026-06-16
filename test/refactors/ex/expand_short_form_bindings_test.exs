@@ -365,6 +365,22 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindingsTest do
   end
 
   describe "skip conditions" do
+    # Regression for #249: a multi-subtoken descriptive name whose
+    # leading subtoken is short (`hit_paths` → `hit` is 3 chars) flags
+    # the whole name as cryptic, then the ranker latches onto the
+    # `paths` subtoken and *shortens* `hit_paths` to `paths`. Expansion
+    # must never drop subtokens — that removes meaning.
+    test "a name is never shortened to a subset of its own subtokens" do
+      assert_unchanged(@subject, ~S'''
+      defmodule M do
+        def step(module, hits, paths_acc, run_opts) do
+          hit_paths = Enum.map(hits, fn {p, _, _} -> p end)
+          commit(module, hit_paths, paths_acc, run_opts)
+        end
+      end
+      ''')
+    end
+
     test "rebound name in same function body is left alone" do
       # `cs` is bound twice; renaming would require scope analysis we
       # don't do.

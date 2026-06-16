@@ -452,6 +452,11 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
       |> Enum.map(fn {name, _node, rhs} ->
         forbidden = Map.get(accessed_fields, name, MapSet.new())
 
+        # A curated `known` mapping is an explicit project opt-in; it
+        # wins even if it happens to drop subtokens. The shortening guard
+        # only polices heuristic candidates.
+        curated = Map.get(context_compound.known, Atom.to_string(name))
+
         candidates =
           ranked_long_forms(
             name,
@@ -464,6 +469,7 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
             context_compound
           )
           |> Enum.reject(&MapSet.member?(forbidden, &1))
+          |> Enum.reject(&(&1 != curated and shortens?(name, &1)))
 
         {name, candidates}
       end)
@@ -824,6 +830,21 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
   # `consonant_heavy?` is deliberately not used here. It's calibrated
   # to decide what *needs* expanding (catches `brnd`, `mngr`), but
   # legit English words like `string`/`script` also trip it.
+  # Refuse a "long form" that merely drops subtokens from the original
+  # name — that's a *shortening*, never an expansion. `hit_paths` →
+  # `paths` (subtokens {paths} ⊂ {hit, paths}) is the canonical case: a
+  # leading full word (`hit`) is short enough to flag the whole name as
+  # cryptic, then the ranker latches onto the `paths` subtoken and
+  # silently truncates a perfectly descriptive name. A genuine expansion
+  # always *adds* meaning; if the candidate's subtokens are a subset of
+  # the original's, it removes meaning instead.
+  defp shortens?(name, long) do
+    original = name |> Atom.to_string() |> String.split("_", trim: true) |> MapSet.new()
+    candidate = long |> String.split("_", trim: true) |> MapSet.new()
+
+    MapSet.size(original) > 1 and MapSet.subset?(candidate, original)
+  end
+
   defp cryptic_target?(long, ctx) do
     if MapSet.member?(ctx.whitelist, String.to_atom(long)) do
       false
