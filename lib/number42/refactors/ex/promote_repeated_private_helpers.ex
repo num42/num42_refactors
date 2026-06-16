@@ -461,9 +461,15 @@ defmodule Number42.Refactors.Ex.PromoteRepeatedPrivateHelpers do
 
   # Rewrite every unqualified call to `name/arity` (plain or pipe-rhs) into
   # `Target.name(...)`. Patches the call head token only, leaving the
-  # argument source verbatim.
+  # argument source verbatim. The helper's own `defp` clauses are excluded
+  # first: a clause *head* (`do_body(_)`) is structurally a call and would
+  # otherwise be patched — fatal for the trailing clauses of a multi-clause
+  # helper, whose heads then collide with the wholesale delete range and
+  # mangle the source (#257). Those clauses are removed entirely by
+  # `delete_defp_patches`, so they must never be scanned as call sites.
   defp call_site_patches(body_exprs, %{name: name, arity: arity, target: target}) do
     body_exprs
+    |> Enum.reject(&clause_matches?(&1, name, arity))
     |> Enum.flat_map(&calls_in_expr(&1, name, arity))
     |> Enum.flat_map(&call_patch(&1, name, target))
   end
