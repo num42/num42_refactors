@@ -333,6 +333,53 @@ defmodule Number42.Refactors.Ex.RemoveDeadPrivateFunctionTest do
         """
       )
     end
+
+    # Regression for #251: `use PatchRefactor` injects
+    # `__patch_refactor_apply__/2`, whose body calls `build_patches/1`.
+    # That call lives in the macro expansion, not the source, so the
+    # local call graph sees `build_patches/1` as dead — but deleting it
+    # breaks compilation. An opaque `use` must keep every private.
+    test "keeps every defp when an opaque use injects callers" do
+      assert_unchanged(
+        @subject,
+        """
+        defmodule M do
+          use Number42.Refactors.PatchRefactor
+
+          def description, do: "x"
+
+          defp build_patches(ast), do: walk(ast)
+          defp walk(ast), do: ast
+        end
+        """
+      )
+    end
+
+    # The library's own `use Number42.Refactors.Refactor` only injects
+    # `@behaviour`/`import`/an attribute — no caller of a local private —
+    # so it stays inert and genuine dead code is still removed.
+    test "still removes dead code under the inert Refactor use" do
+      assert_rewrites(
+        @subject,
+        """
+        defmodule M do
+          use Number42.Refactors.Refactor
+
+          def transform(s, _), do: live(s)
+          defp live(s), do: s
+          defp dead, do: :gone
+        end
+        """,
+        """
+        defmodule M do
+          use Number42.Refactors.Refactor
+
+          def transform(s, _), do: live(s)
+          defp live(s), do: s
+        end
+        """
+      )
+    end
   end
 
   describe "idempotence" do
