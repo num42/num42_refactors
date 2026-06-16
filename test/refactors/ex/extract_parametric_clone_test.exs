@@ -521,7 +521,14 @@ defmodule Number42.Refactors.Ex.ExtractParametricCloneTest do
       assert occurrences == 1, "expected one Calendar.strftime, got #{occurrences}\n#{rewritten}"
     end
 
-    test "clones with `%Struct{key: x} = var` head are extracted" do
+    # Regression for #253: a `%Struct{key: x} = var` head where the
+    # pattern variable (`uid`) is used in the body must NOT be extracted.
+    # The helper head is rebuilt from the bare var (`scope`) alone, so the
+    # `%{user_id: uid}` pattern — and the binding of `uid` — is dropped;
+    # an extracted helper referencing `uid` would not compile
+    # (`undefined variable "uid"`). The clone is refused; source is left
+    # unchanged.
+    test "clones whose `= var` head binds a body-used pattern var are left alone" do
       source = """
       defmodule MyApp.Patterns2 do
         def a(%Scope{user_id: uid} = scope) do
@@ -538,9 +545,33 @@ defmodule Number42.Refactors.Ex.ExtractParametricCloneTest do
       plan = ExtractParametricClone.build_plan(sources, min_mass: 5)
       rewritten = @subject.transform(source, prepared: plan)
 
+      refute rewritten =~ "defp", "must not extract a helper that would drop the `uid` binding"
+      assert rewritten == source, "source must be left unchanged"
+    end
+
+    # The mirror of the above: when the pattern binds a variable that the
+    # body does NOT use (`uid` unused), dropping the pattern is safe, so
+    # the clone is still extracted.
+    test "clones whose `= var` head binds an unused pattern var are extracted" do
+      source = """
+      defmodule MyApp.Patterns2b do
+        def a(%Scope{user_id: _uid} = scope) do
+          "x " <> Calendar.strftime(scope.t, "%H:%M")
+        end
+
+        def b(%Scope{user_id: _uid} = scope) do
+          "y " <> Calendar.strftime(scope.t, "%H:%M")
+        end
+      end
+      """
+
+      sources = [{"lib/my_app/patterns2b.ex", source}]
+      plan = ExtractParametricClone.build_plan(sources, min_mass: 5)
+      rewritten = @subject.transform(source, prepared: plan)
+
       assert rewritten =~ "defp", "expected helper"
-      assert rewritten =~ "a(%Scope{user_id: uid} = scope)"
-      assert rewritten =~ "b(%Scope{user_id: uid} = scope)"
+      assert rewritten =~ "a(%Scope{user_id: _uid} = scope)"
+      assert rewritten =~ "b(%Scope{user_id: _uid} = scope)"
     end
 
     test "clones with `var = pattern` head (left-bare form) are extracted" do
