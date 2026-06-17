@@ -156,6 +156,15 @@ defmodule Number42.Refactors.Heex.Scope do
         {:@, _, _} = node, acc ->
           {drop_subtree(node), acc}
 
+        # `assigns.field` is an assign read (it becomes the component's `:field`
+        # attr), not a free var; neutralise the `assigns` object but keep walking
+        # any call args (`assigns.fun(item)` still surfaces a free `item`). A
+        # *bare* `assigns` falls through to the var clause below and IS surfaced,
+        # so a cut threading the whole map is caught by the free-var gate (#294).
+        {{:., dot_meta, [{:assigns, _, ctx}, field]}, call_meta, args}, acc
+        when is_atom(ctx) and is_atom(field) ->
+          {{{:., dot_meta, [:__assigns_field__, field]}, call_meta, args}, acc}
+
         # `x :: binary` — the RHS is a bitstring/type specifier, not a variable.
         {:"::", _, [value, _type]}, acc ->
           {value, acc}
@@ -220,5 +229,9 @@ defmodule Number42.Refactors.Heex.Scope do
     end)
   end
 
-  defp reserved, do: MapSet.new(~w(nil true false assigns __MODULE__ _))
+  # `assigns` is intentionally NOT reserved: a bare `assigns` reference is a real
+  # free var (the cut threads the whole map and cannot become a clean attr-only
+  # seam), while `assigns.field` is handled as an assign read in `referenced_vars`
+  # before it reaches the var clause (#294 Bug A).
+  defp reserved, do: MapSet.new(~w(nil true false __MODULE__ _))
 end
