@@ -217,6 +217,51 @@ defmodule Number42.Refactors.Ex.IfElseToCondTest do
     end
   end
 
+  describe "rewrites — both branches nest distinct chains (#265)" do
+    test "do-side chain collapses to a nested cond, else-side flattens alongside" do
+      # Both branches nest a distinct if/else. The do-side chain becomes a
+      # self-contained nested cond used as the body of the `a ->` arm; the
+      # else-side flattens into the same outer cond. Converges in one pass.
+      before_source = """
+      def f(x) do
+        if a do
+          if b do
+            x1
+          else
+            x2
+          end
+        else
+          if c do
+            y1
+          else
+            y2
+          end
+        end
+      end
+      """
+
+      after_source = """
+      def f(x) do
+        cond do
+          a ->
+            cond do
+              b -> x1
+              true -> x2
+            end
+
+          c ->
+            y1
+
+          true ->
+            y2
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, after_source)
+    end
+  end
+
   describe "rewrites — pre-statements extracted as local fn" do
     test "single pre-statement binding extracted as local fn, called once in cond" do
       before_source = """
@@ -678,44 +723,48 @@ defmodule Number42.Refactors.Ex.IfElseToCondTest do
       """)
     end
 
-    test "impure outer condition would be dropped by identical-branch collapse — skip" do
-      assert_unchanged(@subject, """
-      def f(x) do
-        if log_and_check(x) do
-          if inner_cond do
-            a
+    test "impure identical-branch both-nest is preserved as the first cond arm (#265)" do
+      # The outer condition is impure but its truthiness is irrelevant to the
+      # result (both branches are identical). The fold keeps it as the first
+      # cond arm — evaluated exactly once, side effect preserved — so the
+      # rewrite is sound rather than skipped.
+      assert_rewrites(
+        @subject,
+        """
+        def f(x) do
+          if log_and_check(x) do
+            if inner_cond do
+              a
+            else
+              b
+            end
           else
-            b
-          end
-        else
-          if inner_cond do
-            a
-          else
-            b
+            if inner_cond do
+              a
+            else
+              b
+            end
           end
         end
-      end
-      """)
-    end
+        """,
+        """
+        def f(x) do
+          cond do
+            log_and_check(x) ->
+              cond do
+                inner_cond -> a
+                true -> b
+              end
 
-    test "non-linear nest (both do and else nest a distinct if) — skip" do
-      assert_unchanged(@subject, """
-      def f(x) do
-        if a do
-          if b do
-            x1
-          else
-            x2
-          end
-        else
-          if c do
-            y1
-          else
-            y2
+            inner_cond ->
+              a
+
+            true ->
+              b
           end
         end
-      end
-      """)
+        """
+      )
     end
   end
 
@@ -832,6 +881,66 @@ defmodule Number42.Refactors.Ex.IfElseToCondTest do
             b
           end
         end
+      end
+      """)
+    end
+
+    test "both-sides-nest tree converges in one pass (#265)" do
+      # Issue #265: outer if where BOTH branches nest a distinct if/else.
+      # Pass 1 used to fold only one inner if (the do-side), leaving the
+      # outer if and the else-side inner if for a second pass — non-convergent.
+      assert_idempotent(@subject, """
+      def f(x) do
+        if a do
+          if b do
+            if d do
+              1
+            else
+              2
+            end
+          else
+            3
+          end
+        else
+          if c do
+            4
+          else
+            5
+          end
+        end
+      end
+      """)
+    end
+
+    test "two independent nested-if trees both fold in one pass (#265)" do
+      # Issue #265: a single def with two separate nested-if trees. The
+      # one-patch-per-pass limit folded only the first, leaving the second
+      # for a second pass.
+      assert_idempotent(@subject, """
+      def f(x) do
+        a =
+          if c1 do
+            if c2 do
+              1
+            else
+              2
+            end
+          else
+            3
+          end
+
+        b =
+          if c3 do
+            if c4 do
+              4
+            else
+              5
+            end
+          else
+            6
+          end
+
+        {a, b}
       end
       """)
     end
