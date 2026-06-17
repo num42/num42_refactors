@@ -51,6 +51,82 @@ defmodule Number42.Refactors.Heex.ComponentNamingTest do
     end
   end
 
+  describe "derive/2 — structural motif (source #0)" do
+    test "a data_table shape is named by its motif, not the reserved <table> tag" do
+      # <table> alone would name :table (a CoreComponents builtin) → :table_2;
+      # the motif names it meaningfully instead
+      n =
+        parse(~S"""
+        <table>
+          <thead><tr><th>A</th><th>B</th></tr></thead>
+          <tbody>
+            <tr><td>{@a}</td><td>{@b}</td></tr>
+            <tr><td>{@c}</td><td>{@d}</td></tr>
+          </tbody>
+        </table>
+        """)
+
+      assert ComponentNaming.derive(n, []) == :data_table
+    end
+
+    test "a select_field shape is named by its motif" do
+      n =
+        parse(~S"""
+        <select name="x">
+          <option>{@a}</option>
+          <option>{@b}</option>
+          <option>{@c}</option>
+        </select>
+        """)
+
+      assert ComponentNaming.derive(n, []) == :select_field
+    end
+
+    test "a button_group shape beats a class hint / heading" do
+      # without the motif, the <h2> heading would name it :pick_one
+      n =
+        parse(~S"""
+        <div>
+          <h2>Pick one</h2>
+          <button>{@a}</button>
+          <button>{@b}</button>
+        </div>
+        """)
+
+      assert ComponentNaming.derive(n, []) == :button_group
+    end
+
+    test "a card_grid shape beats the :card class hint" do
+      # each child carries `card` → class-hint chain would name it :card;
+      # the grid-of-cards motif is the more precise name
+      n =
+        parse(~S"""
+        <div>
+          <div class="card shadow"><h3>{@a}</h3></div>
+          <div class="card shadow"><h3>{@b}</h3></div>
+          <div class="card shadow"><h3>{@c}</h3></div>
+        </div>
+        """)
+
+      assert ComponentNaming.derive(n, []) == :card_grid
+    end
+
+    test "an :unknown motif is transparent — the existing chain is unchanged" do
+      # a single <p> is amorphous → :unknown → semantic-tag source wins
+      n = parse(~S|<section class="x"><p>{@a}</p></section>|)
+      assert ComponentNaming.derive(n, []) == :section
+    end
+
+    test "a motif name is disambiguated against taken names" do
+      n =
+        parse(~S"""
+        <select name="x"><option>{@a}</option><option>{@b}</option></select>
+        """)
+
+      assert ComponentNaming.derive(n, [:select_field]) == :select_field_2
+    end
+  end
+
   describe "derive/2 — reserved names" do
     test "a reserved semantic-tag name falls through to a meaningful source" do
       # <footer> would name :footer (clashes with CoreComponents.footer/1); a

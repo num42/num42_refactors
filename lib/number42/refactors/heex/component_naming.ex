@@ -7,6 +7,11 @@ defmodule Number42.Refactors.Heex.ComponentNaming do
   to the codebase (an i18n app names from `gettext` strings; an
   assign-centric one from the dominant assign):
 
+    0. **structural motif** — a recognised plural skeleton (`StructureMotif`)
+       names the block by its component *type* (`data_table`, `select_field`,
+       ...), beating the tag because the type is more precise than the tag
+       (`<table>` → `data_table`, not the reserved `table` builtin). Returns
+       `:unknown` on no match, so the chain below is unaffected;
     1. **semantic tag** — `<section>`, `<article>`, `<table>`, ... the tag
        already declares what the block is;
     2. **class-hint noun** — a recognised UI noun in the `class` attribute
@@ -19,7 +24,7 @@ defmodule Number42.Refactors.Heex.ComponentNaming do
   against already-taken names with a numeric suffix.
   """
 
-  alias Number42.Refactors.Heex.Tree
+  alias Number42.Refactors.Heex.{StructureMotif, Tree}
 
   @semantic_tags ~w(section article header footer aside main nav table form dialog fieldset details figure)
 
@@ -77,6 +82,7 @@ defmodule Number42.Refactors.Heex.ComponentNaming do
     # fall through to the next meaningful one (`@collection`) instead of `form_2`
     candidates =
       ([
+         motif_name(node),
          semantic_name(node),
          class_hint_name(node),
          heading_name(node),
@@ -109,6 +115,16 @@ defmodule Number42.Refactors.Heex.ComponentNaming do
   end
 
   # ---- sources -------------------------------------------------------------
+
+  # source #0: a recognised structural motif names the block by component type
+  # (`data_table`, `select_field`, ...). `:unknown` yields nil, so the rest of
+  # the chain runs unchanged.
+  defp motif_name(node) do
+    case StructureMotif.classify(node) do
+      {:ok, motif} -> motif
+      :unknown -> nil
+    end
+  end
 
   defp semantic_name({:element, tag, _, _, _}) when tag in @semantic_tags,
     do: String.to_atom(tag)
