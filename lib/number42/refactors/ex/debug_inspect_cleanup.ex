@@ -70,6 +70,10 @@ defmodule Number42.Refactors.Ex.DebugInspectCleanup do
   def reformat_after?, do: true
   @impl Number42.Refactors.Refactor
   def transform(source, opts), do: Sourceror.parse_string(source) |> apply_patches(source, opts)
+
+  @impl Number42.Refactors.Refactor
+  def patches(ast, _source, opts), do: build_patches(ast, opts)
+
   defp apply_patches({:ok, ast}, source, opts), do: build_patches(ast, opts) |> patch(source)
   defp apply_patches({:error, _}, source, _opts), do: source
 

@@ -116,6 +116,9 @@ defmodule Number42.Refactors.Ex.BooleanFunctionQuestionMark do
     Sourceror.parse_string(source) |> apply_patches(source)
   end
 
+  @impl Number42.Refactors.Refactor
+  def patches(ast, _source, _opts), do: build_patches(ast)
+
   defp apply_patches({:ok, ast}, source),
     do: ast |> build_patches() |> patch_or_passthrough(source)
 

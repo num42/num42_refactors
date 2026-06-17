@@ -152,6 +152,9 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelper do
   defp analyze_clause(_, _),
     do: %{body: nil, free_vars: [], guard: nil, pattern: nil, used_in_body: MapSet.new()}
 
+  @impl Number42.Refactors.Refactor
+  def patches(ast, source, _opts), do: build_patches(ast, source)
+
   defp apply_patches({:ok, ast}, source),
     do: build_patches(ast, source) |> patch_or_passthrough(source)
 

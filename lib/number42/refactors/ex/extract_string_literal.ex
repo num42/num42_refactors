@@ -114,6 +114,17 @@ defmodule Number42.Refactors.Ex.ExtractStringLiteral do
     end
   end
 
+  @impl Number42.Refactors.Refactor
+  def patches(ast, _source, opts) do
+    if Keyword.get(opts, :enabled, false) do
+      min = Keyword.get(opts, :min_occurrences, @default_min_occurrences)
+      min_length = Keyword.get(opts, :min_length, @default_min_length)
+      build_patches(ast, min, min_length)
+    else
+      []
+    end
+  end
+
   defp apply_patches({:ok, ast}, source, min, min_length),
     do: ast |> build_patches(min, min_length) |> patch_or_passthrough(source)
 

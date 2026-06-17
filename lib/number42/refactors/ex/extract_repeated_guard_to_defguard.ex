@@ -138,6 +138,12 @@ defmodule Number42.Refactors.Ex.ExtractRepeatedGuardToDefguard do
     Sourceror.parse_string(source) |> apply_patches(source, min)
   end
 
+  @impl Number42.Refactors.Refactor
+  def patches(ast, _source, opts) do
+    min = Keyword.get(opts, :min_occurrences, @default_min_occurrences)
+    build_patches(ast, min)
+  end
+
   defp apply_patches({:ok, ast}, source, min),
     do: ast |> build_patches(min) |> patch_or_passthrough(source)
 

@@ -85,6 +85,12 @@ defmodule Number42.Refactors.Ex.NegatedBooleanName do
     Sourceror.parse_string(source) |> apply_patches(source, known)
   end
 
+  @impl Number42.Refactors.Refactor
+  def patches(ast, _source, opts) do
+    known = Keyword.get(opts, :known, %{})
+    build_patches(ast, known)
+  end
+
   defp apply_patches({:ok, ast}, source, known),
     do: ast |> build_patches(known) |> patch_or_passthrough(source)
 

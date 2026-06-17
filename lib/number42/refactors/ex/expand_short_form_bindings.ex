@@ -122,6 +122,9 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
     Sourceror.parse_string(source) |> apply_patches(ctx, source)
   end
 
+  @impl Number42.Refactors.Refactor
+  def patches(ast, _source, opts), do: build_patches(ast, build_ctx(opts))
+
   defp apply_patches({:ok, ast}, ctx, source),
     do: build_patches(ast, ctx) |> patch_or_passthrough(source)
 

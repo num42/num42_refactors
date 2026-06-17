@@ -61,6 +61,9 @@ defmodule Number42.Refactors.Ex.RedundantBooleanIf do
   def reformat_after?, do: true
   @impl Number42.Refactors.Refactor
   def transform(source, _opts), do: Sourceror.parse_string(source) |> apply_patches(source)
+  @impl Number42.Refactors.Refactor
+  def patches(ast, _source, _opts), do: build_patches(ast)
+
   defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
   defp apply_patches({:error, _}, source), do: source
   defp block_atom({:__block__, _, [atom]}) when is_atom(atom), do: atom

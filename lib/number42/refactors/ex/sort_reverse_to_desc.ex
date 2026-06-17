@@ -96,6 +96,9 @@ defmodule Number42.Refactors.Ex.SortReverseToDesc do
     end
   end
 
+  @impl Number42.Refactors.Refactor
+  def patches(ast, source, _opts), do: build_patches(ast, source)
+
   defp apply_patches({:ok, ast}, source),
     do: build_patches(ast, source) |> patch_or_passthrough(source)
 

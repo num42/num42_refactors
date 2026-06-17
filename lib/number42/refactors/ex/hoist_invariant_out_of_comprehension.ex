@@ -147,6 +147,14 @@ defmodule Number42.Refactors.Ex.HoistInvariantOutOfComprehension do
 
   defp apply_patches({:error, _}, source), do: source
 
+  @impl Number42.Refactors.Refactor
+  def patches(ast, _source, _opts) do
+    case ast |> collect_lifts(no_host()) |> Enum.take(1) do
+      [] -> []
+      [lift] -> build_patches(lift)
+    end
+  end
+
   defp emit_or_passthrough([], source), do: source
 
   defp emit_or_passthrough([lift], source),

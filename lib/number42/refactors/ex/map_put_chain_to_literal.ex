@@ -94,6 +94,9 @@ defmodule Number42.Refactors.Ex.MapPutChainToLiteral do
   @impl Number42.Refactors.Refactor
   def transform(source, _opts), do: source |> Sourceror.parse_string() |> apply_patches(source)
 
+  @impl Number42.Refactors.Refactor
+  def patches(ast, _source, _opts), do: build_patches(ast)
+
   defp apply_patches({:ok, ast}, source),
     do: ast |> build_patches() |> patch_or_passthrough(source)
 
