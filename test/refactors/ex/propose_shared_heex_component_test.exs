@@ -56,7 +56,12 @@ defmodule Number42.Refactors.Ex.ProposeSharedHeexComponentTest do
         "lib/c.ex" => card("heading", "content")
       }
 
-      [plan] = ProposeSharedHeexComponent.build_plan(sources, min_occurrences: 3, min_files: 2, min_mass: 4)
+      [plan] =
+        ProposeSharedHeexComponent.build_plan(sources,
+          min_occurrences: 3,
+          min_files: 2,
+          min_mass: 4
+        )
 
       assert length(plan.occurrences) == 3
 
@@ -76,7 +81,11 @@ defmodule Number42.Refactors.Ex.ProposeSharedHeexComponentTest do
         "lib/b.ex" => card("name", "summary")
       }
 
-      assert ProposeSharedHeexComponent.build_plan(sources, min_occurrences: 3, min_files: 2, min_mass: 4) ==
+      assert ProposeSharedHeexComponent.build_plan(sources,
+               min_occurrences: 3,
+               min_files: 2,
+               min_mass: 4
+             ) ==
                []
     end
 
@@ -100,7 +109,11 @@ defmodule Number42.Refactors.Ex.ProposeSharedHeexComponentTest do
 
       sources = %{"lib/a.ex" => two_in_one}
 
-      assert ProposeSharedHeexComponent.build_plan(sources, min_occurrences: 2, min_files: 2, min_mass: 4) ==
+      assert ProposeSharedHeexComponent.build_plan(sources,
+               min_occurrences: 2,
+               min_files: 2,
+               min_mass: 4
+             ) ==
                []
     end
 
@@ -125,7 +138,11 @@ defmodule Number42.Refactors.Ex.ProposeSharedHeexComponentTest do
         "lib/c.ex" => String.replace(with_free_var, "Demo", "Demo3")
       }
 
-      assert ProposeSharedHeexComponent.build_plan(sources, min_occurrences: 3, min_files: 2, min_mass: 4) ==
+      assert ProposeSharedHeexComponent.build_plan(sources,
+               min_occurrences: 3,
+               min_files: 2,
+               min_mass: 4
+             ) ==
                []
     end
   end
@@ -138,7 +155,13 @@ defmodule Number42.Refactors.Ex.ProposeSharedHeexComponentTest do
         "lib/c.ex" => card("heading", "content")
       }
 
-      plans = ProposeSharedHeexComponent.build_plan(sources, min_occurrences: 3, min_files: 2, min_mass: 4)
+      plans =
+        ProposeSharedHeexComponent.build_plan(sources,
+          min_occurrences: 3,
+          min_files: 2,
+          min_mass: 4
+        )
+
       prepared = %{plans: plans, source_to_file: sources_to_map(sources)}
       [plan] = plans
 
@@ -181,7 +204,13 @@ defmodule Number42.Refactors.Ex.ProposeSharedHeexComponentTest do
       end
       """
 
-      plans = ProposeSharedHeexComponent.build_plan(sources, min_occurrences: 3, min_files: 2, min_mass: 4)
+      plans =
+        ProposeSharedHeexComponent.build_plan(sources,
+          min_occurrences: 3,
+          min_files: 2,
+          min_mass: 4
+        )
+
       prepared = %{plans: plans, source_to_file: sources_to_map(sources)}
       [plan] = plans
 
@@ -204,7 +233,13 @@ defmodule Number42.Refactors.Ex.ProposeSharedHeexComponentTest do
         "lib/c.ex" => card("heading", "content")
       }
 
-      plans = ProposeSharedHeexComponent.build_plan(sources, min_occurrences: 3, min_files: 2, min_mass: 4)
+      plans =
+        ProposeSharedHeexComponent.build_plan(sources,
+          min_occurrences: 3,
+          min_files: 2,
+          min_mass: 4
+        )
+
       prepared = %{plans: plans, source_to_file: sources_to_map(sources)}
 
       out_a =
@@ -216,7 +251,14 @@ defmodule Number42.Refactors.Ex.ProposeSharedHeexComponentTest do
 
       # rebuild a plan from the rewritten corpus — the motif is gone, so empty
       sources2 = %{"lib/a.ex" => out_a, "lib/b.ex" => out_a, "lib/c.ex" => out_a}
-      plans2 = ProposeSharedHeexComponent.build_plan(sources2, min_occurrences: 3, min_files: 2, min_mass: 4)
+
+      plans2 =
+        ProposeSharedHeexComponent.build_plan(sources2,
+          min_occurrences: 3,
+          min_files: 2,
+          min_mass: 4
+        )
+
       prepared2 = %{plans: plans2, source_to_file: sources_to_map(sources2)}
 
       out_a_2 =
