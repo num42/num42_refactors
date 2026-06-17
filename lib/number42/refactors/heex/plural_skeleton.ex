@@ -174,7 +174,7 @@ defmodule Number42.Refactors.Heex.PluralSkeleton do
         [single] ->
           canon(single, d + 1)
 
-        [first | _] = group ->
+        [first | _] ->
           pluralise(canon(first, d + 1), tag_of(first))
       end)
       |> Enum.reject(&is_nil/1)
