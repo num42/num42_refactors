@@ -114,17 +114,42 @@ defmodule Number42.Refactors.Ex.ExtractHeexComponentBySeam do
     with {:ok, sigils} <- Tree.from_source(source),
          {:ok, ast} <- Sourceror.parse_string(source) do
       ranges = sigil_ranges(ast)
+      taken = module_taken_names(source)
 
-      plans =
+      # thread `taken` through the sigils so two cuts never collide on a name
+      {plans, _taken} =
         sigils
         |> Enum.zip(ranges)
-        |> Enum.map(fn {sigil, range} -> plan_for_sigil(sigil, range) end)
-        |> Enum.reject(&is_nil/1)
+        |> Enum.reduce({[], taken}, fn {sigil, range}, {plans, taken} ->
+          case plan_for_sigil(sigil, range, taken) do
+            nil -> {plans, taken}
+            plan -> {[plan | plans], [plan.name | taken]}
+          end
+        end)
 
-      apply_plans(source, plans)
+      apply_plans(source, Enum.reverse(plans))
     else
       _ -> source
     end
+  end
+
+  # Names already bound in the module that a new `defp <name>(assigns)` would
+  # shadow: module-local `def`/`defp` heads, and components invoked as `<.foo>`
+  # (which must be imported, so the import would clash). The `Phoenix.Component`
+  # builtins and `CoreComponents` generator defaults are reserved inside
+  # `ComponentNaming` itself, so they need not be repeated here.
+  defp module_taken_names(source) do
+    locals =
+      ~r/^\s*defp?\s+([a-z_][a-zA-Z0-9_]*)\s*[(\s]/m
+      |> Regex.scan(source)
+      |> Enum.map(fn [_, n] -> String.to_atom(n) end)
+
+    invoked =
+      ~r/<\.([a-z_][a-zA-Z0-9_]*)/
+      |> Regex.scan(source)
+      |> Enum.map(fn [_, n] -> String.to_atom(n) end)
+
+    Enum.uniq(locals ++ invoked)
   end
 
   # `{:sigil_H, ...}` nodes in document order with their source ranges.
@@ -138,7 +163,7 @@ defmodule Number42.Refactors.Ex.ExtractHeexComponentBySeam do
     Enum.reverse(acc)
   end
 
-  defp plan_for_sigil(sigil, range) do
+  defp plan_for_sigil(sigil, range, taken) do
     gates = %{min_nodes: @min_nodes, min_lines: @min_lines, max_leak: @max_leak}
 
     sigil.tree
@@ -161,7 +186,7 @@ defmodule Number42.Refactors.Ex.ExtractHeexComponentBySeam do
           range: range,
           markup: markup,
           new_body: replace_range(sigil.body, s, e),
-          name: ComponentNaming.derive(node, []),
+          name: ComponentNaming.derive(node, taken),
           assigns: c.assigns
         }
     end
@@ -341,13 +366,38 @@ defmodule Number42.Refactors.Ex.ExtractHeexComponentBySeam do
   defp decline_reason(node, sigil, own, leak, free, kind, max_leak) do
     cond do
       MapSet.size(own) == 0 -> "reads no assigns"
+      MapSet.member?(own, "inner_block") -> "reads @inner_block (the implicit default slot)"
       leak > max_leak -> "assign leak #{Float.round(leak, 2)} > #{max_leak}"
       free != [] -> "free non-assign vars: #{Enum.join(free, ", ")}"
+      orphan_slot?(node) -> "carries a slot entry away from its parent component"
       kind == :element and component_invocation?(node) -> "subtree is itself a component call"
       whole_sigil?(node, sigil) -> "subtree is the entire sigil body"
       true -> nil
     end
   end
+
+  # A slot entry `<:name>` must stay a direct child of its component. The cut is
+  # unsafe if it contains a slot-entry element whose enclosing component is not
+  # itself inside the cut — lifting it would orphan the slot. We descend from
+  # the candidate root: a slot entry is safe only when reached through a
+  # component element on the way down (which is then also extracted with it).
+  defp orphan_slot?(node), do: orphan_slot?(node, false)
+
+  defp orphan_slot?({:element, tag, _attrs, children, _}, in_component?) do
+    cond do
+      slot_entry?(tag) and not in_component? -> true
+      true -> Enum.any?(children, &orphan_slot?(&1, in_component? or component_tag?(tag)))
+    end
+  end
+
+  defp orphan_slot?({:eex_block, _code, children, _}, in_component?),
+    do: Enum.any?(children, &orphan_slot?(&1, in_component?))
+
+  defp orphan_slot?(_other, _in_component?), do: false
+
+  defp slot_entry?(tag), do: String.starts_with?(tag, ":")
+
+  defp component_tag?(tag), do: String.starts_with?(tag, ".") or tag =~ ~r/^[A-Z]/
 
   # ---- node measures -------------------------------------------------------
 
