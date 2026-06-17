@@ -88,10 +88,12 @@ defmodule Number42.Refactors.Ex.ExtractRepeatedGuardToDefguard do
 
   ## Idempotence
 
-  After the rewrite each head reads `when is_valid_<var>(<var>)`, a
-  named-guard call rather than the original expression, so the second
-  pass finds no repeated literal guard and the synthesised `defguardp`
-  is recognised as an existing module guard. Safe to run repeatedly.
+  All eligible groups in a module are extracted in a single pass, so the
+  rewrite converges immediately. After it, each head reads
+  `when is_valid_<var>(<var>)`, a named-guard call rather than the
+  original expression, and the synthesised `defguardp` is recognised as
+  an existing module guard — so a re-run finds nothing to do. Safe to run
+  repeatedly.
   """
 
   use Number42.Refactors.Refactor
@@ -153,10 +155,11 @@ defmodule Number42.Refactors.Ex.ExtractRepeatedGuardToDefguard do
     end)
   end
 
-  # One group is extracted per module per pass (the first eligible, in
-  # source order). Source A (repeated head-guard) runs first; if it finds
-  # nothing, source B (complex body-`if`) gets a turn. Further groups are
-  # handled by subsequent passes.
+  # Every eligible group is extracted in a single pass. Source A (repeated
+  # head-guard) runs first; if it finds nothing, source B (complex body-`if`)
+  # gets a turn. Emitting all groups at once is what makes the refactor
+  # converge in one pass — lifting one group per pass left the rest for a
+  # follow-up pass and broke idempotence (#269).
   defp module_patches(body, min) do
     exprs = body_to_exprs(body)
     existing = existing_guard_names(exprs)
@@ -167,6 +170,13 @@ defmodule Number42.Refactors.Ex.ExtractRepeatedGuardToDefguard do
     end
   end
 
+  # All groups at or above the threshold, in source order, each named into a
+  # `defguardp`. Two sets are threaded: `existing` are guards already defined
+  # in the module — a group whose base name is one of them is left alone (the
+  # re-run idempotence path, #269). `minted` are names created earlier in this
+  # same pass — a fresh group colliding with one is disambiguated rather than
+  # re-defining a name. Emitting every group here is what converges the
+  # refactor in one pass.
   defp head_guard_patches(exprs, existing, min) do
     exprs
     |> Enum.flat_map(&guarded_clause/1)
@@ -174,7 +184,13 @@ defmodule Number42.Refactors.Ex.ExtractRepeatedGuardToDefguard do
     |> Map.values()
     |> Enum.filter(&(length(&1) >= min))
     |> Enum.sort_by(fn [first | _] -> line_of(first.node) end)
-    |> Enum.find_value([], &emit_group(&1, exprs, existing))
+    |> Enum.reduce({[], MapSet.new()}, fn group, {patches, minted} ->
+      case emit_group(group, exprs, existing, minted) do
+        nil -> {patches, minted}
+        {group_patches, name} -> {patches ++ group_patches, MapSet.put(minted, name)}
+      end
+    end)
+    |> elem(0)
   end
 
   # --- candidate extraction --------------------------------------------
@@ -256,20 +272,25 @@ defmodule Number42.Refactors.Ex.ExtractRepeatedGuardToDefguard do
   # --- emit ------------------------------------------------------------
 
   # The group shares one name, derived from the first member's var; each
-  # head keeps its own var as the argument. A group whose canonical name
-  # is already a module guard (re-running on extracted output) is skipped.
-  defp emit_group([first | _] = group, exprs, existing) do
-    name = guard_name(first.var)
+  # head keeps its own var as the argument. A group whose base name is
+  # already a module guard (re-running on extracted output) is skipped —
+  # this is the idempotence guard. Otherwise the name is disambiguated
+  # against names minted earlier in this pass and the group's patches plus
+  # the chosen name are returned.
+  defp emit_group([first | _] = group, exprs, existing, minted) do
+    base = guard_name(first.var)
 
-    if MapSet.member?(existing, name) do
+    if MapSet.member?(existing, base) do
       nil
     else
+      name = unique_name(base, minted)
+
       head_replacements =
         Enum.map(group, fn %{guard: guard, var: var} ->
           Patch.replace(guard, "#{name}(#{var})")
         end)
 
-      [defguardp_patch(first, name, exprs) | head_replacements]
+      {[defguardp_patch(first, name, exprs) | head_replacements], name}
     end
   end
 
@@ -291,6 +312,21 @@ defmodule Number42.Refactors.Ex.ExtractRepeatedGuardToDefguard do
     :"is_valid_#{base}"
   end
 
+  # Two distinct guards over identically-named vars derive the same base
+  # name; when emitting them in one pass the second gets a numeric suffix so
+  # the module never defines a `defguardp` name twice. `taken` are names
+  # already minted in this pass.
+  defp unique_name(base, taken) do
+    if MapSet.member?(taken, base),
+      do: next_free_name(base, taken, 1),
+      else: base
+  end
+
+  defp next_free_name(base, taken, n) do
+    candidate = :"#{base}#{n}"
+    if MapSet.member?(taken, candidate), do: next_free_name(base, taken, n + 1), else: candidate
+  end
+
   # Guard names already defined in the module via `defguard`/`defguardp`,
   # so a head already calling one is recognised and left alone.
   defp existing_guard_names(exprs) do
@@ -308,25 +344,32 @@ defmodule Number42.Refactors.Ex.ExtractRepeatedGuardToDefguard do
 
   # --- Source B: complex body-`if` -> named defguardp ------------------
 
-  # Scan the module body in source order for the first `def`/`defp` whose
-  # entire body is a two-branch `if COND, do: A, else: B` with a *complex*
-  # guard-expressible condition over the parameters. Emit a `defguardp`
-  # plus two guard clauses for it. One per pass; the rest follow.
+  # Scan the module body in source order for every `def`/`defp` whose entire
+  # body is a two-branch `if COND, do: A, else: B` with a *complex*
+  # guard-expressible condition over the parameters. Each is lifted to a
+  # `defguardp` plus two guard clauses. All candidates are emitted in one
+  # pass, with names disambiguated against each other and skipped when the
+  # base name already names a module guard (#269).
   defp body_if_patches(exprs, existing) do
     exprs
-    |> Enum.find_value(nil, &body_if_candidate/1)
-    |> emit_body_if(exprs, existing)
+    |> Enum.flat_map(fn expr -> List.wrap(body_if_candidate(expr)) end)
+    |> Enum.reduce({[], MapSet.new()}, fn cand, {patches, minted} ->
+      case emit_body_if(cand, exprs, existing, minted) do
+        nil -> {patches, minted}
+        {cand_patches, name} -> {patches ++ cand_patches, MapSet.put(minted, name)}
+      end
+    end)
+    |> elem(0)
   end
 
-  defp emit_body_if(nil, _exprs, _existing), do: []
+  defp emit_body_if(%{var: var} = cand, exprs, existing, minted) do
+    base = guard_name(var)
 
-  defp emit_body_if(%{var: var} = cand, exprs, existing) do
-    name = guard_name(var)
-
-    if MapSet.member?(existing, name) do
-      []
+    if MapSet.member?(existing, base) do
+      nil
     else
-      [defguardp_patch_for_cond(cand, name, exprs) | [clauses_patch(cand, name)]]
+      name = unique_name(base, minted)
+      {[defguardp_patch_for_cond(cand, name, exprs), clauses_patch(cand, name)], name}
     end
   end
 
