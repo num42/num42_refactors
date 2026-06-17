@@ -94,6 +94,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - `ExtractCaseToHelper` (#267): now extracts **every** eligible tail `case` in a single pass instead of one per pass, so `apply(apply(s)) == apply(s)` holds for multi-case modules (was breaking `--check` and costing an extra fixpoint pass). The `defps` collision index is threaded across the same pass's extractions, so a helper synthesized for an earlier `case` drives `:skip`/suffix-walk resolution for later siblings — distinct collisions suffix-walk (`on_x_result`, `on_x_result_2`), identical ones collapse to one helper.
+- `ExtractToPipeline` (#267): now converges in a single pass. Piping an outer `Enum`/`Stream` call also pipes eligible nested calls (in the first arg or inside a closure rest arg) within the same patch, instead of leaving them for a follow-up pass — `apply(apply(s)) == apply(s)`.
 - `MergeClausesIntoCondOrGuard` (#265): now idempotent on modules with several
   mergeable functions. The transform emitted at most **one** merge per pass, so
   a module with two or more mergeable functions left the rest for later passes —
