@@ -391,8 +391,8 @@ defmodule Number42.Refactors.Ex.ExtractHeexComponentBySeam do
       MapSet.size(own) == 0 ->
         "reads no assigns"
 
-      MapSet.member?(own, "inner_block") ->
-        "reads @inner_block (the implicit default slot)"
+      framework_assign(own) ->
+        "reads framework-managed @#{framework_assign(own)} (not a plain attr)"
 
       leak > max_leak ->
         "assign leak #{Float.round(leak, 2)} > #{max_leak}"
@@ -525,6 +525,16 @@ defmodule Number42.Refactors.Ex.ExtractHeexComponentBySeam do
   end
 
   defp reads_bare_assigns?(_), do: false
+
+  # Phoenix/LiveView populates these assigns on the socket itself; they are not
+  # plain values an extracted component can take as an `attr` (`@uploads` comes
+  # from `allow_upload/3`, `@inner_block` is the default slot, `@streams` is the
+  # stream registry, `@flash`/`@socket` are connection state). A cut reading any
+  # of them cannot be lifted to a standalone `attr`-only component.
+  @framework_assigns ~w(inner_block uploads streams flash socket myself)
+  defp framework_assign(own) do
+    Enum.find(@framework_assigns, &MapSet.member?(own, &1))
+  end
 
   defp subtree_reads_bare_assigns?(node) do
     Tree.walk(node, false, fn

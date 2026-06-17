@@ -151,6 +151,23 @@ defmodule Number42.Refactors.Ex.ExtractHeexComponentBySeamTest do
       refute Enum.any?(find(src), fn c -> c.accepted and "inner_block" in c.assigns end)
     end
 
+    test "declines a subtree that reads a framework-managed assign (@uploads) (#294)" do
+      # @uploads comes from allow_upload/3 and lives on the socket; it cannot be
+      # passed as a plain attr, so lifting a cut that reads it KeyErrors.
+      src =
+        wrap("""
+            <section class="dropzone">
+              <h2>{@heading}</h2>
+              <div class="body" phx-drop-target={@uploads.import_xlsx.ref}>
+                <.live_file_input upload={@uploads.import_xlsx} />
+                <p>{@hint}</p>
+              </div>
+            </section>
+        """)
+
+      refute Enum.any?(find(src), fn c -> c.tag == "section" and c.accepted end)
+    end
+
     test "declines a subtree that reads the assigns map directly (assigns.field) (#294)" do
       # bare `assigns.current_scope` is neither an `@assign` we can declare nor a
       # free local the scope gate catches; lifting it KeyErrors at render.
