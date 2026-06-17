@@ -58,6 +58,12 @@ defmodule Number42.Refactors.Heex.ComponentNaming do
   # across Phoenix apps; `section`/`main`/`nav`/`aside` rarely do.
   @reusable_layout_tags ~w(header footer article)a
 
+  # LiveView/LiveComponent boilerplate assigns present in almost every template.
+  # They are forwarded as `attr`s when read, but they never make a meaningful
+  # component *name* — naming a card `<.current_scope>` or `<.myself>` is noise.
+  @non_naming_assigns ~w(current_scope myself live_action flash socket rest
+                         inner_block streams uploads conn)a
+
   @doc """
   The component name for `node` as a snake_case atom, avoiding any name in
   `taken` (a list of atoms) via a numeric suffix.
@@ -66,15 +72,16 @@ defmodule Number42.Refactors.Heex.ComponentNaming do
   def derive(node, taken \\ []) do
     taken = MapSet.new(taken)
 
-    # the naming sources in priority order
+    # the naming sources in priority order; the dominant-assign source expands to
+    # ALL assigns by descending frequency so a reserved top assign (`@form`) can
+    # fall through to the next meaningful one (`@collection`) instead of `form_2`
     candidates =
-      [
-        semantic_name(node),
-        class_hint_name(node),
-        heading_name(node),
-        gettext_name(node),
-        dominant_assign_name(node)
-      ]
+      ([
+         semantic_name(node),
+         class_hint_name(node),
+         heading_name(node),
+         gettext_name(node)
+       ] ++ assign_names(node))
       |> Enum.reject(&is_nil/1)
 
     # A *reserved* name (a Phoenix/CoreComponents builtin) is a poorly chosen
@@ -147,18 +154,16 @@ defmodule Number42.Refactors.Heex.ComponentNaming do
     end)
   end
 
-  defp dominant_assign_name(node) do
+  # all assign names by descending frequency (alphabetical tiebreak for a
+  # deterministic order independent of map ordering), as naming candidates;
+  # infrastructure assigns are dropped — they are never a meaningful name
+  defp assign_names(node) do
     node
     |> assign_occurrences()
     |> Enum.frequencies()
-    |> Enum.to_list()
-    # most frequent wins; alphabetical name as a deterministic tiebreaker so the
-    # chosen name never depends on map ordering
     |> Enum.sort_by(fn {name, count} -> {-count, name} end)
-    |> case do
-      [{name, _} | _] -> String.to_atom(name)
-      [] -> nil
-    end
+    |> Enum.map(fn {name, _} -> String.to_atom(name) end)
+    |> Enum.reject(&(&1 in @non_naming_assigns))
   end
 
   # ---- helpers -------------------------------------------------------------

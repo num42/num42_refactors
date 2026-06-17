@@ -82,5 +82,37 @@ defmodule Number42.Refactors.Heex.ComponentNamingTest do
       n = parse(~S|<footer><h3>Order Total</h3><p>{@a}</p></footer>|)
       assert ComponentNaming.derive(n, [:order_total]) == :order_total_2
     end
+
+    test "the dominant assign falls through a reserved name to the next assign" do
+      # @form dominates but clashes with Phoenix.Component.form/1; the next
+      # assign @collection names the component meaningfully (not :form_2)
+      n =
+        parse(~S|<div><.form for={@form}>{@form}{@form}<span>{@collection}</span></.form></div>|)
+
+      assert ComponentNaming.derive(n, []) == :collection
+    end
+
+    test "all assigns reserved -> still suffix the dominant one" do
+      # @form and @link are both reserved; nothing meaningful left -> :form_2
+      n = parse(~S|<div>{@form}{@form}<a href={@link}>x</a></div>|)
+      assert ComponentNaming.derive(n, []) == :form_2
+    end
+
+    test "infrastructure assigns (@myself, @current_scope, ...) are never names" do
+      # @current_scope dominates but is LiveView boilerplate; @summary names it
+      n = parse(~S|<div>{@current_scope}{@current_scope}<p>{@summary}</p></div>|)
+      refute ComponentNaming.derive(n, []) == :current_scope
+      assert ComponentNaming.derive(n, []) == :summary
+    end
+
+    test "a reserved dominant assign falls through past infra to a real assign" do
+      # @form reserved, @myself infra -> :payment names it
+      n =
+        parse(
+          ~S|<div>{@form}{@form}{@myself}<span>{@payment}</span><span>{@payment}</span></div>|
+        )
+
+      assert ComponentNaming.derive(n, []) == :payment
+    end
   end
 end
