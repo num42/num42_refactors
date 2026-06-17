@@ -220,6 +220,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (list/table/form/card/…) so an extracted component can be named by what it
   structurally *is* rather than by a generated identifier. Both are
   standalone detection modules with no engine wiring yet.
+- `ProposeSharedHeexComponent` (#280): cross-file HEEx **motif** dedup. A
+  new `Heex.Motif` fingerprint reduces a subtree to a structural key that is
+  agnostic to assign names, EEx bodies, attribute values, and text — so a card
+  / table / field that recurs across templates in the same shape (with
+  per-page assigns and labels) clusters into one motif. A motif recurring
+  ≥3 times across ≥2 files (and ≥8 nodes) is lifted into one shared
+  `CoreComponents` function whose varying slots become `attr`s, and each
+  occurrence is rewritten to a call passing its own values. Conservative by
+  design: skips any motif whose occurrences read a free non-assign variable or
+  contain a loop/`cond` block slot, since those cannot be parameterised
+  cleanly. **Default-OFF** — `build_plan/2` reports candidates for `--dry-run`;
+  `transform/2` rewrites only with `enabled: true` and a configured
+  `core_components_module`.
 
 - `CanonicalStatementOrder` (#233): reorders independent statements
   inside a `def`/`defp` body into a deterministic **canonical order** so
