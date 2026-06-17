@@ -93,6 +93,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `ExtractCaseToHelper` (#267): now extracts **every** eligible tail `case` in a single pass instead of one per pass, so `apply(apply(s)) == apply(s)` holds for multi-case modules (was breaking `--check` and costing an extra fixpoint pass). The `defps` collision index is threaded across the same pass's extractions, so a helper synthesized for an earlier `case` drives `:skip`/suffix-walk resolution for later siblings — distinct collisions suffix-walk (`on_x_result`, `on_x_result_2`), identical ones collapse to one helper.
 - `PromoteRepeatedPrivateHelpers` (#257): promoting a **multi-clause** private
   helper no longer mangles the source. The helper's own `defp` clauses are now
   excluded from call-site scanning before rewriting — a clause *head*
