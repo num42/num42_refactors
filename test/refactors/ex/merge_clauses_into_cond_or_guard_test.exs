@@ -190,6 +190,23 @@ defmodule Number42.Refactors.Ex.MergeClausesIntoCondOrGuardTest do
       assert_idempotent(@subject, source)
     end
 
+    test "several mergeable functions all merge in one pass (#265)" do
+      # Regression: the transform emitted at most one merge per pass, so a
+      # module with multiple mergeable functions needed several passes to
+      # converge — `apply(apply(s)) != apply(s)`.
+      source = """
+      defmodule M do
+        defp literal_txt(v) when is_binary(v), do: inspect(v)
+        defp literal_txt(v), do: to_string(v)
+
+        defp label(n) when n < 0, do: "neg"
+        defp label(n), do: "rest"
+      end
+      """
+
+      assert_idempotent(@subject, source)
+    end
+
     test "already-merged cond passes through unchanged" do
       source = """
       defmodule M do

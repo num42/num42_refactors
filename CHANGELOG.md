@@ -93,6 +93,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `MergeClausesIntoCondOrGuard` (#265): now idempotent on modules with several
+  mergeable functions. The transform emitted at most **one** merge per pass, so
+  a module with two or more mergeable functions left the rest for later passes —
+  `apply(apply(s)) != apply(s)`, which broke `--check` and cost extra fixpoint
+  passes. Every mergeable run in the source is now merged in a single pass.
 - `PromoteRepeatedPrivateHelpers` (#257): promoting a **multi-clause** private
   helper no longer mangles the source. The helper's own `defp` clauses are now
   excluded from call-site scanning before rewriting — a clause *head*
