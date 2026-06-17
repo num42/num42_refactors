@@ -1,0 +1,118 @@
+defmodule Number42.Refactors.Heex.ComponentNamingTest do
+  use ExUnit.Case, async: true
+
+  alias Number42.Refactors.Heex.{ComponentNaming, Tree}
+
+  defp parse(body) do
+    {:ok, [n]} = Tree.parse_body(body)
+    n
+  end
+
+  describe "derive/2 — naming source chain" do
+    test "1. semantic tag wins when present" do
+      n = parse(~S|<section class="x"><p>{@a}</p></section>|)
+      assert ComponentNaming.derive(n, []) == :section
+    end
+
+    test "2. class-hint noun when tag is generic" do
+      n = parse(~S|<div class="user-card shadow"><p>{@a}</p></div>|)
+      assert ComponentNaming.derive(n, []) == :card
+    end
+
+    test "3. heading text when no semantic tag / class hint" do
+      n = parse(~S|<div><h2>Order Summary</h2><p>{@a}</p></div>|)
+      assert ComponentNaming.derive(n, []) == :order_summary
+    end
+
+    test "4. gettext literal when no heading" do
+      n = parse(~S|<div><b>{gettext("Weekly Module Breakdown")}</b><p>{@a}</p></div>|)
+      assert ComponentNaming.derive(n, []) == :weekly_module_breakdown
+    end
+
+    test "5. dominant assign when nothing else" do
+      n = parse(~S|<div><p>{@weekly_data}</p><span>{@weekly_data}</span><i>{@other}</i></div>|)
+      assert ComponentNaming.derive(n, []) == :weekly_data
+    end
+
+    test "falls back to a generic name when no source yields anything" do
+      n = parse(~S|<div><p>{1 + 1}</p></div>|)
+      assert ComponentNaming.derive(n, []) == :component
+    end
+
+    test "disambiguates against taken names with a numeric suffix" do
+      n = parse(~S|<section><p>{@a}</p></section>|)
+      assert ComponentNaming.derive(n, [:section]) == :section_2
+      assert ComponentNaming.derive(n, [:section, :section_2]) == :section_3
+    end
+
+    test "semantic tag beats class hint beats heading (priority order)" do
+      n = parse(~S|<section class="user-card"><h2>Profile</h2><p>{@a}</p></section>|)
+      assert ComponentNaming.derive(n, []) == :section
+    end
+  end
+
+  describe "derive/2 — reserved names" do
+    test "a reserved semantic-tag name falls through to a meaningful source" do
+      # <footer> would name :footer (clashes with CoreComponents.footer/1); a
+      # heading is a better name than a numeric-suffixed :footer_2 anyway
+      n = parse(~S|<footer class="x"><h3>Contact Info</h3><p>{@a}</p></footer>|)
+      assert ComponentNaming.derive(n, []) == :contact_info
+    end
+
+    test "a reserved name with no alternative source is suffixed, not made generic" do
+      # nothing else to go on: a suffixed tag name still beats :component
+      n = parse(~S|<form class="x"><input name="a" /><button>Go</button></form>|)
+      refute ComponentNaming.derive(n, []) == :form
+      assert ComponentNaming.derive(n, []) == :form_2
+    end
+
+    test "a dominant-assign name clashing with a builtin falls through / is suffixed" do
+      # dominant assign @link clashes with Phoenix.Component.link/1
+      n = parse(~S|<div><a href={@link}>{@link}</a><span>{@link}</span></div>|)
+      refute ComponentNaming.derive(n, []) == :link
+    end
+
+    test "module-taken names (caller-supplied) are avoided too" do
+      # dominant assign @report names it :report; a local def report/1 is taken
+      n = parse(~S|<div><p>{@report}</p><p>{@report}</p><span>{@report}</span></div>|)
+      assert ComponentNaming.derive(n, [:report]) == :report_2
+    end
+
+    test "a reserved name falls through past taken to the next real source" do
+      n = parse(~S|<footer><h3>Order Total</h3><p>{@a}</p></footer>|)
+      assert ComponentNaming.derive(n, [:order_total]) == :order_total_2
+    end
+
+    test "the dominant assign falls through a reserved name to the next assign" do
+      # @form dominates but clashes with Phoenix.Component.form/1; the next
+      # assign @collection names the component meaningfully (not :form_2)
+      n =
+        parse(~S|<div><.form for={@form}>{@form}{@form}<span>{@collection}</span></.form></div>|)
+
+      assert ComponentNaming.derive(n, []) == :collection
+    end
+
+    test "all assigns reserved -> still suffix the dominant one" do
+      # @form and @link are both reserved; nothing meaningful left -> :form_2
+      n = parse(~S|<div>{@form}{@form}<a href={@link}>x</a></div>|)
+      assert ComponentNaming.derive(n, []) == :form_2
+    end
+
+    test "infrastructure assigns (@myself, @current_scope, ...) are never names" do
+      # @current_scope dominates but is LiveView boilerplate; @summary names it
+      n = parse(~S|<div>{@current_scope}{@current_scope}<p>{@summary}</p></div>|)
+      refute ComponentNaming.derive(n, []) == :current_scope
+      assert ComponentNaming.derive(n, []) == :summary
+    end
+
+    test "a reserved dominant assign falls through past infra to a real assign" do
+      # @form reserved, @myself infra -> :payment names it
+      n =
+        parse(
+          ~S|<div>{@form}{@form}{@myself}<span>{@payment}</span><span>{@payment}</span></div>|
+        )
+
+      assert ComponentNaming.derive(n, []) == :payment
+    end
+  end
+end

@@ -153,6 +153,16 @@
   {"lib/number42/refactors/ex/hoist_invariant_out_of_comprehension.ex", :call_without_opaque},
   {"lib/number42/refactors/ex/repeated_pattern_to_macro.ex", :call_without_opaque},
   {"lib/number42/refactors/ex/unused_variable.ex", :call_without_opaque},
+  #
+  # The HEEx component-extraction seam (#281) joins for the same reason.
+  # `Heex.Scope` builds free/bound-var `MapSet`s locally via `Macro.prewalk`
+  # accumulators and unions/diffs them in place; `ExtractHeexComponentBySeam`
+  # accumulates assign-name `MapSet`s through `Tree.walk/3` (a `term()`
+  # accumulator). Both produce the concrete-struct-vs-opaque mismatch. The
+  # values genuinely are `MapSet`s; same false positive, same per-file scoping.
+  {"lib/number42/refactors/heex/scope.ex", :call_without_opaque},
+  {"lib/number42/refactors/heex/scope.ex", :call_with_opaque},
+  {"lib/number42/refactors/ex/extract_heex_component_by_seam.ex", :call_without_opaque},
 
   # ---------------------------------------------------------------------------
   # Category C — dev-only generator deps absent from the PLT.

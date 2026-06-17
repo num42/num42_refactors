@@ -196,7 +196,11 @@ defmodule Number42.Refactors.Heex.Tree do
 
     cond do
       inner == "end" -> :end
-      String.ends_with?(inner, "do") or String.ends_with?(inner, "->") -> :open
+      String.ends_with?(inner, "do") -> :open
+      # A `<% clause -> %>` (a `case`/`cond`/`fn` head) is NOT a block opener —
+      # it lives inside the already-open `do` block and has no `<% end %>` of
+      # its own. Counting it as `:open` over-scans past the single closing
+      # `<% end %>` and swallows trailing siblings.
       true -> :inline
     end
   end
