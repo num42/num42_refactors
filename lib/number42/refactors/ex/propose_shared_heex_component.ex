@@ -46,13 +46,28 @@ defmodule Number42.Refactors.Ex.ProposeSharedHeexComponent do
       into one attr. A motif containing a block slot is skipped.
     * **bare component / whole sigil** — nothing is gained (mirrors
       `ExtractHeexComponentBySeam`).
+    * **calls a function component** (`<.foo>` / `<Mod.foo>`) — the lifted
+      body is planted in the destination `CoreComponents`, which imports
+      only `Phoenix.Component`. A `<.foo>` resolves against the *caller's*
+      imports, not the destination's, so moving it raises `undefined
+      function foo/1` at the destination (#298 Bug 1). We cannot prove a
+      given component is in scope at the destination, so any
+      function-component call disqualifies the motif. (Resolving the
+      destination's actual import set via BEAM introspection — to allow
+      lifting bodies that only call components already reachable there — is
+      a larger follow-up; see the module's issue trail.)
 
-  Each surviving dynamic `{…}` slot becomes exactly one `attr`. A slot
-  whose expression is byte-identical across *all* occurrences stays
-  literal in the shared component (it is part of the shape, not a
-  parameter); a slot that varies becomes a parameter, named after the
-  single assign it reads when every occurrence reads one same-shaped
-  assign, else positionally (`arg_1`, `arg_2`, …).
+  Each surviving dynamic `{…}` slot becomes exactly one `attr`. A slot is
+  kept literal in the shared component **only** when it is byte-identical
+  across *all* occurrences **and reads no assign** — a constant expression
+  is part of the shape. A slot that varies, *or* that reads an assign
+  (`@x` / `assigns.x`) even when byte-identical everywhere, becomes a
+  parameter: freezing `{@form}` into a component that does not carry
+  `@form` would raise `KeyError` at render (#298 Bug 3). A parameter is
+  named after the single assign it reads when every occurrence reads one
+  same-shaped assign, else positionally (`arg_1`, `arg_2`, …). The shared
+  component is emitted as a **public** `def` so callers can reach it via
+  `import CoreComponents` (#298 Bug 2).
 
   ## Default-OFF (report first, rewrite behind a flag)
 
@@ -235,7 +250,21 @@ defmodule Number42.Refactors.Ex.ProposeSharedHeexComponent do
   defp liftable?(node) do
     MapSet.size(Scope.free_nonassign_vars(node)) == 0 and
       not bare_component?(node) and
-      not has_block_slot?(node)
+      not has_block_slot?(node) and
+      not calls_subcomponent?(node)
+  end
+
+  # The lifted body is planted in the destination `CoreComponents` module, which
+  # imports only Phoenix.Component. A `<.foo>` / `<Mod.foo>` tag inside the body
+  # resolves against the *caller's* imports, not the destination's — moving it
+  # would raise `undefined function foo/1` at compile time (#298 Bug 1). We
+  # cannot prove a given component is in scope at the destination, so any
+  # function-component call disqualifies the motif.
+  defp calls_subcomponent?(node) do
+    Tree.walk(node, false, fn
+      {:element, tag, _, _, _}, acc -> acc or component_tag?(tag)
+      _other, acc -> acc
+    end)
   end
 
   defp has_block_slot?(node) do
@@ -267,11 +296,42 @@ defmodule Number42.Refactors.Ex.ProposeSharedHeexComponent do
 
     with true <- length(frags) >= min_occ,
          true <- length(files) >= min_files,
+         true <- static_content_identical?(frags),
          {:ok, params, rep} <- parameterise(frags) do
       [build_plan_entry(key, frags, params, rep)]
     else
       _ -> []
     end
+  end
+
+  # The motif key abstracts away literal text and string attribute *values*, so
+  # two occurrences with different button labels (`Anlegen` vs `Speichern`) or
+  # ids (`brand-form` vs `organization-form`) share a key. Only `{…}` slots
+  # become parameters; static content is frozen from the representative. If that
+  # static content diverges across occurrences, lifting them into one component
+  # silently rewrites behaviour (#298 Bug 4). Such a cluster is not a clean
+  # abstraction — skip it. (Promoting divergent static slots to text/string
+  # params is a larger follow-up; conservative skip is correct for now.)
+  defp static_content_identical?(frags) do
+    frags |> Enum.map(&static_content(&1.node)) |> Enum.uniq() |> length() == 1
+  end
+
+  # Literal text leaves and string attribute values of `node`, in document
+  # order — the content the motif key drops but a shared body would freeze.
+  defp static_content(node) do
+    Tree.walk(node, [], fn
+      {:element, _tag, attrs, _children, _meta}, acc ->
+        statics = for {name, {:string, value}} <- attrs, do: {name, value}
+        statics ++ acc
+
+      {:text, text, _meta}, acc ->
+        [String.trim(text) | acc]
+
+      _other, acc ->
+        acc
+    end)
+    |> Enum.reverse()
+    |> Enum.reject(&(&1 == ""))
   end
 
   # Align slots positionally across occurrences. The motif key guarantees
@@ -292,18 +352,30 @@ defmodule Number42.Refactors.Ex.ProposeSharedHeexComponent do
     end
   end
 
-  # Slot i across all occurrences: parameter iff its expression varies.
+  # Slot i across all occurrences: a parameter iff its expression varies OR it
+  # reads any assign. A slot that reads `@x` / `assigns.x` must become an attr
+  # even when byte-identical across occurrences — freezing `{@form}` into the
+  # body would reference an assign the standalone component does not have
+  # (#298 Bug 3, same class as #294). Only an assign-free expression that is
+  # identical everywhere (`{String.upcase("x")}`) may stay literal in the body.
   defp param_at(_i, frags) when frags == [], do: []
 
   defp param_at(i, frags) do
     exprs = Enum.map(frags, fn f -> Enum.at(f.slots, i).code end)
+    varies? = Enum.uniq(exprs) != [hd(exprs)]
 
-    if Enum.uniq(exprs) == [hd(exprs)] do
-      # identical everywhere — stays literal in the shared body
-      []
-    else
+    if varies? or Enum.any?(exprs, &reads_assign?/1) do
       [%{index: i, exprs: exprs}]
+    else
+      []
     end
+  end
+
+  # Does the slot expression read any HEEx assign — `@name` (incl. `?`/`!`
+  # suffixes) or a bare `assigns.field`? Such a read cannot be frozen literally
+  # into a component that does not carry that assign.
+  defp reads_assign?(code) when is_binary(code) do
+    code =~ ~r/@[a-z_][a-zA-Z0-9_]*[?!]?/ or code =~ ~r/\bassigns\.[a-z_]/
   end
 
   defp build_plan_entry(key, frags, params, rep) do
@@ -598,7 +670,7 @@ defmodule Number42.Refactors.Ex.ProposeSharedHeexComponent do
     """
 
       #{attrs}
-      defp #{plan.name}(assigns) do
+      def #{plan.name}(assigns) do
         ~H\"\"\"
     #{indented}
         \"\"\"
@@ -634,7 +706,7 @@ defmodule Number42.Refactors.Ex.ProposeSharedHeexComponent do
   defp sigil_or_empty(_), do: []
 
   defp component_present?(source, plan),
-    do: String.contains?(source, "defp #{plan.name}(assigns)")
+    do: String.contains?(source, "def #{plan.name}(assigns)")
 
   defp core_components_module(opts) do
     opts
@@ -680,7 +752,7 @@ defmodule Number42.Refactors.Ex.ProposeSharedHeexComponent do
   end
 
   defp assigns_in(code) when is_binary(code) do
-    ~r/@([a-z_][a-zA-Z0-9_]*)/
+    ~r/@([a-z_][a-zA-Z0-9_]*[?!]?)/
     |> Regex.scan(code)
     |> Enum.map(fn [_, n] -> n end)
   end

@@ -134,6 +134,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `ProposeSharedHeexComponent` (#298): the applied refactor no longer produces a
+  non-compiling or behaviour-changing tree on real templates (it compiled but
+  broke on the one position-db candidate — same green-CI-but-broken class as
+  #294). Four fixes: (1) the shared component is emitted as a **public** `def`
+  (was `defp`), since `import CoreComponents` only exposes public functions and
+  an unused `defp` also fails `--warnings-as-errors`; the idempotence check now
+  greps `def` to match. (2) A motif whose body calls a function component
+  (`<.foo>` / `<Mod.foo>`) is **skipped** — the body is planted in
+  `CoreComponents`, where the caller's `<.input>`/`<.button>`/`<.announcing>`
+  are not in scope (`undefined function …/1`). (3) A `{…}` slot that reads an
+  assign (`@x` / `assigns.x`) becomes a **parameter even when byte-identical**
+  across occurrences (incl. `?`/`!`-suffixed names), instead of being frozen
+  into the body where the component lacks that assign (render `KeyError`).
+  (4) A cluster whose **static content diverges** (literal text / string attr
+  values the motif key abstracts away — `Anlegen` vs `Speichern`,
+  `id="brand-form"` vs `organization-form`) is skipped rather than silently
+  freezing one occurrence's text into a shared body (behaviour-changing merge).
+  Resolving the destination module's actual import set via BEAM introspection
+  (to lift bodies calling components already reachable there) and promoting
+  divergent static slots to text params are larger follow-ups.
 - `ExtractHeexComponentBySeam` (#294): no longer emits render-breaking cuts on real templates. It now (A) harvests bare `assigns.<field>` reads as needed assigns (attr + call-site arg) and declines a cut that threads the whole `assigns` map into a call — via `Heex.Scope` treating `assigns.field` as an assign read but a bare `assigns` as a free var; (B) keeps a trailing `?`/`!` in assign names end-to-end (attr, call site, spliced body) instead of truncating `@dev_entra_available?` → `dev_entra_available`; and (C) declines a `Phoenix.LiveComponent` cut whose post-extraction render body would reduce to a single non-static (component-call) root, preserving the stateful single-static-root invariant.
 - `PromoteRepeatedPrivateHelpers` (#275): no longer writes a `*.Support` `.ex` file to the working directory on a normal `mix refactor` run while the refactor is default-OFF. The engine calls `prepare/1` for **every** pipeline module before any `transform/2`, and this module's `prepare/1` unconditionally invoked `build_plan/2`, whose side effect is a disk write to `:write_root` (defaulting to `File.cwd!/0`) unless `dry_run: true`. So a normal run spilled a support module into cwd even though `transform/2` is a no-op without `enabled: true`. `prepare/1` now returns `:no_cache` (does no planning and no writes) unless `enabled: true`, mirroring the `transform/2` gate. The module is also added to the Mix task's `@source_files_refactors` list, so an explicit `mix refactor ./path` constrains its inputs instead of silently scanning every `.refactor.exs` input.
 - `IfElseToCond` (#265): now converges in a single pass. When both branches nested a distinct `if/else`, the outer fold was skipped and only one inner `if` rewritten per pass (the one-patch-per-pass cap), so a tree needed two passes to settle and `--check` kept flagging it. The both-nest shape now collapses its do-side chain into a self-contained nested `cond` arm and flattens the else-side alongside it in one go, and disjoint nested-if trees in the same def are now all folded in the same pass.
