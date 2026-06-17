@@ -93,6 +93,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `IfElseToCond` (#265): now converges in a single pass. When both branches nested a distinct `if/else`, the outer fold was skipped and only one inner `if` rewritten per pass (the one-patch-per-pass cap), so a tree needed two passes to settle and `--check` kept flagging it. The both-nest shape now collapses its do-side chain into a self-contained nested `cond` arm and flattens the else-side alongside it in one go, and disjoint nested-if trees in the same def are now all folded in the same pass.
+
 - `PromoteRepeatedPrivateHelpers` (#257): promoting a **multi-clause** private
   helper no longer mangles the source. The helper's own `defp` clauses are now
   excluded from call-site scanning before rewriting — a clause *head*

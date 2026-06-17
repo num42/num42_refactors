@@ -34,11 +34,14 @@ defmodule Number42.Refactors.Ex.IfElseToCond do
     conjunction (issue #8)
   - When outer branches are structurally identical, the outer `if` is
     dropped and only the inner logic survives as `cond`
+  - When both branches nest a distinct `if/else`, the do-side chain
+    collapses to a self-contained nested `cond` used as the body of the
+    outer-condition arm, and the else-side flattens alongside it — so the
+    whole tree converges in a single pass (issue #265)
 
   ## When this skips
 
   - Inner `if` has no `else` (would change semantics)
-  - Both `do` and `else` nest a distinct `if/else` (non-linear shape)
   - Extracted helper fn would need to be called in more than one cond
     branch (would duplicate side-effects or computation)
   - A pre-statement is not a pure binding (function calls count as
@@ -95,8 +98,35 @@ defmodule Number42.Refactors.Ex.IfElseToCond do
     ast
     |> Macro.prewalker()
     |> Enum.flat_map(&maybe_patch(&1, ast))
-    |> Enum.take(1)
+    |> drop_overlapping()
   end
+
+  # Prewalk yields the outermost `if` of each tree first; its fold already
+  # absorbs every nested `if` below it, so any inner patch overlaps the outer
+  # one and `Sourceror.patch_string/2` cannot apply both. Keep the first patch
+  # of each non-overlapping region and drop the rest. Independent if-trees in
+  # the same def produce disjoint ranges, so they all survive — letting one
+  # pass fold every tree at once (issue #265).
+  defp drop_overlapping(patches) do
+    patches
+    |> Enum.sort_by(&range_start/1)
+    |> Enum.reduce([], &keep_if_disjoint/2)
+    |> Enum.reverse()
+  end
+
+  defp keep_if_disjoint(patch, []), do: [patch]
+
+  defp keep_if_disjoint(patch, [last | _] = kept) do
+    if overlaps?(last, patch), do: kept, else: [patch | kept]
+  end
+
+  defp range_start(%{range: %{start: start}}), do: {start[:line], start[:column]}
+
+  defp range_end(%{range: %{end: stop}}), do: {stop[:line], stop[:column]}
+
+  # Ranges are sorted by start, so `b` starts at or after `a`. They overlap
+  # when `b` starts strictly before `a` ends.
+  defp overlaps?(a, b), do: range_start(b) < range_end(a)
 
   defp maybe_patch({:if, _meta, [_cond, _kw]} = node, root) do
     with {:ok, outer} <- if_shape(node),
@@ -172,14 +202,23 @@ defmodule Number42.Refactors.Ex.IfElseToCond do
   end
 
   # Combine outer cond + do/else sub-branches into one flat branch list.
-  # Skip if BOTH sides nested (too complex for safe flattening).
   defp merge_branches(cond_ast, do_branches, else_branches) do
     do_nests? = length(do_branches) > 1
     else_nests? = length(else_branches) > 1
 
     cond do
+      # Both sides nest distinct chains. Flattening both into one cond would
+      # need the outer condition copied into every do-side arm (Case B) AND
+      # left implicit on the else-side — but the else-arms only hold when the
+      # outer cond is false, which a single flat cond cannot express once the
+      # do-arms also carry their own inner guards. So we collapse the do-side
+      # into its own nested cond, treat that as one terminal body, and merge
+      # as Case A. This converges in a single pass (issue #265) and yields the
+      # same shape the engine previously only reached after a second fixpoint
+      # pass. Requires the do-side to be pre-statement-free (a nested cond
+      # cannot host hoists/fn-extractions).
       do_nests? and else_nests? ->
-        :error
+        collapse_do_side(cond_ast, do_branches, else_branches)
 
       # Case A: do terminal, else nests (or also terminal).
       not do_nests? ->
@@ -196,6 +235,19 @@ defmodule Number42.Refactors.Ex.IfElseToCond do
 
       true ->
         :error
+    end
+  end
+
+  # Render the do-side chain as a self-contained nested `cond` and fold it
+  # into the outer `cond` as a single `outer_cond -> <nested cond>` arm,
+  # followed by the else-side arms. Only sound when the do-side carries no
+  # pre-statements (the nested cond cannot host hoists/fn-extractions).
+  defp collapse_do_side(cond_ast, do_branches, else_branches) do
+    if Enum.all?(do_branches, &(&1.pre == [])) do
+      nested = %{cond: cond_ast, body: cond_ast(do_branches), pre: []}
+      {:ok, [nested | else_branches]}
+    else
+      :error
     end
   end
 
