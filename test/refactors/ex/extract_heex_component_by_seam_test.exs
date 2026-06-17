@@ -150,6 +150,23 @@ defmodule Number42.Refactors.Ex.ExtractHeexComponentBySeamTest do
 
       refute Enum.any?(find(src), fn c -> c.accepted and "inner_block" in c.assigns end)
     end
+
+    test "declines a subtree that reads a framework-managed assign (@uploads) (#294)" do
+      # @uploads comes from allow_upload/3 and lives on the socket; harvesting it
+      # as `attr :uploads` and passing it through KeyErrors at render.
+      src =
+        wrap("""
+            <section class="dropzone">
+              <h2>{@heading}</h2>
+              <div class="body" phx-drop-target={@uploads.import_xlsx.ref}>
+                <.live_file_input upload={@uploads.import_xlsx} />
+                <p>{@hint}</p>
+              </div>
+            </section>
+        """)
+
+      refute Enum.any?(find(src), fn c -> c.tag == "section" and c.accepted end)
+    end
   end
 
   describe "production thresholds (default gates, no opts)" do
