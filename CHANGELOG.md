@@ -95,6 +95,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `IfElseToCond` (#265): now converges in a single pass. When both branches nested a distinct `if/else`, the outer fold was skipped and only one inner `if` rewritten per pass (the one-patch-per-pass cap), so a tree needed two passes to settle and `--check` kept flagging it. The both-nest shape now collapses its do-side chain into a self-contained nested `cond` arm and flattens the else-side alongside it in one go, and disjoint nested-if trees in the same def are now all folded in the same pass.
 
+- `ExtractToPipeline` (#267): now converges in a single pass. Piping an outer `Enum`/`Stream` call also pipes eligible nested calls (in the first arg or inside a closure rest arg) within the same patch, instead of leaving them for a follow-up pass — `apply(apply(s)) == apply(s)`.
 - `MergeClausesIntoCondOrGuard` (#265): now idempotent on modules with several
   mergeable functions. The transform emitted at most **one** merge per pass, so
   a module with two or more mergeable functions left the rest for later passes —
