@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `CssClassClusterCorrection` (#285): a default-OFF HEEx refactor that learns
+  the project's CSS-class co-occurrence conventions and corrects outliers. It
+  builds a corpus-wide model in `prepare/1` from two signals (new
+  `CssClassCooccurrence` module): **exact-set clusters with support** (how
+  often a class set recurs) and the issue's **proximity-weighted pairwise
+  co-occurrence index** (same-element pairs `1.0`, parent↔child `0.5`,
+  grandparent↔grandchild `0.25`, depth `d` → `1/2^d`, siblings tunable). A
+  site is corrected only when its class set is **exactly one swapped token**
+  from a high-support convention (`:min_support`, default `8`), the convention
+  **dominates** the deviation (`:dominance_ratio`, default `20×` — so an
+  intentional one-off that itself recurs is left alone), the swap is **within
+  one utility family** (`pb3`↔`pb2`, never `pb3`↔`flex`), and the
+  co-occurrence weights **corroborate** that the convention token belongs.
+  Default-OFF because rewriting styling changes rendered output; detection is
+  the whole problem and the bar is deliberately high to keep false positives
+  near zero. Idempotent: a corrected site matches the convention and is no
+  longer an outlier.
+
 ### Changed
 
 - `SplitLowCohesionModule` (#258): fixed non-convergence and the per-module
