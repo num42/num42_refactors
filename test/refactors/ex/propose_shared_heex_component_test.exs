@@ -191,7 +191,7 @@ defmodule Number42.Refactors.Ex.ProposeSharedHeexComponentTest do
       assert out_b =~ "@summary"
     end
 
-    test "appends one defp component to the configured CoreComponents module" do
+    test "appends one PUBLIC component to the configured CoreComponents module" do
       sources = %{
         "lib/a.ex" => card("title", "body"),
         "lib/b.ex" => card("name", "summary"),
@@ -221,7 +221,11 @@ defmodule Number42.Refactors.Ex.ProposeSharedHeexComponentTest do
           project_config: @project_config
         )
 
-      assert out =~ "defp #{plan.name}(assigns)"
+      # cross-module component must be PUBLIC: `import CoreComponents` only
+      # exposes `def`, so `<.shared_*>` at the call sites would be undefined
+      # if it were `defp` (and the unused `defp` fails --warnings-as-errors).
+      assert out =~ "def #{plan.name}(assigns)"
+      refute out =~ "defp #{plan.name}(assigns)"
       # the body uses slot params, not any one file's assign names
       assert out =~ "attr"
     end
@@ -269,6 +273,221 @@ defmodule Number42.Refactors.Ex.ProposeSharedHeexComponentTest do
         )
 
       assert out_a_2 == out_a
+    end
+  end
+
+  describe "build_plan/2 — #298: compile-safe lifting" do
+    # Bug 1: a body calling a sub-component (`<.foo>`) cannot be lifted into
+    # CoreComponents — `<.foo>` is imported into the caller, not the destination.
+    test "SKIPS a motif whose body calls a custom sub-component (not in destination scope)" do
+      with_subcomponent = """
+      defmodule Demo do
+        def render(assigns) do
+          ~H\"\"\"
+          <article class="card">
+            <.announcing>{@title}</.announcing>
+            <p class="card-body">{@body}</p>
+          </article>
+          \"\"\"
+        end
+      end
+      """
+
+      sources = %{
+        "lib/a.ex" => with_subcomponent,
+        "lib/b.ex" => String.replace(with_subcomponent, "Demo", "Demo2"),
+        "lib/c.ex" => String.replace(with_subcomponent, "Demo", "Demo3")
+      }
+
+      assert ProposeSharedHeexComponent.build_plan(sources,
+               min_occurrences: 3,
+               min_files: 2,
+               min_mass: 4
+             ) ==
+               []
+    end
+
+    # Bug 3 + latent: a slot reading an assign is ALWAYS a param, even when its
+    # expression is byte-identical across occurrences — freezing `{@form}` into
+    # the body references an assign the component does not have (runtime KeyError).
+    test "parameterises an assign-reading slot even when identical across occurrences" do
+      with_shared_assign = fn varying ->
+        """
+        defmodule Demo do
+          def render(assigns) do
+            ~H\"\"\"
+            <article class="card">
+              <h2 class="card-title">{@title}</h2>
+              <form for={@form}>
+                <input value={@#{varying}} />
+              </form>
+            </article>
+            \"\"\"
+          end
+        end
+        """
+      end
+
+      sources = %{
+        "lib/a.ex" => with_shared_assign.("name"),
+        "lib/b.ex" => with_shared_assign.("email"),
+        "lib/c.ex" => with_shared_assign.("phone")
+      }
+
+      [plan] =
+        ProposeSharedHeexComponent.build_plan(sources,
+          min_occurrences: 3,
+          min_files: 2,
+          min_mass: 4
+        )
+
+      # @title, @form (byte-identical everywhere), and @name/@email/@phone all
+      # read assigns → all three are params; nothing referencing an assign is
+      # frozen into the body.
+      assert length(plan.params) == 3
+
+      # the body's `@x` references (after slot substitution) must ALL be
+      # declared params — a frozen `@form` with no matching param is the
+      # KeyError bug (#298 Bug 3). Param names happen to equal the rep's assign
+      # names here, so the body reads `@title`/`@form`, but each is now an attr.
+      param_names = MapSet.new(plan.params, &Atom.to_string(&1.name))
+
+      body_assigns =
+        ~r/@([a-z_][a-zA-Z0-9_]*[?!]?)/
+        |> Regex.scan(plan.body)
+        |> Enum.map(fn [_, n] -> n end)
+        |> MapSet.new()
+
+      assert MapSet.subset?(body_assigns, param_names),
+             "body references undeclared assigns: #{inspect(MapSet.difference(body_assigns, param_names))}"
+    end
+
+    test "KEEPS a byte-identical slot literal when it reads no assign" do
+      with_const = fn varying ->
+        """
+        defmodule Demo do
+          def render(assigns) do
+            ~H\"\"\"
+            <article class="card">
+              <h2 class="card-title">{@#{varying}}</h2>
+              <p class="card-body">{String.upcase("static")}</p>
+            </article>
+            \"\"\"
+          end
+        end
+        """
+      end
+
+      sources = %{
+        "lib/a.ex" => with_const.("title"),
+        "lib/b.ex" => with_const.("name"),
+        "lib/c.ex" => with_const.("heading")
+      }
+
+      [plan] =
+        ProposeSharedHeexComponent.build_plan(sources,
+          min_occurrences: 3,
+          min_files: 2,
+          min_mass: 4
+        )
+
+      # only the varying assign slot is a param; the assign-free constant stays literal
+      assert length(plan.params) == 1
+      assert plan.body =~ ~s|{String.upcase("static")}|
+    end
+
+    # Bug 4: structurally-identical occurrences whose STATIC content diverges
+    # (literal text / string attr values) do not render identically. Freezing
+    # one occurrence's text into the shared body is a behaviour-changing merge.
+    # The motif gate must not cluster them.
+    test "SKIPS a motif whose static text diverges across occurrences" do
+      card_text = fn assign, text ->
+        """
+        defmodule Demo do
+          def render(assigns) do
+            ~H\"\"\"
+            <article class="card">
+              <h2 class="card-title">#{text}</h2>
+              <p class="card-body">{@#{assign}}</p>
+            </article>
+            \"\"\"
+          end
+        end
+        """
+      end
+
+      sources = %{
+        "lib/a.ex" => card_text.("body", "Neue Marke"),
+        "lib/b.ex" => card_text.("summary", "Neue Organisation"),
+        "lib/c.ex" => card_text.("content", "Organisation bearbeiten")
+      }
+
+      assert ProposeSharedHeexComponent.build_plan(sources,
+               min_occurrences: 3,
+               min_files: 2,
+               min_mass: 4
+             ) ==
+               []
+    end
+
+    test "SKIPS a motif whose static string attr values diverge across occurrences" do
+      card_attr = fn assign, id ->
+        """
+        defmodule Demo do
+          def render(assigns) do
+            ~H\"\"\"
+            <article class="card" id="#{id}">
+              <h2 class="card-title">{@title}</h2>
+              <p class="card-body">{@#{assign}}</p>
+            </article>
+            \"\"\"
+          end
+        end
+        """
+      end
+
+      sources = %{
+        "lib/a.ex" => card_attr.("body", "brand-form"),
+        "lib/b.ex" => card_attr.("summary", "organization-form"),
+        "lib/c.ex" => card_attr.("content", "edit-organization-form")
+      }
+
+      assert ProposeSharedHeexComponent.build_plan(sources,
+               min_occurrences: 3,
+               min_files: 2,
+               min_mass: 4
+             ) ==
+               []
+    end
+
+    test "STILL clusters when static content is identical (only assigns vary)" do
+      card_same = fn assign ->
+        """
+        defmodule Demo do
+          def render(assigns) do
+            ~H\"\"\"
+            <article class="card" id="card">
+              <h2 class="card-title">Title</h2>
+              <p class="card-body">{@#{assign}}</p>
+            </article>
+            \"\"\"
+          end
+        end
+        """
+      end
+
+      sources = %{
+        "lib/a.ex" => card_same.("body"),
+        "lib/b.ex" => card_same.("summary"),
+        "lib/c.ex" => card_same.("content")
+      }
+
+      assert [_plan] =
+               ProposeSharedHeexComponent.build_plan(sources,
+                 min_occurrences: 3,
+                 min_files: 2,
+                 min_mass: 4
+               )
     end
   end
 end
