@@ -427,16 +427,64 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelper do
   defp extractions_in_body(nil, _source), do: []
 
   defp extractions_in_body({body_exprs, append_at_line}, source) do
-    defps = collect_defp_index(body_exprs)
+    # Extract EVERY eligible tail `case` in one pass — convergence in a
+    # single iteration so `apply(apply(s)) == apply(s)`. Taking only one
+    # per pass left sibling cases for later passes, breaking idempotence
+    # (`--check` flagged every multi-case module). The `defps` index is
+    # threaded across extractions so a helper synthesized earlier in this
+    # same pass participates in collision resolution for later ones —
+    # identical sibling extractions collapse to one (`:skip`), colliding
+    # but distinct ones suffix-walk, exactly as against pre-existing
+    # helpers.
+    initial_defps = collect_defp_index(body_exprs)
 
-    body_exprs
-    |> Enum.flat_map(&find_extraction(&1, defps))
-    # One extraction per pass keeps the diff focused. Fixpoint
-    # loop in `Engine` re-runs until stable; subsequent passes
-    # find no `case` to match (the original is rewritten) so
-    # the pass converges in one iteration per host function.
-    |> Enum.take(1)
+    {targets_rev, _final_defps} =
+      Enum.reduce(body_exprs, {[], initial_defps}, fn expr, {acc, defps} ->
+        case find_extraction(expr, defps) do
+          {:ok, target} -> {[target | acc], index_synthesized_helper(defps, target)}
+          :none -> {acc, defps}
+        end
+      end)
+
+    targets_rev
+    |> Enum.reverse()
     |> Enum.flat_map(&emit_patches(&1, source, append_at_line))
+  end
+
+  # Fold the helper a target will synthesize into the `defps` index so the
+  # next extraction in the same pass sees it as an occupied name/arity slot
+  # (drives `:skip` on an identical sibling, suffix-walk on a distinct one).
+  defp index_synthesized_helper(defps, %{
+         branches: branches,
+         free_vars: free_vars,
+         helper_name: helper_name
+       }) do
+    name_atom = String.to_atom(helper_name)
+    arity = length(free_vars) + 1
+    clauses = Enum.map(branches, &synthesized_clause(&1, free_vars))
+    Map.update(defps, {name_atom, arity}, clauses, &(&1 ++ clauses))
+  end
+
+  # A `{head_ast, body_kw_ast}` clause mirroring what `render_clause/4`
+  # emits — first param is the scrutinee pattern, then one param per free
+  # var (`_`-prefixed when unused in this branch), optional `when` guard,
+  # `do:` the branch body. Shape matches `collect_defp_index/1` entries so
+  # `resolve_handler_name`'s structural-equality check works against it.
+  defp synthesized_clause(
+         %{body: body, guard: guard, pattern: pattern, used_in_body: used},
+         free_vars
+       ) do
+    extra_params =
+      Enum.map(free_vars, fn var ->
+        name =
+          if MapSet.member?(used, var), do: var, else: String.to_atom("_" <> Atom.to_string(var))
+
+        {name, [], nil}
+      end)
+
+    base_head = {:__synth__, [], [pattern | extra_params]}
+    head = if guard, do: {:when, [], [base_head, guard]}, else: base_head
+    {head, [{:do, body}]}
   end
 
   defp find_extraction({def_kind, _meta, [head, [{_do, body}]]}, defps)
@@ -492,26 +540,25 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelper do
 
       case resolve_handler_name(base_name, arity, branches, free_vars, defps) do
         :skip ->
-          []
+          :none
 
         {:ok, helper_name} ->
-          [
-            %{
-              branches: branches,
-              case_node: case_node,
-              def_kind: def_kind,
-              free_vars: free_vars,
-              helper_name: helper_name,
-              scrutinee_node: scrutinee
-            }
-          ]
+          {:ok,
+           %{
+             branches: branches,
+             case_node: case_node,
+             def_kind: def_kind,
+             free_vars: free_vars,
+             helper_name: helper_name,
+             scrutinee_node: scrutinee
+           }}
       end
     else
-      _ -> []
+      _ -> :none
     end
   end
 
-  defp find_extraction(_, _), do: []
+  defp find_extraction(_, _), do: :none
   defp function_name({:when, _, [{name, _, _} | _]}) when is_atom(name), do: name
   defp function_name({name, _, _}) when is_atom(name), do: name
   defp function_name(_), do: :unknown

@@ -1025,5 +1025,31 @@ defmodule Number42.Refactors.Ex.ExtractCaseToHelperTest do
 
       assert_idempotent(@subject, source)
     end
+
+    test "two eligible tail cases in one module are both extracted in one pass (#267)" do
+      # Regression: previously only ONE case was extracted per pass, so a
+      # second eligible case lingered as an inline `case` and got extracted
+      # only on the next pass — `apply(apply(s)) != apply(s)`, breaking
+      # `--check`. Both cases must be lifted in a single pass now.
+      source = """
+      defmodule M do
+        defp save(scope, pkg, name, ids) do
+          case do_save(scope, pkg, name, ids) do
+            {:ok, p} -> {:noreply, push(socket, p, %{flash: :info})}
+            {:error, cs} -> {:noreply, flash(socket, cs, %{flash: :error})}
+          end
+        end
+
+        defp group_ids_for(grouped, type) do
+          case Enum.find(grouped, fn {t, _} -> t == type end) do
+            {_, items} -> Enum.map(items, & &1.id)
+            nil -> []
+          end
+        end
+      end
+      """
+
+      assert_idempotent(@subject, source)
+    end
   end
 end
