@@ -93,6 +93,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `ExtractRepeatedGuardToDefguard` (#269): converges in one pass. It lifted only the first eligible repeated-guard group per module per pass, so a module with two distinct groups needed a second pass (which then re-processed pass 1's output) — non-idempotent, breaking `--check`. Every eligible head-guard group (and every body-`if` candidate) is now emitted in a single pass, with `defguardp` names disambiguated by a numeric suffix when two groups derive the same `is_valid_<var>` name; already-extracted guards stay excluded so the synthesised guard is never re-detected.
+
 - `ExtractToPipeline` (#267): now converges in a single pass. Piping an outer `Enum`/`Stream` call also pipes eligible nested calls (in the first arg or inside a closure rest arg) within the same patch, instead of leaving them for a follow-up pass — `apply(apply(s)) == apply(s)`.
 - `MergeClausesIntoCondOrGuard` (#265): now idempotent on modules with several
   mergeable functions. The transform emitted at most **one** merge per pass, so

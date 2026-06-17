@@ -257,6 +257,55 @@ defmodule Number42.Refactors.Ex.ExtractRepeatedGuardToDefguardTest do
     end
   end
 
+  describe "multiple distinct repeated guards in one module" do
+    # Two independent guard groups, each >= 3 occurrences. Both must be
+    # extracted in a single pass; lifting one per pass leaves work for the
+    # next pass and breaks idempotence (#269).
+    test "extracts every eligible group in one pass" do
+      before_source = """
+      defmodule M do
+        def a(id) when is_integer(id) and id > 0, do: id
+        def b(id) when is_integer(id) and id > 0, do: id
+        def c(id) when is_integer(id) and id > 0, do: id
+
+        def d(name) when is_binary(name), do: name
+        def e(name) when is_binary(name), do: name
+        def f(name) when is_binary(name), do: name
+      end
+      """
+
+      actual = apply_refactor(@subject, before_source)
+
+      assert actual =~ "defguardp is_valid_id(id) when is_integer(id) and id > 0"
+      assert actual =~ "defguardp is_valid_name(name) when is_binary(name)"
+      assert actual =~ "def a(id) when is_valid_id(id)"
+      assert actual =~ "def d(name) when is_valid_name(name)"
+      assert_compiles(actual)
+    end
+
+    # Two distinct guards over identically-named first vars would derive the
+    # same `is_valid_<var>` name. Emitting both in one pass must disambiguate
+    # rather than define the guard name twice (which would not compile).
+    test "disambiguates two groups that derive the same name" do
+      before_source = """
+      defmodule M do
+        def a(x) when is_integer(x) and x > 0, do: x
+        def b(x) when is_integer(x) and x > 0, do: x
+        def c(x) when is_integer(x) and x > 0, do: x
+
+        def d(x) when is_binary(x), do: x
+        def e(x) when is_binary(x), do: x
+        def f(x) when is_binary(x), do: x
+      end
+      """
+
+      actual = apply_refactor(@subject, before_source)
+
+      assert_compiles(actual)
+      assert_idempotent(@subject, before_source)
+    end
+  end
+
   describe "idempotence" do
     test "running twice equals running once" do
       source = """
@@ -264,6 +313,26 @@ defmodule Number42.Refactors.Ex.ExtractRepeatedGuardToDefguardTest do
         def fetch(id) when is_integer(id) and id > 0, do: do_fetch(id)
         def update(id, attrs) when is_integer(id) and id > 0, do: do_update(id, attrs)
         def delete(id) when is_integer(id) and id > 0, do: do_delete(id)
+      end
+      """
+
+      assert_idempotent(@subject, source)
+    end
+
+    # Mirrors the position-db shape from #269: a module with two distinct
+    # repeated-guard groups (one `is_list`, one `is_binary`) over several
+    # different variable names. The old code lifted one group per pass, so
+    # pass 2 still found the second group → not idempotent.
+    test "running twice equals running once with two distinct guard groups" do
+      source = """
+      defmodule M do
+        def load(position_ids) when is_list(position_ids), do: position_ids
+        def fetch(position_ids) when is_list(position_ids), do: position_ids
+        def map(position_ids) when is_list(position_ids), do: position_ids
+
+        def children(parent_id) when is_binary(parent_id), do: parent_id
+        def chain(oz_chain) when is_binary(oz_chain), do: oz_chain
+        def search(search_term) when is_binary(search_term), do: search_term
       end
       """
 
