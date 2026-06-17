@@ -146,6 +146,10 @@ defmodule Number42.Refactors.Heex.Scope do
         {:@, _, _} = node, acc ->
           {drop_subtree(node), acc}
 
+        # `x :: binary` — the RHS is a bitstring/type specifier, not a variable.
+        {:"::", _, [value, _type]}, acc ->
+          {value, acc}
+
         {name, _meta, ctx} = node, acc when is_atom(name) and is_atom(ctx) ->
           {node, MapSet.put(acc, Atom.to_string(name))}
 
@@ -178,10 +182,14 @@ defmodule Number42.Refactors.Heex.Scope do
     end
   end
 
-  # every variable name in a pattern AST is a binder
+  # every variable name in a pattern AST is a binder (but `x :: binary` binds
+  # only `x`; the type specifier on the RHS is not a variable)
   defp pattern_vars_ast(ast) do
     {_ast, acc} =
       Macro.prewalk(ast, MapSet.new(), fn
+        {:"::", _, [value, _type]}, acc ->
+          {value, acc}
+
         {name, _meta, ctx} = n, acc when is_atom(name) and is_atom(ctx) ->
           {n, MapSet.put(acc, Atom.to_string(name))}
 
