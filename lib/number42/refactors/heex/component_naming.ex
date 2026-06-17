@@ -178,9 +178,13 @@ defmodule Number42.Refactors.Heex.ComponentNaming do
     |> assign_occurrences()
     |> Enum.frequencies()
     |> Enum.sort_by(fn {name, count} -> {-count, name} end)
-    |> Enum.map(fn {name, _} -> String.to_atom(name) end)
+    |> Enum.map(fn {name, _} -> name |> strip_predicate_suffix() |> String.to_atom() end)
     |> Enum.reject(&(&1 in @non_naming_assigns))
   end
+
+  # an assign may end in `?`/`!` (`@valid?`), but a component name cannot, so
+  # the trailing predicate/bang char is dropped before naming.
+  defp strip_predicate_suffix(name), do: String.replace(name, ~r/[?!]$/, "")
 
   # ---- helpers -------------------------------------------------------------
 
@@ -224,7 +228,7 @@ defmodule Number42.Refactors.Heex.ComponentNaming do
   end
 
   defp assigns(code) when is_binary(code) do
-    ~r/@([a-z_][a-zA-Z0-9_]*)/
+    ~r/@([a-z_][a-zA-Z0-9_]*[?!]?)/
     |> Regex.scan(code)
     |> Enum.map(fn [_, n] -> n end)
   end

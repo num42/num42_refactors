@@ -327,6 +327,206 @@ defmodule Number42.Refactors.Ex.ExtractHeexComponentBySeamTest do
     end
   end
 
+  describe "#294 — Bug A: bare `assigns.<field>` reads" do
+    test "harvests `assigns.<field>` reads as a needed assign (attr + call-site arg)" do
+      # the cut reads @-form assigns AND a bare `assigns.current_scope` field;
+      # the field must be harvested, declared as attr, and passed at the call site.
+      # The section is large enough to clear the PRODUCTION size gate.
+      src =
+        wrap("""
+            <main>
+              <header>
+                <h1>{@page_title}</h1>
+              </header>
+              <section class="report-card">
+                <h2>{@report_name}</h2>
+                <dl>
+                  <dt>Scope</dt>
+                  <dd>{render_scope(assigns.current_scope)}</dd>
+                  <dt>Period</dt>
+                  <dd>{@period_label}</dd>
+                  <dt>Total</dt>
+                  <dd>{@total_amount}</dd>
+                  <dt>Average</dt>
+                  <dd>{@average_amount}</dd>
+                  <dt>Peak</dt>
+                  <dd>{@peak_amount}</dd>
+                </dl>
+              </section>
+            </main>
+        """)
+
+      section = Enum.find(R.find_candidates(src), fn c -> c.tag == "section" end)
+      assert section, "the section must clear the production gate as a candidate"
+      assert section.accepted, "the section seam must be accepted: #{inspect(section)}"
+
+      assert "current_scope" in section.assigns,
+             "assigns.current_scope must be harvested: #{inspect(section.assigns)}"
+
+      out = R.transform(src, enabled: true)
+      assert out =~ ~r/attr :current_scope/
+      assert out =~ ~r/<\.\w+ [^>]*current_scope=\{@current_scope\}/
+
+      # the spliced body keeps `assigns.current_scope`; in the standalone
+      # component the `:current_scope` attr lands in its own `assigns`, so the
+      # field read resolves — what matters is the attr+arg now exist
+      assert component_body(out) =~ "assigns.current_scope"
+    end
+
+    test "declines a cut that threads bare `assigns` whole into a call" do
+      # `render_items_body(assigns, ...)` passes the whole assigns map; the cut
+      # cannot become a clean attr-only seam -> decline
+      src =
+        wrap("""
+            <main>
+              <header>
+                <h1>{@page_title}</h1>
+              </header>
+              <section class="report-card">
+                <h2>{@report_name}</h2>
+                <dl>
+                  <dt>Items</dt>
+                  <dd>{render_items_body(assigns, source_args: %{scope: assigns.current_scope})}</dd>
+                  <dt>Period</dt>
+                  <dd>{@period_label}</dd>
+                  <dt>Total</dt>
+                  <dd>{@total_amount}</dd>
+                </dl>
+              </section>
+            </main>
+        """)
+
+      section = Enum.find(find(src), fn c -> c.tag == "section" end)
+      assert section, "the section must still be analyzed"
+      refute section.accepted, "a cut threading bare `assigns` must be declined"
+    end
+
+    test "free-var gate no longer treats bare `assigns` as silently reserved" do
+      # a cut threading bare `assigns` must not be silently accepted as having a
+      # clean seam — it is declined for referencing the whole map
+      src =
+        wrap("""
+            <section class="wrap">
+              <h2>{@title}</h2>
+              <div class="body">
+                <p>{@lead}</p>
+                {render_extra(assigns)}
+                <footer>{@note}</footer>
+              </div>
+            </section>
+        """)
+
+      refute Enum.any?(find(src), fn c -> c.accepted end),
+             "no cut threading bare `assigns` should be accepted"
+    end
+  end
+
+  describe "#294 — Bug B: trailing `?`/`!` in assign names" do
+    test "preserves a trailing `?` end-to-end (attr, call site, spliced body)" do
+      src =
+        wrap("""
+            <main>
+              <header>
+                <h1>{@page_title}</h1>
+              </header>
+              <section class="auth-card">
+                <h2>{@heading}</h2>
+                <div class="body">
+                  <p :if={@dev_entra_available?}>Dev SSO is available.</p>
+                  <p>{@subtitle}</p>
+                  <p>More content here.</p>
+                  <p>Even more content.</p>
+                  <p>And another line.</p>
+                  <p>One more paragraph.</p>
+                  <p>And yet another.</p>
+                  <p>Final line of the body.</p>
+                </div>
+              </section>
+            </main>
+        """)
+
+      section = Enum.find(R.find_candidates(src), fn c -> c.tag == "section" end)
+      assert section, "the section must clear the production gate as a candidate"
+      assert section.accepted, "the section seam must be accepted: #{inspect(section)}"
+
+      assert "dev_entra_available?" in section.assigns,
+             "trailing ? must be kept: #{inspect(section.assigns)}"
+
+      out = R.transform(src, enabled: true)
+      # attr keeps the `?`, the call site keeps it on both sides, and the body
+      # still reads the `?` name — no truncation mismatch
+      assert out =~ ~r/attr :dev_entra_available\?/
+      assert out =~ ~r/dev_entra_available\?=\{@dev_entra_available\?\}/
+      refute out =~ ~r/attr :dev_entra_available,/
+      refute out =~ ~r/dev_entra_available=\{@dev_entra_available\}/
+    end
+  end
+
+  describe "#294 — Bug C: stateful single-static-root invariant" do
+    # `<dialog>` is the render body's SOLE top-level element (the `{@marker}`
+    # sibling means the tree is NOT a single node, so `whole_sigil?` misses it).
+    # Cutting `<dialog>` replaces it with `<.dialog .../>` — now the lone element
+    # root is a non-static component call, which a `Phoenix.LiveComponent` forbids
+    # (`ArgumentError: must have a single static HTML tag at the root`).
+    @sole_root_body """
+            {@marker}
+            <dialog id="ql" class="modal">
+              <h2>{@title}</h2>
+              <p>{@summary}</p>
+              <ul>
+                <li>{@detail_a}</li>
+                <li>{@detail_b}</li>
+                <li>{@detail_c}</li>
+              </ul>
+            </dialog>
+    """
+
+    defp stateful_root_src(use_line, fn_name) do
+      """
+      defmodule QuickLook do
+        #{use_line}
+
+        def #{fn_name}(assigns) do
+          ~H\"\"\"
+      #{@sole_root_body}      \"\"\"
+        end
+      end
+      """
+    end
+
+    test "declines when a live_component's post-cut body reduces to a single component-call root" do
+      src = stateful_root_src("use Phoenix.LiveComponent", "render")
+
+      dialog = Enum.find(find(src), fn c -> c.tag == "dialog" end)
+      assert dialog, "the <dialog> subtree must be analyzed"
+
+      refute dialog.accepted,
+             "cutting the sole-root <dialog> collapses the live_component to a non-static root"
+
+      assert dialog.decline =~ "non-static stateful root"
+    end
+
+    test "still extracts when the module is a plain Phoenix.Component (no stateful root rule)" do
+      # identical shape, but a function component carries no single-static-root
+      # constraint, so collapsing to a single component-call root is allowed
+      src = stateful_root_src("use Phoenix.Component", "panel")
+
+      dialog = Enum.find(find(src), fn c -> c.tag == "dialog" end)
+
+      assert dialog && dialog.accepted,
+             "a function component has no stateful-root constraint"
+    end
+
+    test "still extracts a nested cut inside a live_component (root stays static)" do
+      # the <ul> is nested under <dialog>; cutting it leaves <dialog> as the
+      # static root, so a live_component cut here is safe and still accepted
+      src = stateful_root_src("use Phoenix.LiveComponent", "render")
+
+      ul = Enum.find(find(src), fn c -> c.tag == "ul" end)
+      assert ul && ul.accepted, "a nested cut keeps the static <dialog> root"
+    end
+  end
+
   # ---- helpers --------------------------------------------------------------
 
   defp big_card_src do
@@ -485,6 +685,15 @@ defmodule Number42.Refactors.Ex.ExtractHeexComponentBySeamTest do
     # crude: the text between the first ~H""" and its closing """
     case Regex.run(~r/~H"""(.*?)"""/s, out) do
       [_, body] -> body
+      _ -> out
+    end
+  end
+
+  # the body of the LAST ~H sigil — the extracted component, planted before the
+  # module `end` (the render body is the first sigil)
+  defp component_body(out) do
+    case Regex.scan(~r/~H"""(.*?)"""/s, out) do
+      [_ | _] = matches -> matches |> List.last() |> Enum.at(1)
       _ -> out
     end
   end

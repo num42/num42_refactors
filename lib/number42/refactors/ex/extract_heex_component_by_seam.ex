@@ -115,6 +115,7 @@ defmodule Number42.Refactors.Ex.ExtractHeexComponentBySeam do
          {:ok, ast} <- Sourceror.parse_string(source) do
       ranges = sigil_ranges(ast)
       taken = module_taken_names(source)
+      gates = production_gates(source)
 
       # thread `taken` through every cut (across sigils) so no two extracted
       # components collide on a name
@@ -122,7 +123,7 @@ defmodule Number42.Refactors.Ex.ExtractHeexComponentBySeam do
         sigils
         |> Enum.zip(ranges)
         |> Enum.reduce({[], taken}, fn {sigil, range}, {plans, taken} ->
-          {plan, taken} = plan_for_sigil(sigil, range, taken)
+          {plan, taken} = plan_for_sigil(sigil, range, gates, taken)
           if plan, do: {[plan | plans], taken}, else: {plans, taken}
         end)
 
@@ -130,6 +131,23 @@ defmodule Number42.Refactors.Ex.ExtractHeexComponentBySeam do
     else
       _ -> source
     end
+  end
+
+  defp production_gates(source) do
+    %{
+      min_nodes: @min_nodes,
+      min_lines: @min_lines,
+      max_leak: @max_leak,
+      live_component?: live_component?(source)
+    }
+  end
+
+  # A `Phoenix.LiveComponent`'s `render/1` must keep a single STATIC HTML tag at
+  # its root; a function component has no such rule. Detecting the `use` lets the
+  # stateful-root guard (#294 Bug C) apply only where it can actually break.
+  defp live_component?(source) do
+    source =~ ~r/use\s+Phoenix\.LiveComponent\b/ or
+      source =~ ~r/use\s+[\w.]+,\s*:live_component\b/
   end
 
   # Names already bound in the module that a new `defp <name>(assigns)` would
@@ -164,9 +182,7 @@ defmodule Number42.Refactors.Ex.ExtractHeexComponentBySeam do
 
   # A sigil plan carries every disjoint cut to make. Returns the updated `taken`
   # set so names stay unique across sigils.
-  defp plan_for_sigil(sigil, range, taken) do
-    gates = %{min_nodes: @min_nodes, min_lines: @min_lines, max_leak: @max_leak}
-
+  defp plan_for_sigil(sigil, range, gates, taken) do
     accepted =
       sigil.tree
       |> all_subtrees()
@@ -329,7 +345,8 @@ defmodule Number42.Refactors.Ex.ExtractHeexComponentBySeam do
     gates = %{
       min_nodes: Keyword.get(opts, :min_nodes, @min_nodes),
       min_lines: Keyword.get(opts, :min_lines, @min_lines),
-      max_leak: Keyword.get(opts, :max_leak, @max_leak)
+      max_leak: Keyword.get(opts, :max_leak, @max_leak),
+      live_component?: live_component?(source)
     }
 
     case Tree.from_source(source) do
@@ -369,7 +386,7 @@ defmodule Number42.Refactors.Ex.ExtractHeexComponentBySeam do
       free = Scope.free_nonassign_vars(node) |> MapSet.to_list() |> Enum.sort()
 
       {kind, tag} = kind_and_tag(node)
-      decline = decline_reason(node, sigil, own, leak, free, kind, gates.max_leak)
+      decline = decline_reason(node, sigil, own, leak, free, kind, gates)
 
       %{
         kind: kind,
@@ -386,17 +403,52 @@ defmodule Number42.Refactors.Ex.ExtractHeexComponentBySeam do
     end
   end
 
-  defp decline_reason(node, sigil, own, leak, free, kind, max_leak) do
-    cond do
-      MapSet.size(own) == 0 -> "reads no assigns"
-      MapSet.member?(own, "inner_block") -> "reads @inner_block (the implicit default slot)"
-      leak > max_leak -> "assign leak #{Float.round(leak, 2)} > #{max_leak}"
-      free != [] -> "free non-assign vars: #{Enum.join(free, ", ")}"
-      orphan_slot?(node) -> "carries a slot entry away from its parent component"
-      kind == :element and component_invocation?(node) -> "subtree is itself a component call"
-      whole_sigil?(node, sigil) -> "subtree is the entire sigil body"
-      true -> nil
+  # The first failing safety check names the decline; `nil` means the cut is
+  # accepted. Each predicate is a thunk so they short-circuit in order — cheap
+  # checks (size, slot membership) gate the AST-walking ones.
+  defp decline_reason(node, sigil, own, leak, free, kind, gates) do
+    [
+      {fn -> MapSet.size(own) == 0 end, "reads no assigns"},
+      {fn -> MapSet.member?(own, "inner_block") end,
+       "reads @inner_block (the implicit default slot)"},
+      {fn -> leak > gates.max_leak end,
+       "assign leak #{Float.round(leak, 2)} > #{gates.max_leak}"},
+      {fn -> free != [] end, "free non-assign vars: #{Enum.join(free, ", ")}"},
+      {fn -> orphan_slot?(node) end, "carries a slot entry away from its parent component"},
+      {fn -> kind == :element and component_invocation?(node) end,
+       "subtree is itself a component call"},
+      {fn -> whole_sigil?(node, sigil) end, "subtree is the entire sigil body"},
+      {fn -> collapses_stateful_root?(node, sigil, gates) end,
+       "would leave a non-static stateful root"}
+    ]
+    |> Enum.find_value(fn {predicate, reason} -> if predicate.(), do: reason end)
+  end
+
+  # ---- #294 Bug C: stateful single-static-root invariant -------------------
+
+  # A `Phoenix.LiveComponent`'s `render/1` must keep a single static HTML tag at
+  # the root. The seam replaces the cut subtree with a `<.name .../>` call. If
+  # the cut is the render body's *sole top-level element* (any surrounding nodes
+  # are only whitespace text), that call becomes the new single root — a
+  # non-static component invocation — and render raises `ArgumentError`. The
+  # existing `whole_sigil?` guard only catches a literally single-node tree
+  # (`[element]`); it misses a tree of `[text, element, text]` where the element
+  # is still the lone root. Decline that, for live_components only.
+  defp collapses_stateful_root?(_node, _sigil, %{live_component?: false}), do: false
+
+  defp collapses_stateful_root?(node, sigil, _gates) do
+    case top_level_elements(sigil.tree) do
+      [^node] -> true
+      _ -> false
     end
+  end
+
+  defp top_level_elements(tree) do
+    Enum.filter(tree, fn
+      {:element, _, _, _, _} -> true
+      {:eex_block, _, _, _} -> true
+      _ -> false
+    end)
   end
 
   # A slot entry `<:name>` must stay a direct child of its component. The cut is
@@ -485,14 +537,27 @@ defmodule Number42.Refactors.Ex.ExtractHeexComponentBySeam do
     end)
   end
 
+  # `@name` reads and bare `assigns.<field>` reads both become attrs/call-site
+  # args. Elixir var/assign names may end in a single `?`/`!`, so the charset
+  # keeps that trailing char — truncating it (`@dev_entra_available?` ->
+  # `dev_entra_available`) mismatches the spliced body against the generated
+  # attr/call-site name (#294 Bug B).
+  @assign_name "[a-z_][a-zA-Z0-9_]*[?!]?"
+
   defp assigns_from_code(code) when is_binary(code) do
-    ~r/@([a-z_][a-zA-Z0-9_]*)/
+    at_form = scan_assign_names(~r/@(#{@assign_name})/, code)
+    fields = scan_assign_names(~r/assigns\.(#{@assign_name})/, code)
+    MapSet.union(at_form, fields)
+  end
+
+  defp assigns_from_code(_), do: MapSet.new()
+
+  defp scan_assign_names(regex, code) do
+    regex
     |> Regex.scan(code)
     |> Enum.map(fn [_, n] -> n end)
     |> MapSet.new()
   end
-
-  defp assigns_from_code(_), do: MapSet.new()
 
   defp leak_ratio(own, outside) do
     if MapSet.size(own) == 0 do
