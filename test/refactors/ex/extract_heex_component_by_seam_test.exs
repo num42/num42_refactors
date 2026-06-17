@@ -150,6 +150,42 @@ defmodule Number42.Refactors.Ex.ExtractHeexComponentBySeamTest do
 
       refute Enum.any?(find(src), fn c -> c.accepted and "inner_block" in c.assigns end)
     end
+
+    test "declines a subtree that reads the assigns map directly (assigns.field) (#294)" do
+      # bare `assigns.current_scope` is neither an `@assign` we can declare nor a
+      # free local the scope gate catches; lifting it KeyErrors at render.
+      src =
+        wrap("""
+            <section class="panel">
+              <h2>{@heading}</h2>
+              <div class="body">
+                {render_items_body(assigns, scope: assigns.current_scope)}
+                <p>{@note}</p>
+              </div>
+            </section>
+        """)
+
+      refute Enum.any?(find(src), fn c -> c.tag == "section" and c.accepted end)
+    end
+
+    test "keeps a trailing ?/! in an assign name (#294)" do
+      # @dev_entra_available? must stay `dev_entra_available?`, else the generated
+      # attr and the spliced `@name?` reference diverge.
+      src =
+        wrap("""
+            <section class="panel">
+              <h2>{@title}</h2>
+              <div class="body">
+                <p :if={@dev_entra_available?}>{@hint}</p>
+                <span>{@detail}</span>
+              </div>
+            </section>
+        """)
+
+      section = Enum.find(find(src), fn c -> c.tag == "section" end)
+      assert section
+      assert "dev_entra_available?" in section.assigns
+    end
   end
 
   describe "production thresholds (default gates, no opts)" do

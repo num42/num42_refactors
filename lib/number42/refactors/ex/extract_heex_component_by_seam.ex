@@ -388,14 +388,32 @@ defmodule Number42.Refactors.Ex.ExtractHeexComponentBySeam do
 
   defp decline_reason(node, sigil, own, leak, free, kind, max_leak) do
     cond do
-      MapSet.size(own) == 0 -> "reads no assigns"
-      MapSet.member?(own, "inner_block") -> "reads @inner_block (the implicit default slot)"
-      leak > max_leak -> "assign leak #{Float.round(leak, 2)} > #{max_leak}"
-      free != [] -> "free non-assign vars: #{Enum.join(free, ", ")}"
-      orphan_slot?(node) -> "carries a slot entry away from its parent component"
-      kind == :element and component_invocation?(node) -> "subtree is itself a component call"
-      whole_sigil?(node, sigil) -> "subtree is the entire sigil body"
-      true -> nil
+      MapSet.size(own) == 0 ->
+        "reads no assigns"
+
+      MapSet.member?(own, "inner_block") ->
+        "reads @inner_block (the implicit default slot)"
+
+      leak > max_leak ->
+        "assign leak #{Float.round(leak, 2)} > #{max_leak}"
+
+      free != [] ->
+        "free non-assign vars: #{Enum.join(free, ", ")}"
+
+      subtree_reads_bare_assigns?(node) ->
+        "reads the assigns map directly (assigns.x) — cannot lift to attr-only component"
+
+      orphan_slot?(node) ->
+        "carries a slot entry away from its parent component"
+
+      kind == :element and component_invocation?(node) ->
+        "subtree is itself a component call"
+
+      whole_sigil?(node, sigil) ->
+        "subtree is the entire sigil body"
+
+      true ->
+        nil
     end
   end
 
@@ -485,14 +503,44 @@ defmodule Number42.Refactors.Ex.ExtractHeexComponentBySeam do
     end)
   end
 
+  # Keep a trailing `?`/`!` — `@dev_entra_available?` is one assign named
+  # `dev_entra_available?`, not `dev_entra_available`. Dropping the suffix
+  # made the generated attr and the spliced `@name?` reference diverge.
   defp assigns_from_code(code) when is_binary(code) do
-    ~r/@([a-z_][a-zA-Z0-9_]*)/
+    ~r/@([a-z_][a-zA-Z0-9_]*[?!]?)/
     |> Regex.scan(code)
     |> Enum.map(fn [_, n] -> n end)
     |> MapSet.new()
   end
 
   defp assigns_from_code(_), do: MapSet.new()
+
+  # A subtree that reads the `assigns` map directly (`assigns.field`, or passes
+  # `assigns` whole into a helper) cannot become a clean `attr`-only component:
+  # those reads are neither `@name` assigns we can declare nor free locals the
+  # scope gate catches, so the lifted component would `KeyError` at render.
+  # Detect any bare `assigns` token that is not the `@assigns` sigil form.
+  defp reads_bare_assigns?(code) when is_binary(code) do
+    Regex.match?(~r/(?<!@)\bassigns\b/, code)
+  end
+
+  defp reads_bare_assigns?(_), do: false
+
+  defp subtree_reads_bare_assigns?(node) do
+    Tree.walk(node, false, fn
+      {:eex_expr, code, _}, acc -> acc or reads_bare_assigns?(code)
+      {:eex_block, code, _, _}, acc -> acc or reads_bare_assigns?(code)
+      {:element, _t, attrs, _ch, _}, acc -> acc or attrs_read_bare_assigns?(attrs)
+      _o, acc -> acc
+    end)
+  end
+
+  defp attrs_read_bare_assigns?(attrs) do
+    Enum.any?(attrs, fn
+      {_n, {:expr, code}} -> reads_bare_assigns?(code)
+      _ -> false
+    end)
+  end
 
   defp leak_ratio(own, outside) do
     if MapSet.size(own) == 0 do
