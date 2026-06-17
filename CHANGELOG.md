@@ -29,6 +29,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `ExtractHeexComponentBySeam` (#279): infers a narrower `attr` `:type` for
+  each generated component attr instead of always emitting `:any`. A new
+  `Heex.AttrType` walks the cut subtree and types an assign from two evidence
+  sources — **structural role** (`:for={x <- @a}` / EEx `for` / `Enum.*`/
+  `Stream.*` first arg → `:list`) and **usage signature** (`not @a`/`!@a` →
+  `:boolean`; `@a <> _`, `_ <> @a`, `String.fun(@a, …)` → `:string`).
+  Conservative by design: bare `{@a}` interpolation, attribute values,
+  comparisons and arithmetic stay `:any`, and two conflicting strong signals
+  fall back to `:any` — a wrong narrow type is worse than `:any`, so a type is
+  emitted only when the markup pins it unambiguously. (Motif-driven typed
+  attrs/slots for a whole recognised API follow when `StructureMotif` lands,
+  #277.)
 - `SplitLowCohesionModule` (#258): fixed non-convergence and the per-module
   detection cost. **Idempotence** — modularity is *relative*, so the splitter
   re-split its own freshly-created submodules every fixpoint pass and ran all

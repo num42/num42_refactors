@@ -296,6 +296,35 @@ defmodule Number42.Refactors.Ex.ExtractHeexComponentBySeamTest do
       assert parses?(once)
       assert R.transform(once, enabled: true) == once
     end
+
+    test "a string-concatenated assign is typed :string" do
+      out = R.transform(usage_panel_src(), enabled: true)
+      assert out =~ ~r/attr :greeting, :string/
+    end
+
+    test "a `String.*`-consumed assign is typed :string" do
+      out = R.transform(usage_panel_src(), enabled: true)
+      assert out =~ ~r/attr :title, :string/
+    end
+
+    test "a `not @x` gated assign is typed :boolean" do
+      out = R.transform(usage_panel_src(), enabled: true)
+      assert out =~ ~r/attr :collapsed, :boolean/
+    end
+
+    test "a bare-interpolated assign in the same cut stays :any (no false type)" do
+      out = R.transform(usage_panel_src(), enabled: true)
+      # @subtitle is plain {@subtitle}; nothing pins its type
+      assert out =~ ~r/attr :subtitle, :any/
+      refute out =~ ~r/attr :subtitle, :(string|boolean|integer|list)/
+    end
+
+    test "conflicting evidence falls back to :any (never a wrong type)" do
+      out = R.transform(conflict_panel_src(), enabled: true)
+      # @data is iterated (:list) AND string-concatenated (:string) -> :any
+      assert out =~ ~r/attr :data, :any/
+      refute out =~ ~r/attr :data, :(list|string)/
+    end
   end
 
   # ---- helpers --------------------------------------------------------------
@@ -400,6 +429,53 @@ defmodule Number42.Refactors.Ex.ExtractHeexComponentBySeamTest do
                 <span>{e.note}</span>
               </li>
             </ul>
+          </section>
+        </main>
+    """)
+  end
+
+  defp usage_panel_src do
+    wrap("""
+        <main>
+          <header>
+            <h1>{@page_title}</h1>
+          </header>
+          <section class="usage-card">
+            <h2>{String.upcase(@title)}</h2>
+            <p class="subtitle">{@subtitle}</p>
+            <p class="greeting">{@greeting <> "!"}</p>
+            <div class="body">
+              <p :if={not @collapsed}>Some details below.</p>
+              <p>More details here.</p>
+              <p>Even more details.</p>
+              <p>Yet another paragraph.</p>
+              <p>And one final line.</p>
+            </div>
+          </section>
+        </main>
+    """)
+  end
+
+  defp conflict_panel_src do
+    wrap("""
+        <main>
+          <header>
+            <h1>{@page_title}</h1>
+          </header>
+          <section class="conflict-card">
+            <h2>{@heading}</h2>
+            <p class="lead">A list rendered two ways below.</p>
+            <ul>
+              <li :for={d <- @data} class="entry">
+                <span>{d.label}</span>
+                <span>{d.value}</span>
+                <span>{d.note}</span>
+              </li>
+            </ul>
+            <p class="caption">{@data <> " (joined)"}</p>
+            <footer class="meta">
+              <span>End of list.</span>
+            </footer>
           </section>
         </main>
     """)
