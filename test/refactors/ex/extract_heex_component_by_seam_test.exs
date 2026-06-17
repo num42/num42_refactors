@@ -238,6 +238,41 @@ defmodule Number42.Refactors.Ex.ExtractHeexComponentBySeamTest do
     end
   end
 
+  describe "transform/2 — multiple disjoint cuts (Slice 5)" do
+    test "extracts every disjoint cohesive subtree in one sigil" do
+      out = R.transform(two_panel_src(), enabled: true)
+
+      # two private components were planted, one per panel
+      defs = Regex.scan(~r/defp (\w+)\(assigns\) do/, out) |> Enum.map(fn [_, n] -> n end)
+      assert length(defs) == 2, "expected two extracted components, got: #{inspect(defs)}"
+
+      # both panels' inline markup left the render body
+      refute render_body(out) =~ "<dt>Period</dt>"
+      refute render_body(out) =~ "<dt>Latitude</dt>"
+
+      # two distinct invocation call sites remain in the render body
+      assert render_body(out) =~ ~r/<\.\w+ [^>]*report_name=/
+      assert render_body(out) =~ ~r/<\.\w+ [^>]*location_name=/
+    end
+
+    test "the multi-cut rewrite is syntactically valid and idempotent" do
+      once = R.transform(two_panel_src(), enabled: true)
+      assert parses?(once), "rewritten source must parse:\n#{once}"
+      assert R.transform(once, enabled: true) == once
+    end
+
+    test "never picks both an outer subtree and one nested inside it" do
+      # the <main> wraps both panels and would itself be a candidate; choosing it
+      # AND a panel inside it would double-cut overlapping bytes. Disjoint only.
+      out = R.transform(two_panel_src(), enabled: true)
+      # the render body must still parse — overlapping cuts corrupt byte slices
+      assert parses?(out)
+      # main itself was not extracted wholesale (panels were, individually)
+      defs = Regex.scan(~r/defp (\w+)\(assigns\) do/, out) |> Enum.map(fn [_, n] -> n end)
+      assert length(defs) == 2
+    end
+  end
+
   # ---- helpers --------------------------------------------------------------
 
   defp big_card_src do
@@ -257,6 +292,42 @@ defmodule Number42.Refactors.Ex.ExtractHeexComponentBySeamTest do
               <dd>{@average_amount}</dd>
               <dt>Peak</dt>
               <dd>{@peak_amount}</dd>
+            </dl>
+          </section>
+        </main>
+    """)
+  end
+
+  defp two_panel_src do
+    wrap("""
+        <main>
+          <header>
+            <h1>{@page_title}</h1>
+          </header>
+          <section class="report-card">
+            <h2>{@report_name}</h2>
+            <dl>
+              <dt>Period</dt>
+              <dd>{@period_label}</dd>
+              <dt>Total</dt>
+              <dd>{@total_amount}</dd>
+              <dt>Average</dt>
+              <dd>{@average_amount}</dd>
+              <dt>Peak</dt>
+              <dd>{@peak_amount}</dd>
+            </dl>
+          </section>
+          <section class="location-card">
+            <h2>{@location_name}</h2>
+            <dl>
+              <dt>Latitude</dt>
+              <dd>{@latitude}</dd>
+              <dt>Longitude</dt>
+              <dd>{@longitude}</dd>
+              <dt>Altitude</dt>
+              <dd>{@altitude}</dd>
+              <dt>Accuracy</dt>
+              <dd>{@accuracy}</dd>
             </dl>
           </section>
         </main>

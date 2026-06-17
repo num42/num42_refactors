@@ -116,15 +116,14 @@ defmodule Number42.Refactors.Ex.ExtractHeexComponentBySeam do
       ranges = sigil_ranges(ast)
       taken = module_taken_names(source)
 
-      # thread `taken` through the sigils so two cuts never collide on a name
+      # thread `taken` through every cut (across sigils) so no two extracted
+      # components collide on a name
       {plans, _taken} =
         sigils
         |> Enum.zip(ranges)
         |> Enum.reduce({[], taken}, fn {sigil, range}, {plans, taken} ->
-          case plan_for_sigil(sigil, range, taken) do
-            nil -> {plans, taken}
-            plan -> {[plan | plans], [plan.name | taken]}
-          end
+          {plan, taken} = plan_for_sigil(sigil, range, taken)
+          if plan, do: {[plan | plans], taken}, else: {plans, taken}
         end)
 
       apply_plans(source, Enum.reverse(plans))
@@ -163,71 +162,96 @@ defmodule Number42.Refactors.Ex.ExtractHeexComponentBySeam do
     Enum.reverse(acc)
   end
 
+  # A sigil plan carries every disjoint cut to make. Returns the updated `taken`
+  # set so names stay unique across sigils.
   defp plan_for_sigil(sigil, range, taken) do
     gates = %{min_nodes: @min_nodes, min_lines: @min_lines, max_leak: @max_leak}
 
-    sigil.tree
-    |> all_subtrees()
-    |> Enum.uniq_by(fn node -> Tree.node_byte_range(node, sigil.body) end)
-    |> Enum.map(fn node -> {node, analyze(node, sigil, gates)} end)
-    |> Enum.filter(fn {_node, c} -> c != nil and c.accepted end)
-    # largest accepted cut first — most markup removed from the render body
-    |> Enum.max_by(fn {_node, c} -> c.nodes end, fn -> nil end)
-    |> case do
-      nil ->
-        nil
+    accepted =
+      sigil.tree
+      |> all_subtrees()
+      |> Enum.uniq_by(fn node -> Tree.node_byte_range(node, sigil.body) end)
+      |> Enum.map(fn node -> {node, analyze(node, sigil, gates)} end)
+      |> Enum.filter(fn {_node, c} -> c != nil and c.accepted end)
 
-      {node, c} ->
-        {s, e} = Tree.node_byte_range(node, sigil.body)
-        markup = binary_part(sigil.body, s, e - s)
+    case max_disjoint_cuts(accepted, sigil.body) do
+      [] ->
+        {nil, taken}
 
-        %{
-          sigil: sigil,
-          range: range,
-          markup: markup,
-          new_body: replace_range(sigil.body, s, e),
-          name: ComponentNaming.derive(node, taken),
-          assigns: c.assigns
-        }
+      chosen ->
+        # name each cut, threading `taken` so siblings stay distinct; keep them
+        # in document order (ascending start byte) for a stable, readable rewrite
+        {cuts, taken} =
+          chosen
+          |> Enum.sort_by(fn {_node, _c, {s, _e}} -> s end)
+          |> Enum.reduce({[], taken}, fn {node, c, {s, e}}, {cuts, taken} ->
+            name = ComponentNaming.derive(node, taken)
+            markup = binary_part(sigil.body, s, e - s)
+            cut = %{range: {s, e}, markup: markup, name: name, assigns: c.assigns}
+            {[cut | cuts], [name | taken]}
+          end)
+
+        {%{sigil: sigil, range: range, cuts: Enum.reverse(cuts)}, taken}
     end
+  end
+
+  # Greedy maximum disjoint set: take the largest accepted cut, then the next
+  # largest that overlaps none already taken, and so on. Overlapping cuts (an
+  # outer subtree and one nested in it) would corrupt each other's byte slices,
+  # so only mutually disjoint ranges are ever applied to one sigil.
+  defp max_disjoint_cuts(accepted, body) do
+    accepted
+    |> Enum.map(fn {node, c} -> {node, c, Tree.node_byte_range(node, body)} end)
+    |> Enum.sort_by(fn {_node, c, _r} -> -c.nodes end)
+    |> Enum.reduce([], fn {_node, _c, {s, e}} = cand, chosen ->
+      overlaps? =
+        Enum.any?(chosen, fn {_n2, _c2, {s2, e2}} -> not (e <= s2 or s >= e2) end)
+
+      if overlaps?, do: chosen, else: [cand | chosen]
+    end)
   end
 
   defp apply_plans(source, []), do: source
 
   defp apply_plans(source, plans) do
     patches = Enum.map(plans, &sigil_patch/1)
-    components = Enum.map_join(plans, "\n", &render_component/1)
+    components = Enum.map_join(plans, "\n", &render_plan_components/1)
 
     source
     |> Sourceror.patch_string(patches)
     |> insert_before_module_end(components)
   end
 
-  # Replace the sigil's source range with a re-indented sigil whose body has the
-  # cut fragment swapped for the component invocation.
+  # Replace the sigil's source range with a re-indented sigil whose body has each
+  # disjoint cut fragment swapped for its component invocation. Cuts are spliced
+  # right-to-left so earlier byte offsets stay valid while later ones are edited.
   defp sigil_patch(plan) do
     indent = String.duplicate(" ", plan.range.start[:column] - 1)
-    body_with_call = put_invocation(plan.new_body, plan)
-    rendered = render_sigil(body_with_call, indent)
+
+    new_body =
+      plan.cuts
+      |> Enum.sort_by(fn cut -> -elem(cut.range, 0) end)
+      |> Enum.reduce(plan.sigil.body, fn cut, body ->
+        {s, e} = cut.range
+        replace_range_with(body, s, e, render_invocation(cut))
+      end)
+
+    rendered = render_sigil(new_body, indent)
     Sourceror.Patch.new(%{start: plan.range.start, end: plan.range.end}, rendered, false)
   end
 
-  # the dedented body, with the cut fragment already removed, re-spliced with the
-  # invocation at the cut point (placeholder marker stitched in replace_range/3)
-  defp put_invocation(new_body, plan) do
-    String.replace(new_body, cut_marker(), render_invocation(plan), global: false)
-  end
+  defp render_plan_components(plan), do: Enum.map_join(plan.cuts, "\n", &render_component/1)
 
-  defp render_component(plan) do
-    markup = String.trim_trailing(plan.markup)
+  defp render_component(cut) do
+    markup = String.trim_trailing(cut.markup)
 
     attrs =
-      Enum.map_join(plan.assigns, "\n", fn a -> "  attr #{inspect(String.to_atom(a))}, :any" end)
+      Enum.map_join(cut.assigns, "\n", fn a -> "  attr #{inspect(String.to_atom(a))}, :any" end)
 
     """
 
     #{attrs}
-      defp #{plan.name}(assigns) do
+      defp #{cut.name}(assigns) do
         ~H\"\"\"
     #{indent(markup, "    ")}
         \"\"\"
@@ -235,11 +259,8 @@ defmodule Number42.Refactors.Ex.ExtractHeexComponentBySeam do
     """
   end
 
-  # leave a unique marker where the cut was, so put_invocation can place the call
-  defp cut_marker, do: "\x00CUT\x00"
-
-  defp replace_range(body, s, e) do
-    binary_part(body, 0, s) <> cut_marker() <> binary_part(body, e, byte_size(body) - e)
+  defp replace_range_with(body, s, e, replacement) do
+    binary_part(body, 0, s) <> replacement <> binary_part(body, e, byte_size(body) - e)
   end
 
   defp render_sigil(body, indent) do
@@ -254,12 +275,12 @@ defmodule Number42.Refactors.Ex.ExtractHeexComponentBySeam do
     "~H\"\"\"\n" <> indented <> indent <> "\"\"\""
   end
 
-  defp render_invocation(plan) do
-    attrs = Enum.map_join(plan.assigns, " ", fn a -> "#{a}={@#{a}}" end)
+  defp render_invocation(cut) do
+    attrs = Enum.map_join(cut.assigns, " ", fn a -> "#{a}={@#{a}}" end)
 
     case attrs do
-      "" -> "<.#{plan.name} />"
-      _ -> "<.#{plan.name} #{attrs} />"
+      "" -> "<.#{cut.name} />"
+      _ -> "<.#{cut.name} #{attrs} />"
     end
   end
 
