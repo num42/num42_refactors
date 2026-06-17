@@ -46,7 +46,7 @@ defmodule Number42.Refactors.Ex.ExtractHeexComponentBySeam do
 
   @behaviour Number42.Refactors.Refactor
 
-  alias Number42.Refactors.Heex.{Scope, Tree}
+  alias Number42.Refactors.Heex.{ComponentNaming, Scope, Tree}
 
   @min_nodes 6
   @min_lines 12
@@ -92,9 +92,180 @@ defmodule Number42.Refactors.Ex.ExtractHeexComponentBySeam do
   def priority, do: 10
 
   @impl Number42.Refactors.Refactor
-  # Slice 4 wires the rewrite (gated on `enabled: true`). Until then this is a
-  # strict no-op so the refactor is safe to register while detection is validated.
-  def transform(source, _opts), do: source
+  def transform(source, opts) do
+    if Keyword.get(opts, :enabled, false) do
+      rewrite(source)
+    else
+      source
+    end
+  end
+
+  # Extract one component per sigil (the highest-scoring accepted candidate),
+  # planting the private component before the module's final `end` and
+  # replacing the inline markup with a `<.name .../>` call. One cut/sigil keeps
+  # byte offsets stable within a pass; multiple/nested cuts are Slice 5.
+  #
+  # The sigil body that `Tree` exposes is dedented (LiveView strips the common
+  # leading indentation), so we cannot string-replace the cut fragment back into
+  # the raw source. Instead we rewrite the body in body-space, then replace the
+  # whole sigil via its real source range (from Sourceror), re-indented to the
+  # sigil's column. This mirrors `ExtractHeexFor`.
+  defp rewrite(source) do
+    with {:ok, sigils} <- Tree.from_source(source),
+         {:ok, ast} <- Sourceror.parse_string(source) do
+      ranges = sigil_ranges(ast)
+
+      plans =
+        sigils
+        |> Enum.zip(ranges)
+        |> Enum.map(fn {sigil, range} -> plan_for_sigil(sigil, range) end)
+        |> Enum.reject(&is_nil/1)
+
+      apply_plans(source, plans)
+    else
+      _ -> source
+    end
+  end
+
+  # `{:sigil_H, ...}` nodes in document order with their source ranges.
+  defp sigil_ranges(ast) do
+    {_ast, acc} =
+      Macro.prewalk(ast, [], fn
+        {:sigil_H, _, _} = node, acc -> {node, [Sourceror.get_range(node) | acc]}
+        node, acc -> {node, acc}
+      end)
+
+    Enum.reverse(acc)
+  end
+
+  defp plan_for_sigil(sigil, range) do
+    gates = %{min_nodes: @min_nodes, min_lines: @min_lines, max_leak: @max_leak}
+
+    sigil.tree
+    |> all_subtrees()
+    |> Enum.uniq_by(fn node -> Tree.node_byte_range(node, sigil.body) end)
+    |> Enum.map(fn node -> {node, analyze(node, sigil, gates)} end)
+    |> Enum.filter(fn {_node, c} -> c != nil and c.accepted end)
+    # largest accepted cut first — most markup removed from the render body
+    |> Enum.max_by(fn {_node, c} -> c.nodes end, fn -> nil end)
+    |> case do
+      nil ->
+        nil
+
+      {node, c} ->
+        {s, e} = Tree.node_byte_range(node, sigil.body)
+        markup = binary_part(sigil.body, s, e - s)
+
+        %{
+          sigil: sigil,
+          range: range,
+          markup: markup,
+          new_body: replace_range(sigil.body, s, e),
+          name: ComponentNaming.derive(node, []),
+          assigns: c.assigns
+        }
+    end
+  end
+
+  defp apply_plans(source, []), do: source
+
+  defp apply_plans(source, plans) do
+    patches = Enum.map(plans, &sigil_patch/1)
+    components = Enum.map_join(plans, "\n", &render_component/1)
+
+    source
+    |> Sourceror.patch_string(patches)
+    |> insert_before_module_end(components)
+  end
+
+  # Replace the sigil's source range with a re-indented sigil whose body has the
+  # cut fragment swapped for the component invocation.
+  defp sigil_patch(plan) do
+    indent = String.duplicate(" ", plan.range.start[:column] - 1)
+    body_with_call = put_invocation(plan.new_body, plan)
+    rendered = render_sigil(body_with_call, indent)
+    Sourceror.Patch.new(%{start: plan.range.start, end: plan.range.end}, rendered, false)
+  end
+
+  # the dedented body, with the cut fragment already removed, re-spliced with the
+  # invocation at the cut point (placeholder marker stitched in replace_range/3)
+  defp put_invocation(new_body, plan) do
+    String.replace(new_body, cut_marker(), render_invocation(plan), global: false)
+  end
+
+  defp render_component(plan) do
+    markup = String.trim_trailing(plan.markup)
+
+    attrs =
+      Enum.map_join(plan.assigns, "\n", fn a -> "  attr #{inspect(String.to_atom(a))}, :any" end)
+
+    """
+
+    #{attrs}
+      defp #{plan.name}(assigns) do
+        ~H\"\"\"
+    #{indent(markup, "    ")}
+        \"\"\"
+      end
+    """
+  end
+
+  # leave a unique marker where the cut was, so put_invocation can place the call
+  defp cut_marker, do: "\x00CUT\x00"
+
+  defp replace_range(body, s, e) do
+    binary_part(body, 0, s) <> cut_marker() <> binary_part(body, e, byte_size(body) - e)
+  end
+
+  defp render_sigil(body, indent) do
+    indented =
+      body
+      |> String.split("\n", trim: false)
+      |> Enum.map_join("\n", fn
+        "" -> ""
+        line -> indent <> line
+      end)
+
+    "~H\"\"\"\n" <> indented <> indent <> "\"\"\""
+  end
+
+  defp render_invocation(plan) do
+    attrs = Enum.map_join(plan.assigns, " ", fn a -> "#{a}={@#{a}}" end)
+
+    case attrs do
+      "" -> "<.#{plan.name} />"
+      _ -> "<.#{plan.name} #{attrs} />"
+    end
+  end
+
+  defp indent(text, pad) do
+    text
+    |> String.split("\n")
+    |> Enum.map_join("\n", fn
+      "" -> ""
+      line -> pad <> line
+    end)
+  end
+
+  # Splice the component defs in just before the module's final top-level `end`.
+  defp insert_before_module_end(source, components) do
+    lines = String.split(source, "\n", trim: false)
+
+    end_index =
+      lines
+      |> Enum.with_index()
+      |> Enum.reverse()
+      |> Enum.find_value(fn {line, idx} -> if String.trim(line) == "end", do: idx end)
+
+    case end_index do
+      nil ->
+        source
+
+      idx ->
+        {before, rest} = Enum.split(lines, idx)
+        Enum.join(before ++ [components | rest], "\n")
+    end
+  end
 
   @doc """
   Diagnostic: every candidate subtree in `source`, each annotated with its
