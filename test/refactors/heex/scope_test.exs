@@ -61,6 +61,12 @@ defmodule Number42.Refactors.Heex.ScopeTest do
       assert Scope.free_nonassign_vars(n) == MapSet.new()
     end
 
+    test "bitstring type specifiers (`x :: binary`) are not free vars" do
+      n = parse(~S|<div>{case @kind do <<v::binary>> -> v end}</div>|)
+      # `v` is bound by the pattern, `binary` is a type specifier — neither free
+      assert Scope.free_nonassign_vars(n) == MapSet.new()
+    end
+
     test "local assignment in a sibling does not leak into a cut that uses it" do
       # `<% total = @a + @b %>` binds `total`; a sibling using {total} is free
       # when cut without the binder.
