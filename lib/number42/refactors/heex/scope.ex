@@ -60,12 +60,20 @@ defmodule Number42.Refactors.Heex.Scope do
 
   # `:let={pat}` binds for children — its expr is a pattern, not a reference.
   defp attr_free({":let", {:expr, _code}}, _scope, free), do: free
+  # `:for={x <- @xs}` is an inline comprehension: its LHS names are binders, not
+  # references; only the generator source (`@xs` -> none) is a free candidate.
+  defp attr_free({":for", {:expr, code}}, scope, free) do
+    refs = MapSet.difference(refs_of(code), binds_of(code))
+    add_names(refs, scope, free)
+  end
+
   defp attr_free({_name, {:expr, code}}, scope, free), do: add_free(code, scope, free)
   defp attr_free({_name, {:string, _}}, _scope, free), do: free
 
   defp element_binds(attrs) do
     Enum.reduce(attrs, MapSet.new(), fn
       {":let", {:expr, code}}, acc -> MapSet.union(acc, pattern_vars(code))
+      {":for", {:expr, code}}, acc -> MapSet.union(acc, binds_of(code))
       _, acc -> acc
     end)
   end
@@ -110,9 +118,11 @@ defmodule Number42.Refactors.Heex.Scope do
   # ---- free / bound var extraction via the parser --------------------------
 
   # add free vars from an arbitrary expression `code` in `scope`
-  defp add_free(code, scope, free) do
-    refs_of(code)
-    |> Enum.reduce(free, fn name, acc ->
+  defp add_free(code, scope, free), do: add_names(refs_of(code), scope, free)
+
+  # add the names in `refs` that are not bound in `scope`
+  defp add_names(refs, scope, free) do
+    Enum.reduce(refs, free, fn name, acc ->
       if MapSet.member?(scope, name), do: acc, else: MapSet.put(acc, name)
     end)
   end

@@ -273,6 +273,31 @@ defmodule Number42.Refactors.Ex.ExtractHeexComponentBySeamTest do
     end
   end
 
+  describe "transform/2 — conservative attr-type inference (Slice 6)" do
+    test "an assign iterated via :for is typed :list, not :any" do
+      out = R.transform(list_panel_src(), enabled: true)
+      assert out =~ ~r/attr :rows, :list/
+      refute out =~ ~r/attr :rows, :any/
+    end
+
+    test "an assign consumed by Enum.* is typed :list" do
+      out = R.transform(enum_panel_src(), enabled: true)
+      assert out =~ ~r/attr :entries, :list/
+    end
+
+    test "non-iterated assigns stay :any (no unsafe guessing)" do
+      out = R.transform(list_panel_src(), enabled: true)
+      # @label is plain interpolation; its runtime type is unknown -> :any
+      assert out =~ ~r/attr :label, :any/
+    end
+
+    test "the typed rewrite still parses and is idempotent" do
+      once = R.transform(list_panel_src(), enabled: true)
+      assert parses?(once)
+      assert R.transform(once, enabled: true) == once
+    end
+  end
+
   # ---- helpers --------------------------------------------------------------
 
   defp big_card_src do
@@ -329,6 +354,52 @@ defmodule Number42.Refactors.Ex.ExtractHeexComponentBySeamTest do
               <dt>Accuracy</dt>
               <dd>{@accuracy}</dd>
             </dl>
+          </section>
+        </main>
+    """)
+  end
+
+  defp list_panel_src do
+    wrap("""
+        <main>
+          <header>
+            <h1>{@page_title}</h1>
+          </header>
+          <section class="rows-card">
+            <h2>{@label}</h2>
+            <table>
+              <tbody>
+                <tr :for={row <- @rows} class="row">
+                  <td>{row.name}</td>
+                  <td>{row.qty}</td>
+                  <td>{row.price}</td>
+                  <td>{row.total}</td>
+                </tr>
+              </tbody>
+            </table>
+          </section>
+        </main>
+    """)
+  end
+
+  defp enum_panel_src do
+    wrap("""
+        <main>
+          <header>
+            <h1>{@page_title}</h1>
+          </header>
+          <section class="entries-card">
+            <h2>{@heading}</h2>
+            <p>{@subheading}</p>
+            <ul>
+              <li>Count: {Enum.count(@entries)}</li>
+              <li :for={e <- @entries} class="entry">
+                <span>{e.label}</span>
+                <span>{e.value}</span>
+                <span>{e.unit}</span>
+                <span>{e.note}</span>
+              </li>
+            </ul>
           </section>
         </main>
     """)
