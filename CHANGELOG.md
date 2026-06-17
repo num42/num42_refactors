@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `Heex.ComponentNaming` (#277): an extracted HEEx component is now named by
+  its **structural motif** when one is recognised. A new source #0 prepends
+  `StructureMotif.classify/1` to the naming chain, so a block that *is* a data
+  table / select field / … is named `data_table` / `select_field` rather than
+  by its tag (`<table>` → `data_table`, sidestepping the reserved `table`
+  builtin). The motif type is more precise than the tag, so it wins when
+  present; `:unknown` yields `nil` and the existing chain (semantic tag →
+  class-hint noun → heading → dominant assign) runs unchanged.
+
 - `CssClassClusterCorrection` (#285): a default-OFF HEEx refactor that learns
   the project's CSS-class co-occurrence conventions and corrects outliers. It
   builds a corpus-wide model in `prepare/1` from two signals (new
