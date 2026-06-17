@@ -49,25 +49,24 @@ defmodule Number42.Refactors.Ex.ExtractToPipelineTest do
 
   describe "rewrites — nested calls" do
     test "nested Enum/Stream call as first arg gets pulled into pipe" do
-      # Stream.filter(coll, pred) |> Enum.to_list() — first pass turns
-      # the OUTER Enum.to_list call into a pipe; nested call stays as
-      # its own pipe stage. Engine fixpoint will not re-extract because
-      # the outer is already piped.
+      # The outer Enum.to_list becomes a pipe stage AND the now-LHS
+      # Stream.filter is piped in the same pass, so the whole chain
+      # converges immediately into one pipeline.
       assert_rewrites(
         @subject,
         "Enum.to_list(Stream.filter(list, pred))",
-        "Stream.filter(list, pred) |> Enum.to_list()"
+        "list |> Stream.filter(pred) |> Enum.to_list()"
       )
     end
 
-    test "Enum nested in Enum extracts the outer first" do
-      # The inner Enum.filter would be picked up by a follow-up pass
-      # on the new RHS. This refactor only rewrites one level per
-      # call site per pass.
+    test "Enum nested in Enum pipes both levels in one pass" do
+      # The outer call becomes a pipe stage AND the now-LHS inner
+      # Enum.filter is piped in the same pass (recursing into the
+      # rewritten first arg), so the result converges immediately.
       assert_rewrites(
         @subject,
         "Enum.map(Enum.filter(list, pred), fun)",
-        "Enum.filter(list, pred) |> Enum.map(fun)"
+        "list |> Enum.filter(pred) |> Enum.map(fun)"
       )
     end
   end
@@ -411,6 +410,25 @@ defmodule Number42.Refactors.Ex.ExtractToPipelineTest do
 
     test "already piped is idempotent" do
       assert_idempotent(@subject, "list |> Enum.map(fun)")
+    end
+
+    # Regression for #267: piping the outer call must also pipe an
+    # eligible nested `Enum.map` discovered in the same pass, so the
+    # transform reaches its fixpoint in ONE pass. Before the fix, pass 1
+    # piped only the outer call and left the inner `Enum.map(keys, …)`
+    # for pass 2 — `apply(apply(s)) != apply(s)`.
+    test "nested Enum.map inside the closure is piped in the same pass" do
+      assert_idempotent(@subject, """
+      Enum.map(groups, fn {label, keys} ->
+        {label, Enum.map(keys, &to_string/1)}
+      end)
+      """)
+    end
+
+    # The same one-pass-convergence guarantee for a nested call in the
+    # FIRST-arg position (the outer becomes the pipe LHS).
+    test "nested Enum call in the first arg is piped in the same pass" do
+      assert_idempotent(@subject, "Enum.map(Enum.filter(list, pred), fun)")
     end
   end
 end
