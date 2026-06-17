@@ -167,13 +167,76 @@ defmodule Number42.Refactors.Ex.ExtractHeexComponentBySeamTest do
 
   describe "behaviour" do
     test "transform is a no-op unless enabled" do
-      src = wrap("<div><p>{@a}</p><p>{@b}</p><p>{@c}</p></div>")
+      src = big_card_src()
       assert R.transform(src, []) == src
     end
+  end
 
-    test "transform is a no-op even when enabled (rewrite is Slice 4)" do
-      src = wrap("<div><p>{@a}</p><p>{@b}</p><p>{@c}</p></div>")
-      assert R.transform(src, enabled: true) == src
+  describe "transform/2 — rewrite (enabled)" do
+    test "extracts the accepted subtree into a private component and calls it" do
+      out = R.transform(big_card_src(), enabled: true)
+
+      # a new private component was planted
+      assert out =~ ~r/defp \w+\(assigns\) do/
+      # with attr declarations for the read assigns
+      assert out =~ ~r/attr :report_name/
+      # and the call site invokes it, forwarding assigns
+      assert out =~ ~r/<\.\w+ [^>]*report_name=\{@report_name\}/
+      # the original inline <dl> markup moved out of render/0's body into the
+      # new component (render/0 is the first ~H, the component the second)
+      refute render_body(out) =~ "<dl>"
     end
+
+    test "the rewritten source is syntactically valid Elixir" do
+      out = R.transform(big_card_src(), enabled: true)
+      assert parses?(out), "rewritten source must parse:\n#{out}"
+    end
+
+    test "is idempotent — a second pass changes nothing" do
+      once = R.transform(big_card_src(), enabled: true)
+      twice = R.transform(once, enabled: true)
+      assert once == twice
+    end
+  end
+
+  # ---- helpers --------------------------------------------------------------
+
+  defp big_card_src do
+    wrap("""
+        <main>
+          <header>
+            <h1>{@page_title}</h1>
+          </header>
+          <section class="report-card">
+            <h2>{@report_name}</h2>
+            <dl>
+              <dt>Period</dt>
+              <dd>{@period_label}</dd>
+              <dt>Total</dt>
+              <dd>{@total_amount}</dd>
+              <dt>Average</dt>
+              <dd>{@average_amount}</dd>
+              <dt>Peak</dt>
+              <dd>{@peak_amount}</dd>
+            </dl>
+          </section>
+        </main>
+    """)
+  end
+
+  defp render_body(out) do
+    # crude: the text between the first ~H""" and its closing """
+    case Regex.run(~r/~H"""(.*?)"""/s, out) do
+      [_, body] -> body
+      _ -> out
+    end
+  end
+
+  # Phoenix.Component isn't loaded in this test env, so a full compile would
+  # fail on `use Phoenix.Component` regardless of the rewrite. Parse instead:
+  # this catches the rewrite's own syntax errors (broken heredoc, unbalanced
+  # ~H, malformed attr lines) without the Phoenix dependency.
+  defp parses?(src) do
+    match?({:ok, _}, Code.string_to_quoted(src))
   end
 end
