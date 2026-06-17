@@ -74,6 +74,53 @@ defmodule Number42.Refactors.Heex.ScopeTest do
       assert Scope.free_nonassign_vars(n) == MapSet.new(["total"])
     end
 
+    test "a `:for=` directive binds its generator var for the element's children" do
+      # Phoenix inline comprehension: `:for={row <- @rows}` on <tr> binds `row`
+      # for the <tr> subtree exactly like `<%= for %>`. The whole <table> is safe.
+      n =
+        parse("""
+        <table>
+          <tr :for={row <- @rows}>
+            <td>{row.name}</td>
+            <td>{row.qty}</td>
+          </tr>
+        </table>
+        """)
+
+      assert Scope.free_nonassign_vars(n) == MapSet.new()
+    end
+
+    test "a `:for=` element cut without its own directive scope is fine (directive travels with it)" do
+      # the <tr> carries its own :for directive, so lifting the <tr> keeps `row`
+      # bound — not free.
+      whole =
+        parse("""
+        <table>
+          <tr :for={row <- @rows}>
+            <td>{row.name}</td>
+          </tr>
+        </table>
+        """)
+
+      {:element, "table", _, [tr], _} = whole
+      assert Scope.free_nonassign_vars(tr) == MapSet.new()
+    end
+
+    test "a child of a `:for=` element IS free when cut below the directive" do
+      whole =
+        parse("""
+        <table>
+          <tr :for={row <- @rows}>
+            <td>{row.name}</td>
+          </tr>
+        </table>
+        """)
+
+      {:element, "table", _, [tr], _} = whole
+      {:element, "tr", _, [td], _} = tr
+      assert Scope.free_nonassign_vars(td) == MapSet.new(["row"])
+    end
+
     test "nested for binders accumulate down the tree" do
       n =
         parse("""
