@@ -120,9 +120,12 @@ defmodule Number42.Refactors.Ex.MergeClausesIntoCondOrGuard do
 
   ## Idempotence
 
-  After the merge the function is a single clause whose body is a
+  After the merge each function is a single clause whose body is a
   `cond`. A second pass finds no guard-only clause SET (it needs ≥2
-  clauses at the name/arity) and is a no-op.
+  clauses at the name/arity) and is a no-op. Every mergeable run in the
+  source is merged in ONE pass, so a module with several mergeable
+  functions converges immediately rather than over several passes
+  (#265).
   """
 
   use Number42.Refactors.Refactor
@@ -161,13 +164,14 @@ defmodule Number42.Refactors.Ex.MergeClausesIntoCondOrGuard do
   defp apply_patches([], source), do: source
   defp apply_patches(patches, source), do: Sourceror.patch_string(source, patches)
 
+  # Emit a patch for EVERY mergeable run in the source. Each run replaces
+  # a distinct, non-overlapping function span, so the engine reaches its
+  # fixpoint in a single pass — merging only one run per pass left other
+  # mergeable functions for later passes and broke idempotence (#265).
   defp build_patches(ast, source) do
     ast
     |> Macro.prewalker()
     |> Enum.flat_map(&module_patches(&1, source))
-    # One merge per pass keeps the diff focused; the engine's fixpoint
-    # loop re-runs until stable.
-    |> Enum.take(1)
   end
 
   defp module_patches({:defmodule, _, [_name, [{_do, body}]]}, source) do
@@ -175,7 +179,7 @@ defmodule Number42.Refactors.Ex.MergeClausesIntoCondOrGuard do
 
     exprs
     |> contiguous_def_runs()
-    |> Enum.find_value([], fn run -> run_patch_or_nil(run, exprs, source) end)
+    |> Enum.flat_map(fn run -> run_patch_or_nil(run, exprs, source) || [] end)
   end
 
   defp module_patches(_, _), do: []
