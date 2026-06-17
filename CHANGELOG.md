@@ -169,6 +169,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `Heex.PluralSkeleton` + `Heex.StructureMotif` (#276): structural
+  component-type detection for HEEx subtrees. `PluralSkeleton` canonicalizes
+  a subtree into a tag-skeleton signature that pluralizes repeated siblings
+  and `:for`-directive elements (so `<tr>…</tr><tr>…</tr>` and
+  `<tr :for={…}>` both canonicalize to `trs>…`), making structurally
+  equivalent trees collapse to one signature regardless of repetition count.
+  `StructureMotif` maps that skeleton onto a small set of structural motifs
+  (list/table/form/card/…) so an extracted component can be named by what it
+  structurally *is* rather than by a generated identifier. Both are
+  standalone detection modules with no engine wiring yet.
+
 - `CanonicalStatementOrder` (#233): reorders independent statements
   inside a `def`/`defp` body into a deterministic **canonical order** so
   two bodies that differ only in the ordering of order-independent
