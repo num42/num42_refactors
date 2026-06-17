@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `CollapseRedundantHeexNesting` (#276): a default-OFF HEEx refactor that
+  dissolves attribute-less wrapper elements. Two shapes collapse: **Case B**
+  (`:hoist_class`) — a transparent outer with no attributes wrapping a single
+  transparent container whose only attribute is `class`; the outer adopts the
+  class and the inner dissolves. **Case A** (`:dissolve_wrapper`) — a
+  transparent attribute-less outer wrapping a single element/component with no
+  content siblings; the outer is removed and the inner promoted verbatim. It
+  never collapses across a content-model boundary (`table`/`tr`/`ul`/`select`/
+  `figure`/…), and any `id`/`phx-*`/`:for`/listener on the child vetoes the
+  rewrite. Idempotent (the merged element keeps a `class`, so it can't match
+  again) and conservative — only provably-safe nesting is flattened.
+
 - `CssClassClusterCorrection` (#285): a default-OFF HEEx refactor that learns
   the project's CSS-class co-occurrence conventions and corrects outliers. It
   builds a corpus-wide model in `prepare/1` from two signals (new
