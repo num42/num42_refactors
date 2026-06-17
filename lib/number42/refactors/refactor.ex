@@ -33,6 +33,27 @@ defmodule Number42.Refactors.Refactor do
   """
   @callback transform(source :: String.t(), opts :: keyword()) :: String.t()
 
+  @doc """
+  Build this refactor's patches against an already-parsed AST.
+
+  Parse-sharing entry point: the engine parses each file *once* with
+  `Sourceror.parse_string/1` and hands the same `ast` to every
+  refactor that implements this callback, instead of each `transform/2`
+  re-parsing the source itself. The engine collects all returned
+  patches and renders once via `Sourceror.patch_string/2`.
+
+  Returns a (possibly empty) list of `Sourceror.Patch.t()` describing
+  byte-range edits against `source`. An empty list is the no-op.
+
+  Optional. A refactor that implements it is *parse-share-capable*;
+  one that doesn't falls back to the per-refactor `transform/2` path.
+  Implementing it must be equivalent to `transform/2` modulo the parse:
+  `patch_string(source, patches(ast, source, opts))` must equal
+  `transform(source, opts)` for the same input.
+  """
+  @callback patches(ast :: Macro.t(), source :: String.t(), opts :: keyword()) ::
+              [Sourceror.Patch.t()]
+
   @doc "One-line human-readable description of the transformation."
   @callback description() :: String.t()
 
@@ -104,7 +125,7 @@ defmodule Number42.Refactors.Refactor do
   """
   @callback prepare(opts :: keyword()) :: {:ok, term()} | :no_cache
 
-  @optional_callbacks reformat_after?: 0, explanation: 0, prepare: 1, priority: 0
+  @optional_callbacks reformat_after?: 0, explanation: 0, prepare: 1, priority: 0, patches: 3
 
   @doc """
   Marks the using module as a refactor and registers it for discovery.
