@@ -111,6 +111,45 @@ defmodule Number42.Refactors.Ex.ExtractHeexComponentBySeamTest do
       cands = find(src)
       refute Enum.any?(cands, fn c -> c.accepted and String.starts_with?(c.tag, ".") end)
     end
+
+    test "declines a subtree that carries a slot entry away from its parent component" do
+      # the <div> wraps a slot entry <:left> whose parent <.split> is OUTSIDE
+      # the <div>; cutting the <div> orphans the slot -> "invalid slot entry"
+      src =
+        wrap("""
+            <.split>
+              <div class="panel">
+                <:left>
+                  <p>{@a}</p>
+                  <p>{@b}</p>
+                  <p>{@c}</p>
+                  <span>{@d}</span>
+                </:left>
+              </div>
+            </.split>
+        """)
+
+      div = Enum.find(find(src), fn c -> c.tag == "div" end)
+      if div, do: refute(div.accepted)
+    end
+
+    test "declines a subtree that reads @inner_block (the implicit default slot)" do
+      # render_slot(@inner_block) cannot be declared as `attr :inner_block`, and
+      # the slot's content lives at the call site, not inside the cut
+      src =
+        wrap("""
+            <section class="wrap">
+              <h2>{@title}</h2>
+              <div class="body">
+                <p>{@lead}</p>
+                {render_slot(@inner_block)}
+                <footer>{@note}</footer>
+              </div>
+            </section>
+        """)
+
+      refute Enum.any?(find(src), fn c -> c.accepted and "inner_block" in c.assigns end)
+    end
   end
 
   describe "production thresholds (default gates, no opts)" do

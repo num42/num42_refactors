@@ -31,21 +31,74 @@ defmodule Number42.Refactors.Heex.ComponentNaming do
   @slug_max_chars 40
   @fallback :component
 
+  # Arity-1 function-components imported into every `use Phoenix.Component` /
+  # `use Phoenix.LiveView` module. A `defp <name>(assigns)` of the same name
+  # shadows the import and fails to compile ("conflicts with local function"),
+  # so a derived name landing on one of these must be suffixed away, exactly
+  # like a caller-supplied taken name. (Authoritative list via
+  # `Phoenix.Component.__info__(:functions)`.)
+  @phoenix_builtins ~w(form link live_component live_title live_img_preview
+                       live_file_input focus_wrap inputs_for intersperse
+                       dynamic_tag async_result portal to_form)a
+
+  # The function-components every `mix phx.new` project generates in its
+  # `CoreComponents` module and imports app-wide via `use MyAppWeb, :html`.
+  # Several share a name with an HTML tag (`header`, `table`, `list`), so a
+  # subtree on such a tag would otherwise be named into a clash with the
+  # imported component. Reserve the canonical generator set across Phoenix
+  # versions (current + legacy).
+  @core_component_defaults ~w(flash header input list table modal button error
+                              simple_form back icon label)a
+
+  # Semantic HTML tags that are also conventionally lifted into a project's
+  # `CoreComponents`/`Layouts` (a `<.header>`, `<.footer>`, `<.article>`). Their
+  # bare tag name is both a weak component name *and* a likely import clash, so
+  # the chain prefers a more meaningful source and only suffixes them as a last
+  # resort. Measured: `footer`/`article`/`header` recur as imported components
+  # across Phoenix apps; `section`/`main`/`nav`/`aside` rarely do.
+  @reusable_layout_tags ~w(header footer article)a
+
   @doc """
   The component name for `node` as a snake_case atom, avoiding any name in
   `taken` (a list of atoms) via a numeric suffix.
   """
   @spec derive(Tree.node_t(), [atom()]) :: atom()
   def derive(node, taken \\ []) do
-    base =
-      semantic_name(node) ||
-        class_hint_name(node) ||
-        heading_name(node) ||
-        gettext_name(node) ||
-        dominant_assign_name(node) ||
-        @fallback
+    taken = MapSet.new(taken)
 
-    disambiguate(base, MapSet.new(taken))
+    # the naming sources in priority order
+    candidates =
+      [
+        semantic_name(node),
+        class_hint_name(node),
+        heading_name(node),
+        gettext_name(node),
+        dominant_assign_name(node)
+      ]
+      |> Enum.reject(&is_nil/1)
+
+    # A *reserved* name (a Phoenix/CoreComponents builtin) is a poorly chosen
+    # source — a `<footer>` tag clashes with the imported `footer/1` — so prefer
+    # the next, more meaningful source. A merely *taken* name (already used in
+    # this module/pass) is the right name on a colliding instance, so suffix it.
+    base =
+      Enum.find(candidates, fn name -> not MapSet.member?(reserved(), name) end) ||
+        List.first(candidates) || @fallback
+
+    disambiguate(base, MapSet.union(taken, reserved()))
+  end
+
+  @doc """
+  Names that an extracted `defp` must never take because they would shadow an
+  imported function-component: the `Phoenix.Component` builtins plus the
+  `mix phx.new` `CoreComponents` defaults. Callers add module-local names
+  (local `def`s, invoked `<.foo>` components) via `derive/2`'s `taken` arg.
+  """
+  @spec reserved() :: MapSet.t(atom())
+  def reserved do
+    [@phoenix_builtins, @core_component_defaults, @reusable_layout_tags]
+    |> Enum.map(&MapSet.new/1)
+    |> Enum.reduce(&MapSet.union/2)
   end
 
   # ---- sources -------------------------------------------------------------

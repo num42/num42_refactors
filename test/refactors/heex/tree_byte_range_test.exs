@@ -98,5 +98,30 @@ defmodule Number42.Refactors.Heex.TreeByteRangeTest do
       {s, e} = Tree.node_byte_range(expr, body)
       assert binary_part(body, s, e - s) == "<%= Map.get(m, :k) %>"
     end
+
+    test "a `<%= case %>` block ends at its `<% end %>`, not swallowing siblings" do
+      # case clauses `<% x -> %>` are NOT block openers; only `do` opens an
+      # end-terminated block. A naive `->`-as-opener balancer over-scans past
+      # the single `<% end %>` and eats the trailing `</div>`.
+      body = """
+      <div>
+        <%= case @k do %>
+          <% :a -> %>
+            <span>{@a}</span>
+          <% :b -> %>
+            <span>{@b}</span>
+        <% end %>
+      </div>
+      """
+
+      {:ok, [{:element, "div", _, children, _}]} = Tree.parse_body(body)
+      block = Enum.find(children, &match?({:eex_block, _, _, _}, &1))
+
+      {s, e} = Tree.node_byte_range(block, body)
+      frag = binary_part(body, s, e - s)
+
+      assert String.ends_with?(String.trim_trailing(frag), "<% end %>")
+      refute frag =~ "</div>"
+    end
   end
 end

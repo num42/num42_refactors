@@ -50,4 +50,37 @@ defmodule Number42.Refactors.Heex.ComponentNamingTest do
       assert ComponentNaming.derive(n, []) == :section
     end
   end
+
+  describe "derive/2 — reserved names" do
+    test "a reserved semantic-tag name falls through to a meaningful source" do
+      # <footer> would name :footer (clashes with CoreComponents.footer/1); a
+      # heading is a better name than a numeric-suffixed :footer_2 anyway
+      n = parse(~S|<footer class="x"><h3>Contact Info</h3><p>{@a}</p></footer>|)
+      assert ComponentNaming.derive(n, []) == :contact_info
+    end
+
+    test "a reserved name with no alternative source is suffixed, not made generic" do
+      # nothing else to go on: a suffixed tag name still beats :component
+      n = parse(~S|<form class="x"><input name="a" /><button>Go</button></form>|)
+      refute ComponentNaming.derive(n, []) == :form
+      assert ComponentNaming.derive(n, []) == :form_2
+    end
+
+    test "a dominant-assign name clashing with a builtin falls through / is suffixed" do
+      # dominant assign @link clashes with Phoenix.Component.link/1
+      n = parse(~S|<div><a href={@link}>{@link}</a><span>{@link}</span></div>|)
+      refute ComponentNaming.derive(n, []) == :link
+    end
+
+    test "module-taken names (caller-supplied) are avoided too" do
+      # dominant assign @report names it :report; a local def report/1 is taken
+      n = parse(~S|<div><p>{@report}</p><p>{@report}</p><span>{@report}</span></div>|)
+      assert ComponentNaming.derive(n, [:report]) == :report_2
+    end
+
+    test "a reserved name falls through past taken to the next real source" do
+      n = parse(~S|<footer><h3>Order Total</h3><p>{@a}</p></footer>|)
+      assert ComponentNaming.derive(n, [:order_total]) == :order_total_2
+    end
+  end
 end
