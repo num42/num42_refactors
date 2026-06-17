@@ -179,7 +179,18 @@ defmodule Number42.Refactors.Ex.PromoteRepeatedPrivateHelpers do
   end
 
   @impl Number42.Refactors.Refactor
-  def prepare(opts), do: Keyword.get(opts, :source_files) |> prepared_for_paths(opts)
+  def prepare(opts) do
+    if Keyword.get(opts, :enabled, false) do
+      Keyword.get(opts, :source_files) |> prepared_for_paths(opts)
+    else
+      # Default-OFF: do no planning and — crucially — no disk writes when
+      # the refactor isn't opted in. `build_plan/2` writes the support
+      # `.ex` file as a side effect, so an unconditional `prepare/1` would
+      # spill a `Support` module into cwd on every normal `mix refactor`
+      # run even though `transform/2` is a no-op here (#275).
+      :no_cache
+    end
+  end
 
   @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
