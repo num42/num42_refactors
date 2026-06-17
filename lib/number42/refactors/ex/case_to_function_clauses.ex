@@ -123,6 +123,11 @@ defmodule Number42.Refactors.Ex.CaseToFunctionClauses do
     end
   end
 
+  @impl Number42.Refactors.Refactor
+  def patches(ast, source, opts) do
+    if Keyword.get(opts, :enabled, false), do: build_patches(ast, source), else: []
+  end
+
   defp apply_patches({:ok, ast}, source),
     do: build_patches(ast, source) |> patch_or_passthrough(source)
 

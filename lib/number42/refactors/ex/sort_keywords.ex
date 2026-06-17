@@ -82,6 +82,9 @@ defmodule Number42.Refactors.Ex.SortKeywords do
   # to keep pathological inputs from looping.
   @max_passes 5
 
+  @impl Number42.Refactors.Refactor
+  def patches(ast, source, _opts), do: build_patches(ast, source)
+
   defp apply_patches({:ok, ast}, passes, source),
     do:
       build_patches(ast, source)

@@ -91,6 +91,9 @@ defmodule Number42.Refactors.Ex.IfElseToCond do
     end
   end
 
+  @impl Number42.Refactors.Refactor
+  def patches(ast, _source, _opts), do: build_patches(ast)
+
   defp apply_patches([], source), do: source
   defp apply_patches(patches, source), do: Sourceror.patch_string(source, patches)
 

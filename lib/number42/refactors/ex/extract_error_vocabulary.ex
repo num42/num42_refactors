@@ -121,6 +121,16 @@ defmodule Number42.Refactors.Ex.ExtractErrorVocabulary do
     end
   end
 
+  @impl Number42.Refactors.Refactor
+  def patches(ast, _source, opts) do
+    if Keyword.get(opts, :enabled, false) do
+      min = Keyword.get(opts, :min_occurrences, @default_min_occurrences)
+      build_patches(ast, min)
+    else
+      []
+    end
+  end
+
   defp apply_patches({:ok, ast}, source, min),
     do: ast |> build_patches(min) |> patch_or_passthrough(source)
 

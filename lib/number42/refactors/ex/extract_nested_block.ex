@@ -81,6 +81,12 @@ defmodule Number42.Refactors.Ex.ExtractNestedBlock do
     Sourceror.parse_string(source) |> apply_patches(max_nesting, source)
   end
 
+  @impl Number42.Refactors.Refactor
+  def patches(ast, _source, opts) do
+    max_nesting = Keyword.get(opts, :max_nesting, @default_max_nesting)
+    build_patches(ast, max_nesting)
+  end
+
   defp apply_patches({:ok, ast}, max_nesting, source),
     do:
       build_patches(ast, max_nesting)

@@ -123,6 +123,9 @@ defmodule Number42.Refactors.Ex.AliasUsage do
     end
   end
 
+  @impl Number42.Refactors.Refactor
+  def patches(ast, _source, _opts), do: build_patches(ast)
+
   defp apply_patches({:ok, ast}, source), do: build_patches(ast) |> patch_or_passthrough(source)
   defp apply_patches({:error, _}, source), do: source
 

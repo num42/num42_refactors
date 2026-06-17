@@ -107,6 +107,12 @@ defmodule Number42.Refactors.Ex.UnusedVariable do
     Sourceror.parse_string(source) |> apply_patches(source, whitelist)
   end
 
+  @impl Number42.Refactors.Refactor
+  def patches(ast, _source, opts) do
+    whitelist = opts |> Keyword.get(:whitelist, @default_whitelist) |> MapSet.new()
+    build_patches(ast, whitelist)
+  end
+
   defp all_clauses(args), do: List.last(args) |> all_clauses_last()
 
   defp all_clauses_last(kw) when is_list(kw) do
