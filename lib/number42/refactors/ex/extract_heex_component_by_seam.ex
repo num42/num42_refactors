@@ -409,8 +409,8 @@ defmodule Number42.Refactors.Ex.ExtractHeexComponentBySeam do
   defp decline_reason(node, sigil, own, leak, free, kind, gates) do
     [
       {fn -> MapSet.size(own) == 0 end, "reads no assigns"},
-      {fn -> MapSet.member?(own, "inner_block") end,
-       "reads @inner_block (the implicit default slot)"},
+      {fn -> framework_assign(own) != nil end,
+       "reads framework-managed @#{framework_assign(own)} (not a plain attr)"},
       {fn -> leak > gates.max_leak end,
        "assign leak #{Float.round(leak, 2)} > #{gates.max_leak}"},
       {fn -> free != [] end, "free non-assign vars: #{Enum.join(free, ", ")}"},
@@ -422,6 +422,16 @@ defmodule Number42.Refactors.Ex.ExtractHeexComponentBySeam do
        "would leave a non-static stateful root"}
     ]
     |> Enum.find_value(fn {predicate, reason} -> if predicate.(), do: reason end)
+  end
+
+  # Phoenix/LiveView populates these assigns on the socket itself; they are not
+  # plain values an extracted component can take as an `attr` (`@uploads` from
+  # `allow_upload/3`, `@inner_block` the default slot, `@streams` the stream
+  # registry, `@flash`/`@socket`/`@myself` connection state). A cut reading any
+  # of them cannot be lifted to a standalone attr-only component (#294).
+  @framework_assigns ~w(inner_block uploads streams flash socket myself)
+  defp framework_assign(own) do
+    Enum.find(@framework_assigns, &MapSet.member?(own, &1))
   end
 
   # ---- #294 Bug C: stateful single-static-root invariant -------------------
