@@ -62,6 +62,64 @@ defmodule Number42.Refactors.Ex.PromoteRepeatedPrivateHelpersTest do
       result_a = apply_refactor(@subject, a, prepared: plan, enabled: true)
       refute result_a =~ "defp patch"
     end
+
+    test "prepare/1 does no planning and writes no file when not enabled", %{tmp: tmp} do
+      # Regression for #275: the engine calls prepare/1 for every pipeline
+      # module — including this default-OFF one — on a NORMAL (non-dry-run)
+      # run. prepare/1 must not invoke build_plan/2 (whose side effect is a
+      # disk write) unless the refactor is actually opted in; otherwise a
+      # `Support` .ex is spilled into the write root even though transform/2
+      # is a no-op.
+      a_path = Path.join(tmp, "a.ex")
+      b_path = Path.join(tmp, "b.ex")
+
+      File.write!(a_path, """
+      defmodule MyApp.Items.A do
+        def caller(x), do: patch(x, 1)
+
+        defp patch(target, n) do
+          target
+          |> Map.put(:patched, true)
+          |> Map.put(:n, n)
+        end
+      end
+      """)
+
+      File.write!(b_path, """
+      defmodule MyApp.Items.B do
+        def other(y), do: patch(y, 2)
+
+        defp patch(target, n) do
+          target
+          |> Map.put(:patched, true)
+          |> Map.put(:n, n)
+        end
+      end
+      """)
+
+      support_path = Path.join(tmp, "lib/my_app/items/support.ex")
+
+      # Default-OFF (no `enabled: true`): prepare/1 skips entirely.
+      assert PromoteRepeatedPrivateHelpers.prepare(
+               source_files: [a_path, b_path],
+               write_root: tmp,
+               min_mass: 5
+             ) == :no_cache
+
+      refute File.exists?(support_path)
+
+      # Opted in: prepare/1 plans and (since not dry_run) writes as before.
+      assert {:ok, plan} =
+               PromoteRepeatedPrivateHelpers.prepare(
+                 source_files: [a_path, b_path],
+                 write_root: tmp,
+                 min_mass: 5,
+                 enabled: true
+               )
+
+      assert Map.has_key?(plan, MyApp.Items.A)
+      assert File.exists?(support_path)
+    end
   end
 
   describe "rewrites — identical helper in two modules" do
