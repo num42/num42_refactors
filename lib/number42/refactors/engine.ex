@@ -257,24 +257,135 @@ defmodule Number42.Refactors.Engine do
 
   defp run_fixpoint(modules, configured, source, passes_left, reformat?, applied) do
     {new_source, reformat_now?, applied_after} =
-      modules
-      |> Enum.reduce({source, reformat?, applied}, fn module, {acc, needs_reformat?, log} ->
-        module_opts = Keyword.get(configured, module, [])
-        rewritten = apply_refactor(module, acc, module_opts)
-
-        if rewritten == acc do
-          {acc, needs_reformat?, log}
-        else
-          entry = %{after: rewritten, before: acc, module: module}
-          {rewritten, needs_reformat? or reformat_after?(module), [entry | log]}
-        end
-      end)
+      run_pass(modules, configured, {source, reformat?, applied})
 
     if new_source == source do
       {new_source, reformat_now?, applied_after}
     else
       run_fixpoint(modules, configured, new_source, passes_left - 1, reformat_now?, applied_after)
     end
+  end
+
+  # One fixpoint pass. Walks the priority-sorted modules, batching
+  # consecutive parse-share-capable refactors (those implementing
+  # `patches/3`) into a single parse + single render — but ONLY when their
+  # patch ranges are pairwise disjoint, which makes the shared render
+  # byte-identical to running them sequentially. Anything else (non-capable
+  # module, range overlap, parse error) falls back to the per-module
+  # `transform/2` path. Per-module `--log` entries are preserved exactly.
+  defp run_pass(modules, configured, state) do
+    modules
+    |> chunk_shareable(configured)
+    |> Enum.reduce(state, fn
+      {:shared, batch}, acc -> apply_shared_batch(batch, configured, acc)
+      {:solo, module}, acc -> apply_solo(module, configured, acc)
+    end)
+  end
+
+  # Group the module list into {:shared, [m...]} runs of consecutive
+  # parse-share-capable modules and {:solo, m} for the rest, preserving order.
+  defp chunk_shareable(modules, configured) do
+    modules
+    |> Enum.chunk_by(&shareable?(&1, configured))
+    |> Enum.flat_map(fn
+      [first | _] = group ->
+        if shareable?(first, configured),
+          do: [{:shared, group}],
+          else: Enum.map(group, &{:solo, &1})
+    end)
+  end
+
+  defp shareable?(module, _configured), do: function_exported?(module, :patches, 3)
+
+  defp apply_solo(module, configured, {acc, needs_reformat?, log}) do
+    module_opts = Keyword.get(configured, module, [])
+    rewritten = apply_refactor(module, acc, module_opts)
+    record(module, acc, rewritten, needs_reformat?, log)
+  end
+
+  # Parse once, ask every batch module for its patches against the SAME ast,
+  # render once iff all ranges are pairwise disjoint. Otherwise fall back to
+  # running the whole batch sequentially (still correct, no speedup).
+  defp apply_shared_batch([single], configured, state),
+    do: apply_solo(single, configured, state)
+
+  defp apply_shared_batch(batch, configured, {acc, needs_reformat?, log} = state) do
+    case Sourceror.parse_string(acc) do
+      {:ok, ast} ->
+        per_module =
+          Enum.map(batch, fn module ->
+            opts = Keyword.get(configured, module, [])
+
+            if skip_for_source?(opts, acc),
+              do: {module, []},
+              else: {module, module.patches(ast, acc, opts)}
+          end)
+
+        all_patches = Enum.flat_map(per_module, fn {_m, ps} -> ps end)
+
+        if disjoint?(all_patches) do
+          render_shared(per_module, acc, needs_reformat?, log)
+        else
+          batch_sequential(batch, configured, state)
+        end
+
+      {:error, _} ->
+        batch_sequential(batch, configured, state)
+    end
+  end
+
+  # Disjoint case: one render for the whole batch, but per-module log entries
+  # computed from each module's own patches so `--log` stays sequential-faithful.
+  defp render_shared(per_module, source, needs_reformat?, log) do
+    log_after =
+      Enum.reduce(per_module, {needs_reformat?, log}, fn {module, patches}, {nr?, lg} ->
+        case patches do
+          [] -> {nr?, lg}
+          ps -> record_only(module, source, Sourceror.patch_string(source, ps), nr?, lg)
+        end
+      end)
+
+    {nr?, lg} = log_after
+    all = Enum.flat_map(per_module, fn {_m, ps} -> ps end)
+    rendered = if all == [], do: source, else: Sourceror.patch_string(source, all)
+    {rendered, nr?, lg}
+  end
+
+  defp batch_sequential(batch, configured, state),
+    do: Enum.reduce(batch, state, fn module, acc -> apply_solo(module, configured, acc) end)
+
+  defp record(module, before, after_src, needs_reformat?, log) do
+    if after_src == before do
+      {before, needs_reformat?, log}
+    else
+      entry = %{after: after_src, before: before, module: module}
+      {after_src, needs_reformat? or reformat_after?(module), [entry | log]}
+    end
+  end
+
+  # Like record/5 but does not advance the source (the shared render does that);
+  # only appends the log entry + reformat flag for this module's contribution.
+  defp record_only(module, before, after_src, needs_reformat?, log) do
+    if after_src == before do
+      {needs_reformat?, log}
+    else
+      entry = %{after: after_src, before: before, module: module}
+      {needs_reformat? or reformat_after?(module), [entry | log]}
+    end
+  end
+
+  # Pairwise-disjoint check over patch ranges. Sort by start; adjacent
+  # non-overlap implies global non-overlap.
+  defp disjoint?(patches) when length(patches) < 2, do: true
+
+  defp disjoint?(patches) do
+    patches
+    |> Enum.map(& &1.range)
+    |> Enum.sort_by(&{&1.start[:line], &1.start[:column]})
+    |> Enum.chunk_every(2, 1, :discard)
+    |> Enum.all?(fn [a, b] ->
+      {a.end[:line], a.end[:column]} <= {b.start[:line], b.start[:column]}
+    end)
   end
 
   defp skip_for_source_get([], _source), do: false
