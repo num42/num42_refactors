@@ -93,6 +93,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `ExtractToPipeline` (#267): now converges in a single pass. Piping an outer `Enum`/`Stream` call also pipes eligible nested calls (in the first arg or inside a closure rest arg) within the same patch, instead of leaving them for a follow-up pass — `apply(apply(s)) == apply(s)`.
 - `PromoteRepeatedPrivateHelpers` (#257): promoting a **multi-clause** private
   helper no longer mangles the source. The helper's own `defp` clauses are now
   excluded from call-site scanning before rewriting — a clause *head*

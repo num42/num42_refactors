@@ -122,8 +122,15 @@ defmodule Number42.Refactors.Ex.ExtractToPipeline do
          {:ok, rest_text} <- render_rest(rest) do
       mod_str = Atom.to_string(mod)
       fun_str = Atom.to_string(fun)
-      lhs = wrap_if_low_precedence(first, first_text)
-      replacement = "#{lhs} |> #{mod_str}.#{fun_str}(#{rest_text})"
+      # Recurse into the rewritten children so eligible nested calls are
+      # piped in the SAME pass. The replacement is one string patch and
+      # Sourceror rejects overlapping ranges, so we cannot emit a second
+      # patch for an inner call — instead we pipe the inner calls inside
+      # the rendered fragments. Each fragment is a fresh top-level source
+      # context, so the transform's pipe/precedence/capture guards apply
+      # correctly without inheriting the outer node's flags.
+      lhs = wrap_if_low_precedence(first, pipe_nested(first_text))
+      replacement = "#{lhs} |> #{mod_str}.#{fun_str}(#{pipe_nested(rest_text)})"
       {:patch, Patch.replace(node, replacement)}
     else
       _ -> :no_patch
@@ -140,6 +147,13 @@ defmodule Number42.Refactors.Ex.ExtractToPipeline do
 
   defp patch_or_passthrough([], source), do: source
   defp patch_or_passthrough(patches, source), do: source |> Sourceror.patch_string(patches)
+
+  # Re-run the rewrite on a rendered argument fragment so nested
+  # eligible Enum/Stream calls are piped within the same patch. Empty
+  # (zero rest args) passes straight through.
+  defp pipe_nested(""), do: ""
+  defp pipe_nested(fragment), do: transform(fragment, [])
+
   defp render_rest([]), do: {:ok, ""}
 
   defp render_rest(args) do
