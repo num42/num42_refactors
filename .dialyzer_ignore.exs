@@ -160,9 +160,12 @@
   # accumulates assign-name `MapSet`s through `Tree.walk/3` (a `term()`
   # accumulator). Both produce the concrete-struct-vs-opaque mismatch. The
   # values genuinely are `MapSet`s; same false positive, same per-file scoping.
+  # `ExtractToPublicComponent` (#299) accumulates assign-name `MapSet`s through
+  # the identical `Tree.walk/3` pattern (shared with the seam) and joins too.
   {"lib/number42/refactors/heex/scope.ex", :call_without_opaque},
   {"lib/number42/refactors/heex/scope.ex", :call_with_opaque},
   {"lib/number42/refactors/ex/extract_heex_component_by_seam.ex", :call_without_opaque},
+  {"lib/number42/refactors/ex/extract_to_public_component.ex", :call_without_opaque},
 
   # ---------------------------------------------------------------------------
   # Category C — dev-only generator deps absent from the PLT.
