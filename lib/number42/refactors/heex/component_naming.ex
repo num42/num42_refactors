@@ -24,7 +24,7 @@ defmodule Number42.Refactors.Heex.ComponentNaming do
   against already-taken names with a numeric suffix.
   """
 
-  alias Number42.Refactors.Heex.{StructureMotif, Tree}
+  alias Number42.Refactors.Heex.{Motif, StructureMotif, Tree}
 
   @semantic_tags ~w(section article header footer aside main nav table form dialog fieldset details figure)
 
@@ -99,6 +99,39 @@ defmodule Number42.Refactors.Heex.ComponentNaming do
         List.first(candidates) || @fallback
 
     disambiguate(base, MapSet.union(taken, reserved()))
+  end
+
+  @doc """
+  Name an extracted subtree for a **shared public** component, deduplicating
+  reuse so two subtrees the caller considers equivalent map to one component
+  name (real reuse) instead of `name` + `name_2`.
+
+  `cache` is a `%{dedup_key => atom()}` threaded across the corpus. The dedup
+  key defaults to the subtree's structural motif (`Heex.Motif.key/1`); pass
+  `:dedup_key` in `opts` to override it — e.g. `{motif_key, sorted_assigns}` so
+  that structurally-identical subtrees reading *different* assigns get distinct
+  components (a shared `def` declaring `attr :rows` cannot serve a `@records`
+  call site). A subtree whose dedup key is already cached returns that same
+  name (even when it is in `taken` — a repeat occurrence *should* reuse it). A
+  new key derives a fresh name via `derive/2` (disambiguated against `taken`)
+  and records it. Returns `{name, updated_cache}`.
+
+  Unlike `derive/2` (private `defp`, always a fresh local name), this is for a
+  public `def` in a Components module shared across files: equivalence is the
+  reuse signal, so equivalent shapes converge on one definition.
+  """
+  @spec derive_shared(Tree.node_t(), [atom()], map(), keyword()) :: {atom(), map()}
+  def derive_shared(node, taken \\ [], cache \\ %{}, opts \\ []) do
+    key = Keyword.get_lazy(opts, :dedup_key, fn -> Motif.key(node) end)
+
+    case Map.get(cache, key) do
+      nil ->
+        name = derive(node, taken)
+        {name, Map.put(cache, key, name)}
+
+      name ->
+        {name, cache}
+    end
   end
 
   @doc """

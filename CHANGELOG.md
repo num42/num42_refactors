@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ExtractToPublicComponent` (#299): a default-OFF HEEx refactor that lifts a
+  motif-classified `~H` subtree into its **own public file component module**
+  (`lib/<app>_web/components/<name>.ex`) other modules can call — the public,
+  cross-module analogue of `ExtractHeexComponentBySeam` (which extracts a
+  private `defp` in place). Detection fires only when `Heex.StructureMotif`
+  recognises a motif (a `data_table`/`select_field`/… is a reuse signal),
+  with the same safety declines as the seam (no free var, no framework-managed
+  assign, no orphaned slot). A body carrying `phx-` events becomes a stateful
+  `:live_component` (own `update/2` + `render/1`, called `<.live_component
+  module={…} id={…} …/>`); a presentational one becomes a stateless `:html`
+  function component (`<Alias.name …/>`). The new module reproduces the
+  caller's `use <App>Web, …` plus the `import`/`alias` directives the body
+  actually references (single-component imports kept by the `<.snake_case>`
+  convention, `*Components` collection imports kept conservatively) so lifted
+  `<.sub_component>`/`~p` references still resolve. A body calling a
+  caller-local `def`/`defp` (as a function or a `<.local>` component) is
+  declined — it could not resolve in the new module. The configured
+  `core_components_module` is **never** a source (assumed correctly scoped by
+  the project). `Heex.ComponentNaming.derive_shared/4` is added so
+  structurally-identical subtrees (same `Heex.Motif.key`, same assigns)
+  converge on one shared component. Dogfooded against position-db: 37 cuts → 34
+  new component modules, `mix compile` clean (0 errors).
 - `Heex.ComponentNaming` (#277): an extracted HEEx component is now named by
   its **structural motif** when one is recognised. A new source #0 prepends
   `StructureMotif.classify/1` to the naming chain, so a block that *is* a data

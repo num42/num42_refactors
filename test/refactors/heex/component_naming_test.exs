@@ -191,4 +191,40 @@ defmodule Number42.Refactors.Heex.ComponentNamingTest do
       assert ComponentNaming.derive(n, []) == :payment
     end
   end
+
+  describe "derive_shared/3 — motif-keyed dedup for shared public components" do
+    test "structurally identical subtrees share one name" do
+      a = parse(~S|<section class="x"><h2>One</h2><p>{@a}</p></section>|)
+      b = parse(~S|<section class="x"><h2>Two</h2><p>{@b}</p></section>|)
+
+      cache = %{}
+      {name_a, cache} = ComponentNaming.derive_shared(a, [], cache)
+      {name_b, _cache} = ComponentNaming.derive_shared(b, [], cache)
+
+      # same structural motif → same component, not section + section_2
+      assert name_a == name_b
+    end
+
+    test "structurally different subtrees get distinct names" do
+      a = parse(~S|<section class="x"><h2>One</h2><p>{@a}</p></section>|)
+      b = parse(~S|<article class="y"><h2>Two</h2><p>{@b}</p><p>{@c}</p></article>|)
+
+      cache = %{}
+      {name_a, cache} = ComponentNaming.derive_shared(a, [], cache)
+      {name_b, _cache} = ComponentNaming.derive_shared(b, [], cache)
+
+      refute name_a == name_b
+    end
+
+    test "the returned cache reuses the name on a repeat key without re-disambiguating" do
+      a = parse(~S|<section class="x"><h2>One</h2><p>{@a}</p></section>|)
+      b = parse(~S|<section class="x"><h2>Two</h2><p>{@b}</p></section>|)
+
+      {name_a, cache} = ComponentNaming.derive_shared(a, [], %{})
+      # `section` is now taken, but b shares a's key → reuse, do not suffix
+      {name_b, _cache} = ComponentNaming.derive_shared(b, [name_a], cache)
+
+      assert name_b == name_a
+    end
+  end
 end
