@@ -85,6 +85,30 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
       )
     end
 
+    test "a punctuation delimiter param does not leak into the name" do
+      # `String.split(entry, ":", parts: 4)` — the `":"` is a delimiter,
+      # not a subject. It must not become part of the attribute name (a
+      # raw `:` would yield the uncompilable `@:_parts`). With no usable
+      # param the key stands alone, enriched only by the call noun if any.
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def a(e), do: String.split(e, ":", parts: 4)
+          def b(e), do: String.split(e, ":", parts: 4)
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          @parts 4
+          def a(e), do: String.split(e, ":", parts: @parts)
+          def b(e), do: String.split(e, ":", parts: @parts)
+        end
+        ''',
+        @on
+      )
+    end
+
     test "falls back to the enclosing function name when the call has no literal param" do
       assert_rewrites(
         @subject,

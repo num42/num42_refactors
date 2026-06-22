@@ -66,6 +66,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `@password_max_length`. With no literal param, a thin wrapper around a
     like-named call borrows the function name (`def show, do: JS.show(time:
     300)` → `@show_time`); an unrelated enclosing function is not used.
+  - **Every derived name is a valid attribute stem** — name tokens are
+    sanitized to `[a-z0-9_]` and any with no letter is dropped, so a delimiter
+    param (`String.split(e, ":", parts: 4)`) no longer leaked a `:` into the
+    name (the uncompilable `@:_parts`); it now yields `@parts`. A key that
+    sanitizes to nothing (a bare `:` / all-punctuation) is rejected and the
+    value falls through to a valid name.
 
 ### Removed
 

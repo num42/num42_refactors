@@ -459,8 +459,10 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
     for kw_list <- args,
         is_list(kw_list),
         {{:__block__, _, [key]}, {:__block__, _, [value]} = value_node} <- kw_list,
-        is_atom(key) and is_number(value) and key not in @block_keywords do
-      {value_node, enriched_name([subject, Atom.to_string(key), noun])}
+        is_atom(key) and is_number(value) and key not in @block_keywords,
+        name = enriched_name([subject, Atom.to_string(key), noun]),
+        name != "" do
+      {value_node, name}
     end
   end
 
@@ -499,17 +501,27 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
     end)
   end
 
-  # Join the available tokens into a single snake_case name, dropping nils
-  # and de-duplicating repeats while preserving order
-  # (`["email", "max", "length"]` → `"email_max_length"`,
-  # `["size", "size", nil]` → `"size"`).
+  # Join the available tokens into one snake_case name: drop nils, split
+  # on `_`, sanitize each subtoken to `[a-z0-9_]` and drop any that keep
+  # no letter (a delimiter like `":"` carries no name), then dedup in
+  # order (`["email", "max", "length"]` → `"email_max_length"`,
+  # `[":", "parts", nil]` → `"parts"`). Always a valid attribute stem, or
+  # `""` when nothing nameable survives — callers treat `""` as "no key".
   defp enriched_name(tokens) do
     tokens
     |> Enum.reject(&(&1 in [nil, ""]))
     |> Enum.flat_map(&String.split(&1, "_", trim: true))
+    |> Enum.flat_map(&sanitize_subtoken/1)
     |> Enum.dedup()
     |> Enum.uniq()
     |> Enum.join("_")
+  end
+
+  defp sanitize_subtoken(token) do
+    cleaned =
+      token |> String.downcase() |> String.replace(~r/[^a-z0-9]+/, "_") |> String.trim("_")
+
+    if cleaned == "" or not String.match?(cleaned, ~r/[a-z]/), do: [], else: [cleaned]
   end
 
   # [{value, hits}] → [{name, value, hits}] with collision-suffixed

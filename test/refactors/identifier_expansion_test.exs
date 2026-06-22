@@ -654,6 +654,19 @@ defmodule Number42.Refactors.IdentifierExpansionTest do
       assert "enabled" =
                IdentifierExpansion.derive_constant_name(true, %{key: "enabled?"})
     end
+
+    test "a key with no letters is rejected, not emitted raw" do
+      # A bare `:` or all-punctuation key would yield an uncompilable
+      # `@:_parts` / `@%%%`. With nothing to sanitize into a stem, the
+      # value falls through to a valid name.
+      assert "int_4" = IdentifierExpansion.derive_constant_name(4, %{key: ":"})
+      assert "int_4" = IdentifierExpansion.derive_constant_name(4, %{key: "%%%"})
+    end
+
+    test "a sanitizable key is normalized to a valid stem" do
+      assert "weird_name" = IdentifierExpansion.derive_constant_name(4, %{key: "weird-name"})
+      assert "foo_bar" = IdentifierExpansion.derive_constant_name(4, %{key: ":foo bar"})
+    end
   end
 
   describe "derive_constant_name/2 — well-known math values" do

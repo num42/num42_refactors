@@ -859,11 +859,30 @@ defmodule Number42.Refactors.IdentifierExpansion do
         }) :: String.t()
   def derive_constant_name(value, opts \\ %{}) do
     cond do
-      key = Map.get(opts, :key) -> strip_marker(key)
+      name = key_name(Map.get(opts, :key)) -> name
       name = clause_name(Map.get(opts, :clause)) -> name
       name = context_name(value, Map.get(opts, :context)) -> name
       true -> derive_constant_name_from_value(value, temporal_signal?(opts))
     end
+  end
+
+  # A key becomes the name only if it sanitizes to a valid attribute stem
+  # (`?`/`!` markers stripped, non-identifier characters folded to `_`,
+  # at least one letter). A key that survives to nothing — a bare `:` or
+  # all-punctuation — yields nil so the value falls through to a valid
+  # name; emitting it raw would produce an uncompilable `@:_parts`.
+  defp key_name(nil), do: nil
+
+  defp key_name(key) do
+    case key |> strip_marker() |> sanitize_stem() do
+      "" -> nil
+      stem -> stem
+    end
+  end
+
+  defp sanitize_stem(str) do
+    cleaned = str |> String.downcase() |> String.replace(~r/[^a-z0-9]+/, "_") |> String.trim("_")
+    if String.match?(cleaned, ~r/[a-z]/), do: cleaned, else: ""
   end
 
   # Whether the enclosing key/context licenses a temporal or relative
