@@ -388,6 +388,7 @@ defmodule Mix.Tasks.Refactor do
   # actually constrains these refactors.
   @source_files_refactors [
     Number42.Refactors.Ex.DelegateExactDuplicates,
+    Number42.Refactors.Ex.DropRedundantAttrDefaults,
     Number42.Refactors.Ex.ExtractParametricClone,
     Number42.Refactors.Ex.ExtractRenamedClone,
     Number42.Refactors.Ex.ExtractSharedModule,
