@@ -426,6 +426,13 @@ Refactors that operate on HEEx templates (inline `~H` sigils and
 > Extract `<%= for %>` bodies in `~H` sigils into private
 > function-components.
 
+### `Number42.Refactors.Ex.NormalizeComponentInvocationOrder`
+
+> Order `<.name …/>` call-site attrs to match the component's `attr`
+> declaration order. Directives (`:for`/`:if`/`:let`) stay first,
+> unknown/`phx-*` attrs keep their order after the declared ones.
+> Default-OFF; declines when the component can't be resolved.
+
 ## Type & API Safety
 
 Refactors that fix specific bug patterns rather than style issues.

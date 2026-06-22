@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `NormalizeComponentInvocationOrder` (#312): a default-OFF HEEx refactor that
+  reorders the attributes at a `<.name …/>` call site to match the order the
+  target component declares its `attr`s (purely cosmetic — HEEx attr order does
+  not affect rendering). Structural directives (`:for`/`:if`/`:let`) always stay
+  first, declared attrs follow in declaration order, and unknown/global/`phx-*`
+  attrs keep their relative order after the declared ones. Each attr is spliced
+  verbatim (quoting/interpolation preserved); only the open tag is touched
+  (children of an open/close call site are untouched). The declared order is
+  resolved across the corpus in `prepare/1` from the component's module — a
+  local `def`, or via the call site's `import`/`alias`; a call site that cannot
+  be grounded in a real declaration (plain HTML tag, unknown module, ambiguous
+  import) is **declined** rather than guessed. Idempotent. Dogfooded against
+  position-db (10 files reordered, 0 non-idempotent) and whk_portal_umbrella
+  (5 files; surfaced a `Heex.Tree` range bug #348 — the refactor defends against
+  the degenerate range and skips the node).
 - `ExtractToPublicComponent` (#299): a default-OFF HEEx refactor that lifts a
   motif-classified `~H` subtree into its **own public file component module**
   (`lib/<app>_web/components/<name>.ex`) other modules can call — the public,
