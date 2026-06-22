@@ -777,6 +777,93 @@ defmodule Number42.Refactors.IdentifierExpansionTest do
     end
   end
 
+  describe "derive_constant_name/2 — clause-head axis" do
+    test "function name + string pattern names the constant" do
+      assert "image_width_md" =
+               IdentifierExpansion.derive_constant_name(80, %{
+                 clause: {"image_width", "md"}
+               })
+    end
+
+    test "function name + atom pattern names the constant" do
+      assert "icon_size_large" =
+               IdentifierExpansion.derive_constant_name(96, %{
+                 clause: {"icon_size", :large}
+               })
+    end
+
+    test "clause beats well-known value (60 is not always seconds_per_minute)" do
+      assert "grid_columns_wide" =
+               IdentifierExpansion.derive_constant_name(60, %{
+                 clause: {"grid_columns", "wide"}
+               })
+    end
+
+    test "key still beats clause" do
+      assert "limit" =
+               IdentifierExpansion.derive_constant_name(80, %{
+                 key: "limit",
+                 clause: {"image_width", "md"}
+               })
+    end
+
+    test "clause beats call-context" do
+      assert "image_width_md" =
+               IdentifierExpansion.derive_constant_name(80, %{
+                 context: "slice",
+                 clause: {"image_width", "md"}
+               })
+    end
+
+    test "non-identifier pattern is sanitized to a valid stem" do
+      assert "padding_2xl" =
+               IdentifierExpansion.derive_constant_name(80, %{
+                 clause: {"padding", "2xl"}
+               })
+    end
+
+    test "numeric pattern falls back to the function name alone" do
+      assert "level_color" =
+               IdentifierExpansion.derive_constant_name(80, %{
+                 clause: {"level_color", 3}
+               })
+    end
+  end
+
+  describe "nameable?/2 — value-only fallback detection" do
+    test "a value-only int fallback is not meaningful" do
+      refute IdentifierExpansion.nameable?(42, %{})
+    end
+
+    test "a negative value-only int fallback is not meaningful" do
+      refute IdentifierExpansion.nameable?(-7, %{})
+    end
+
+    test "default_float fallback is not meaningful" do
+      refute IdentifierExpansion.nameable?(0.123_45, %{})
+    end
+
+    test "default_string fallback is not meaningful" do
+      refute IdentifierExpansion.nameable?("hello", %{})
+    end
+
+    test "a key-derived name is meaningful" do
+      assert IdentifierExpansion.nameable?(42, %{key: "limit"})
+    end
+
+    test "a clause-derived name is meaningful" do
+      assert IdentifierExpansion.nameable?(42, %{clause: {"image_width", "md"}})
+    end
+
+    test "a well-known integer is meaningful" do
+      assert IdentifierExpansion.nameable?(3600, %{})
+    end
+
+    test "a content-derived url is meaningful" do
+      assert IdentifierExpansion.nameable?("https://api.example.com/v1", %{})
+    end
+  end
+
   # -------------------------------------------------------------------
   # Helpers
   # -------------------------------------------------------------------

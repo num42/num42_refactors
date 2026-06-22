@@ -21,6 +21,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   via the Engine's existing per-file `skipped_modules`, keeping the Engine
   path-blind.
 
+### Changed
+
+- `ExtractMagicNumber` naming: derive a constant name from the enclosing
+  function clause when the literal *is* the clause body
+  (`defp image_width("md"), do: 80` → `@image_width_md`), via a new
+  `opts[:clause]` axis in `IdentifierExpansion.derive_constant_name/2` that
+  outranks the well-known/call-context axes. And a literal whose only derivable
+  name would be the bare value-in-name fallback (`int_240`, `default_float`,
+  `default_string`) is now left inline instead of hoisted — that indirection
+  carried no information the literal did not. Measured on position-db this cut
+  the touched-file count from 45 to 25, removing the entire `@int_*` block.
+  New predicate `IdentifierExpansion.nameable?/2` exposes the fallback test.
+
 ### Removed
 
 - `ExtractRepeatedGuardToDefguard`: removed. Measured against a real codebase

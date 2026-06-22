@@ -772,15 +772,21 @@ defmodule Number42.Refactors.IdentifierExpansion do
   1. `opts[:key]` — when the literal sat at `key: value` (a config
      keyword or a map entry), the key *is* the name (`base_url`,
      `timeout`). `?`/`!` markers are stripped.
-  2. `opts[:context]` — the surrounding call name (`String.slice`,
+  2. `opts[:clause]` — a `{function_name, pattern}` pair when the
+     literal was the body of a guard-free function clause
+     (`defp image_width("md"), do: 80`). The function plus its
+     discriminating pattern names the value (`image_width_md`); a
+     numeric/unnameable pattern leaves the function name alone. Carries
+     more meaning than the value, so it outranks the well-known axis.
+  3. `opts[:context]` — the surrounding call name (`String.slice`,
      `Enum.take`, …). A recognized call names a bound on its numeric
      argument (`slice → max_slice`, `take → max_take`). No match →
      fall through.
-  3. Well-known values — floats (`pi`, `e`, … within a tolerance) and
+  4. Well-known values — floats (`pi`, `e`, … within a tolerance) and
      integers (`60 → seconds_per_minute`, `1024 → kibi`, …).
-  4. Millisecond multiples — a round multiple of `1000` reads as a
+  5. Millisecond multiples — a round multiple of `1000` reads as a
      second-scaled timeout: `5000 → timeout_5s_ms`.
-  5. Value-in-name fallback — never fails and never collides:
+  6. Value-in-name fallback — never fails and never collides:
      integer → `int_<value>` (`int_42`, negatives `int_neg_7`),
      float → `default_float`. A URL or absolute path names itself from
      its content — host (sans `www.`/TLD) + path segments + `_url`,
@@ -823,15 +829,67 @@ defmodule Number42.Refactors.IdentifierExpansion do
   """
   @spec derive_constant_name(term(), %{
           optional(:key) => String.t() | atom() | nil,
-          optional(:context) => String.t() | atom() | nil
+          optional(:context) => String.t() | atom() | nil,
+          optional(:clause) => {String.t(), String.t() | atom() | number() | nil} | nil
         }) :: String.t()
   def derive_constant_name(value, opts \\ %{}) do
     cond do
       key = Map.get(opts, :key) -> strip_marker(key)
+      name = clause_name(Map.get(opts, :clause)) -> name
       name = context_name(value, Map.get(opts, :context)) -> name
       true -> derive_constant_name_from_value(value)
     end
   end
+
+  @doc """
+  Whether `derive_constant_name/2` produces a *meaningful* name for
+  `value` under `opts`, as opposed to a bare value-in-name fallback
+  (`int_42`, `default_float`, `default_string`).
+
+  A caller that hoists a literal into a `@name` only gains clarity when
+  the name says something the literal does not. When the only available
+  derivation is the value itself, the indirection is pure loss — the
+  caller should leave the literal inline. Returns `false` exactly for
+  those fallback names.
+  """
+  @spec nameable?(term(), map()) :: boolean()
+  def nameable?(value, opts \\ %{}) do
+    derive_constant_name(value, opts) not in fallback_names(value)
+  end
+
+  defp fallback_names(value) when is_integer(value), do: ["int_#{encode_int(value)}"]
+  defp fallback_names(value) when is_float(value), do: ["default_float"]
+  defp fallback_names(_value), do: ["default_string", "default_url", "constant"]
+
+  # Clause-head heuristic: a literal returned from a guard-free function
+  # clause (`defp image_width("md"), do: 80`) names itself after the
+  # function plus its discriminating pattern (`image_width_md`). The
+  # pattern carries the meaning the bare value lacks, so this outranks
+  # both the call-context and well-known axes. A numeric pattern adds no
+  # word, so the function name stands alone; an unnameable pattern (no
+  # surviving letters) likewise falls back to the function name.
+  defp clause_name(nil), do: nil
+
+  defp clause_name({fun, pattern}) when is_binary(fun) and fun != "" do
+    case pattern_token(pattern) do
+      nil -> fun
+      token -> "#{fun}_#{token}"
+    end
+  end
+
+  defp clause_name(_), do: nil
+
+  defp pattern_token(pattern) when is_atom(pattern) and not is_nil(pattern),
+    do: pattern_token(Atom.to_string(pattern))
+
+  defp pattern_token(pattern) when is_binary(pattern) do
+    case sanitize_token(pattern) do
+      [token] -> token
+      [] -> nil
+    end
+  end
+
+  defp pattern_token(_), do: nil
 
   # Call-name heuristic: an integer bounded by a recognized call gets a
   # bound-shaped name. Only fires for integers under a matching call —

@@ -65,27 +65,27 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
       )
     end
 
-    test "hoists a repeated float literal" do
+    test "hoists a repeated float literal when its key gives it a name" do
       assert_rewrites(
         @subject,
         ~S'''
         defmodule M do
-          def a, do: 19.99
-          def b, do: 19.99
+          def a, do: at(rate: 19.99)
+          def b, do: at(rate: 19.99)
         end
         ''',
         ~S'''
         defmodule M do
-          @default_float 19.99
-          def a, do: @default_float
-          def b, do: @default_float
+          @rate 19.99
+          def a, do: at(rate: @rate)
+          def b, do: at(rate: @rate)
         end
         ''',
         @on
       )
     end
 
-    test "two distinct repeated values get distinct names" do
+    test "two distinct repeated values: only the nameable one is hoisted" do
       assert_rewrites(
         @subject,
         ~S'''
@@ -97,9 +97,8 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
         ~S'''
         defmodule M do
           @seconds_per_hour 3600
-          @int_7200 7200
-          def a, do: {@seconds_per_hour, @int_7200}
-          def b, do: {@seconds_per_hour, @int_7200}
+          def a, do: {@seconds_per_hour, 7200}
+          def b, do: {@seconds_per_hour, 7200}
         end
         ''',
         @on
@@ -210,17 +209,17 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
         @subject,
         ~S'''
         defmodule M do
-          def f(404), do: :not_found
-          def g, do: 404
-          def h, do: 404
+          def f(3600), do: :match
+          def g, do: at(3600)
+          def h, do: at(3600)
         end
         ''',
         ~S'''
         defmodule M do
-          @int_404 404
-          def f(404), do: :not_found
-          def g, do: @int_404
-          def h, do: @int_404
+          @seconds_per_hour 3600
+          def f(3600), do: :match
+          def g, do: at(@seconds_per_hour)
+          def h, do: at(@seconds_per_hour)
         end
         ''',
         @on
@@ -300,6 +299,103 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
           @max_slice 200
           def a(x), do: String.slice(x, 0, @max_slice)
           def b(x), do: String.slice(x, 0, @max_slice)
+        end
+        ''',
+        @on
+      )
+    end
+  end
+
+  describe "clause-head names" do
+    test "derives a name from the function clause and its string pattern" do
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def image_width("md"), do: 80
+          def image_width(_), do: 80
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          @image_width_md 80
+          def image_width("md"), do: @image_width_md
+          def image_width(_), do: @image_width_md
+        end
+        ''',
+        @on
+      )
+    end
+
+    test "derives a name from the function clause and its atom pattern" do
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def icon_size(:large), do: 96
+          def icon_size(_), do: 96
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          @icon_size_large 96
+          def icon_size(:large), do: @icon_size_large
+          def icon_size(_), do: @icon_size_large
+        end
+        ''',
+        @on
+      )
+    end
+
+    test "a keyword key still beats the clause head" do
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def gap("md"), do: [size: 80]
+          def gap(_), do: [size: 80]
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          @size 80
+          def gap("md"), do: [size: @size]
+          def gap(_), do: [size: @size]
+        end
+        ''',
+        @on
+      )
+    end
+  end
+
+  describe "value-only fallback is left inline" do
+    test "a repeated literal with no derivable name is not hoisted" do
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          def a, do: foo(240)
+          def b, do: bar(240)
+        end
+        ''',
+        @on
+      )
+    end
+
+    test "a derivable literal in the same module is still hoisted" do
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def a, do: foo(240) + 3600
+          def b, do: bar(240) + 3600
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          @seconds_per_hour 3600
+          def a, do: foo(240) + @seconds_per_hour
+          def b, do: bar(240) + @seconds_per_hour
         end
         ''',
         @on

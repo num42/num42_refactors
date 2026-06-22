@@ -243,22 +243,23 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
   defp collect_occurrences(exprs, excluded) do
     keys = keyword_value_keys(exprs)
     contexts = call_contexts(exprs)
+    clauses = clause_contexts(exprs)
 
     exprs
-    |> Enum.flat_map(&literal_hits(&1, excluded, keys, contexts))
+    |> Enum.flat_map(&literal_hits(&1, excluded, keys, contexts, clauses))
     |> Enum.group_by(fn %{value: value} -> value end)
   end
 
-  defp literal_hits(expr, excluded, keys, contexts) do
+  defp literal_hits(expr, excluded, keys, contexts, clauses) do
     {_, hits} =
       Macro.prewalk(expr, [], fn node, acc ->
-        {node, prepend_hit(node, acc, excluded, keys, contexts)}
+        {node, prepend_hit(node, acc, excluded, keys, contexts, clauses)}
       end)
 
     Enum.reverse(hits)
   end
 
-  defp prepend_hit({:__block__, _, [value]} = node, acc, excluded, keys, contexts)
+  defp prepend_hit({:__block__, _, [value]} = node, acc, excluded, keys, contexts, clauses)
        when is_number(value) do
     cond do
       value in @idiomatic ->
@@ -272,14 +273,52 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
           node: node,
           value: value,
           key: Map.get(keys, node),
-          context: Map.get(contexts, node)
+          context: Map.get(contexts, node),
+          clause: Map.get(clauses, node)
         }
 
         [hit | acc]
     end
   end
 
-  defp prepend_hit(_node, acc, _excluded, _keys, _contexts), do: acc
+  defp prepend_hit(_node, acc, _excluded, _keys, _contexts, _clauses), do: acc
+
+  # Map a literal value-node to the `{function_name, pattern}` of the
+  # guard-free function clause whose body it *is* — `def image_width("md"),
+  # do: 80` ↦ `80 ↦ {"image_width", "md"}`. Only a clause whose entire
+  # body is the bare literal qualifies; a multi-statement body or a
+  # literal nested deeper carries no single discriminating pattern.
+  defp clause_contexts(exprs) do
+    exprs
+    |> Enum.flat_map(&Macro.prewalker/1)
+    |> Enum.flat_map(&clause_body_context/1)
+    |> Map.new()
+  end
+
+  defp clause_body_context({kind, _, [head, [{{:__block__, _, [:do]}, body_node}]]})
+       when kind in [:def, :defp] do
+    with {fun, pattern} <- clause_name_and_pattern(head),
+         {:__block__, _, [value]} = node when is_number(value) <- body_node do
+      [{node, {fun, pattern}}]
+    else
+      _ -> []
+    end
+  end
+
+  defp clause_body_context(_), do: []
+
+  defp clause_name_and_pattern(head) do
+    case strip_when(head) do
+      {fun, _, [first | _]} when is_atom(fun) -> {Atom.to_string(fun), literal_pattern(first)}
+      _ -> :error
+    end
+  end
+
+  defp literal_pattern({:__block__, _, [value]}) when is_binary(value) or is_atom(value),
+    do: value
+
+  defp literal_pattern(value) when is_binary(value) or is_atom(value), do: value
+  defp literal_pattern(_), do: nil
 
   # Map a literal value-node to the name of the call that took it as a
   # positional argument (`String.slice(x, 0, 200)` → `200 ↦ "slice"`).
@@ -326,9 +365,13 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
 
   # [{value, hits}] → [{name, value, hits}] with collision-suffixed
   # names. Sorted by source position so name ordering is deterministic.
+  # A group whose only derivable name is the bare value-in-name fallback
+  # (`int_240`) is dropped: hoisting it trades a clear inline literal for
+  # an opaquely-named indirection of equal information.
   defp assign_names(groups) do
     groups
     |> Enum.sort_by(fn {_value, hits} -> hit_position(hd(hits)) end)
+    |> Enum.filter(fn {value, hits} -> IdentifierExpansion.nameable?(value, name_opts(hits)) end)
     |> Enum.reduce({[], MapSet.new()}, fn {value, hits}, {named, taken} ->
       name = unique_name(value, hits, taken)
       {[{name, value, hits} | named], MapSet.put(taken, name)}
@@ -338,12 +381,15 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
   end
 
   defp unique_name(value, hits, taken) do
-    opts = %{key: key_for(hits), context: context_for(hits)}
-    base = IdentifierExpansion.derive_constant_name(value, opts)
+    base = IdentifierExpansion.derive_constant_name(value, name_opts(hits))
 
     base
     |> Stream.iterate(&next_name(&1, base))
     |> Enum.find(&(not MapSet.member?(taken, &1)))
+  end
+
+  defp name_opts(hits) do
+    %{key: key_for(hits), context: context_for(hits), clause: clause_for(hits)}
   end
 
   defp next_name(current, base) do
@@ -359,6 +405,8 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
   defp key_for(hits), do: Enum.find_value(hits, fn %{key: key} -> key end)
 
   defp context_for(hits), do: Enum.find_value(hits, fn %{context: context} -> context end)
+
+  defp clause_for(hits), do: Enum.find_value(hits, fn %{clause: clause} -> clause end)
 
   defp emit_patches([], _exprs), do: []
 
