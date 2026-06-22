@@ -137,20 +137,35 @@ defmodule Number42.Refactors.IdentifierExpansion do
     {"golden_ratio", (1 + :math.sqrt(5)) / 2}
   ]
 
-  # Well-known integers for `derive_constant_name/2`. Exact match only —
-  # these values carry the same meaning in any project. Extend by
-  # appending a `{value, name}` pair.
+  # Well-known integers for `derive_constant_name/2` that carry the same
+  # meaning in *any* context — a bit-width, a byte ceiling, a full turn
+  # in degrees. Matched unconditionally. Extend by appending `{value,
+  # name}`.
   @well_known_ints %{
-    60 => "seconds_per_minute",
-    100 => "percent",
     255 => "max_byte",
     360 => "degrees_full",
-    1000 => "kilo",
     1024 => "kibi",
+    65_535 => "max_word"
+  }
+
+  # Well-known integers whose name only holds in a temporal or relative
+  # context — `60` is seconds-per-minute *only* when it counts time, not
+  # when it bounds a millimeter. These fire from `derive_constant_name/2`
+  # only when an enclosing key/context carries a temporal/relative signal
+  # (`temporal_signal?/1`); otherwise the value falls through to the
+  # value-in-name fallback, where the caller's value-only skip leaves it
+  # inline rather than stamping a physically false unit on it.
+  @contextual_well_known_ints %{
+    60 => "seconds_per_minute",
+    100 => "percent",
+    1000 => "kilo",
     3600 => "seconds_per_hour",
-    65_535 => "max_word",
     86_400 => "seconds_per_day"
   }
+
+  # Substrings in a key/context that license a temporal/relative reading
+  # of a contextual well-known value or a millisecond multiple.
+  @temporal_signals ~w(time timeout age interval delay duration expir per_ percent pct ratio rate ms sec minute hour day)
 
   # Call-name → name-stem heuristics for the `opts[:context]` axis. The
   # surrounding call (`String.slice`, `Enum.take`, …) names a bound on
@@ -772,15 +787,27 @@ defmodule Number42.Refactors.IdentifierExpansion do
   1. `opts[:key]` — when the literal sat at `key: value` (a config
      keyword or a map entry), the key *is* the name (`base_url`,
      `timeout`). `?`/`!` markers are stripped.
-  2. `opts[:context]` — the surrounding call name (`String.slice`,
+  2. `opts[:clause]` — a `{function_name, pattern}` pair when the
+     literal was the body of a guard-free function clause
+     (`defp image_width("md"), do: 80`). The function plus its
+     discriminating pattern names the value (`image_width_md`); a
+     numeric/unnameable pattern leaves the function name alone. Carries
+     more meaning than the value, so it outranks the well-known axis.
+  3. `opts[:context]` — the surrounding call name (`String.slice`,
      `Enum.take`, …). A recognized call names a bound on its numeric
      argument (`slice → max_slice`, `take → max_take`). No match →
      fall through.
-  3. Well-known values — floats (`pi`, `e`, … within a tolerance) and
-     integers (`60 → seconds_per_minute`, `1024 → kibi`, …).
-  4. Millisecond multiples — a round multiple of `1000` reads as a
-     second-scaled timeout: `5000 → timeout_5s_ms`.
-  5. Value-in-name fallback — never fails and never collides:
+  4. Well-known values — floats (`pi`, `e`, … within a tolerance) and
+     context-free integers whose meaning never shifts (`1024 → kibi`,
+     `255 → max_byte`, `360 → degrees_full`, `65535 → max_word`).
+  5. Context-dependent well-known values — `60 → seconds_per_minute`,
+     `100 → percent`, `1000 → kilo`, `3600 → seconds_per_hour`,
+     `86400 → seconds_per_day`, and millisecond multiples
+     (`5000 → timeout_5s_ms`). These fire *only* when the enclosing
+     key/context carries a temporal/relative word (`age`, `timeout`,
+     `pct`, `duration`, …); a bare `60` bounding a millimeter is not
+     seconds, so without a signal it falls through to the value name.
+  6. Value-in-name fallback — never fails and never collides:
      integer → `int_<value>` (`int_42`, negatives `int_neg_7`),
      float → `default_float`. A URL or absolute path names itself from
      its content — host (sans `www.`/TLD) + path segments + `_url`,
@@ -806,12 +833,16 @@ defmodule Number42.Refactors.IdentifierExpansion do
       "etc_myapp_config_toml_path"
 
       iex> alias Number42.Refactors.IdentifierExpansion
-      iex> IdentifierExpansion.derive_constant_name(3600, %{})
+      iex> IdentifierExpansion.derive_constant_name(1024, %{})
+      "kibi"
+
+      iex> alias Number42.Refactors.IdentifierExpansion
+      iex> IdentifierExpansion.derive_constant_name(3600, %{context: "expiry"})
       "seconds_per_hour"
 
       iex> alias Number42.Refactors.IdentifierExpansion
-      iex> IdentifierExpansion.derive_constant_name(5000, %{})
-      "timeout_5s_ms"
+      iex> IdentifierExpansion.derive_constant_name(3600, %{})
+      "int_3600"
 
       iex> alias Number42.Refactors.IdentifierExpansion
       iex> IdentifierExpansion.derive_constant_name(200, %{context: "slice"})
@@ -823,15 +854,97 @@ defmodule Number42.Refactors.IdentifierExpansion do
   """
   @spec derive_constant_name(term(), %{
           optional(:key) => String.t() | atom() | nil,
-          optional(:context) => String.t() | atom() | nil
+          optional(:context) => String.t() | atom() | nil,
+          optional(:clause) => {String.t(), String.t() | atom() | number() | nil} | nil
         }) :: String.t()
   def derive_constant_name(value, opts \\ %{}) do
     cond do
-      key = Map.get(opts, :key) -> strip_marker(key)
+      name = key_name(Map.get(opts, :key)) -> name
+      name = clause_name(Map.get(opts, :clause)) -> name
       name = context_name(value, Map.get(opts, :context)) -> name
-      true -> derive_constant_name_from_value(value)
+      true -> derive_constant_name_from_value(value, temporal_signal?(opts))
     end
   end
+
+  # A key becomes the name only if it sanitizes to a valid attribute stem
+  # (`?`/`!` markers stripped, non-identifier characters folded to `_`,
+  # at least one letter). A key that survives to nothing — a bare `:` or
+  # all-punctuation — yields nil so the value falls through to a valid
+  # name; emitting it raw would produce an uncompilable `@:_parts`.
+  defp key_name(nil), do: nil
+
+  defp key_name(key) do
+    case key |> strip_marker() |> sanitize_stem() do
+      "" -> nil
+      stem -> stem
+    end
+  end
+
+  defp sanitize_stem(str) do
+    cleaned = str |> String.downcase() |> String.replace(~r/[^a-z0-9]+/, "_") |> String.trim("_")
+    if String.match?(cleaned, ~r/[a-z]/), do: cleaned, else: ""
+  end
+
+  # Whether the enclosing key/context licenses a temporal or relative
+  # reading of a value (`max_age_seconds`, `retry_timeout_ms`,
+  # `share_pct`). The clause pattern is a naming signal but not a
+  # temporal one — `image_width("md")` does not make `60` a duration.
+  defp temporal_signal?(opts) do
+    [Map.get(opts, :key), Map.get(opts, :context)]
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.map(&(&1 |> to_string() |> String.downcase()))
+    |> Enum.any?(fn str -> Enum.any?(@temporal_signals, &String.contains?(str, &1)) end)
+  end
+
+  @doc """
+  Whether `derive_constant_name/2` produces a *meaningful* name for
+  `value` under `opts`, as opposed to a bare value-in-name fallback
+  (`int_42`, `default_float`, `default_string`).
+
+  A caller that hoists a literal into a `@name` only gains clarity when
+  the name says something the literal does not. When the only available
+  derivation is the value itself, the indirection is pure loss — the
+  caller should leave the literal inline. Returns `false` exactly for
+  those fallback names.
+  """
+  @spec nameable?(term(), map()) :: boolean()
+  def nameable?(value, opts \\ %{}) do
+    derive_constant_name(value, opts) not in fallback_names(value)
+  end
+
+  defp fallback_names(value) when is_integer(value), do: ["int_#{encode_int(value)}"]
+  defp fallback_names(value) when is_float(value), do: ["default_float"]
+  defp fallback_names(_value), do: ["default_string", "default_url", "constant"]
+
+  # Clause-head heuristic: a literal returned from a guard-free function
+  # clause (`defp image_width("md"), do: 80`) names itself after the
+  # function plus its discriminating pattern (`image_width_md`). The
+  # pattern carries the meaning the bare value lacks, so this outranks
+  # both the call-context and well-known axes. A numeric pattern adds no
+  # word, so the function name stands alone; an unnameable pattern (no
+  # surviving letters) likewise falls back to the function name.
+  defp clause_name(nil), do: nil
+
+  defp clause_name({fun, pattern}) when is_binary(fun) and fun != "" do
+    case pattern_token(pattern) do
+      nil -> fun
+      token -> "#{fun}_#{token}"
+    end
+  end
+
+  defp clause_name(_), do: nil
+
+  defp pattern_token(pattern) when is_atom(pattern) and not is_nil(pattern),
+    do: pattern_token(Atom.to_string(pattern))
+
+  defp pattern_token(pattern) when is_binary(pattern) do
+    case sanitize_token(pattern) do
+      [token] -> token
+      [] -> nil
+    end
+  end
+
+  defp pattern_token(_), do: nil
 
   # Call-name heuristic: an integer bounded by a recognized call gets a
   # bound-shaped name. Only fires for integers under a matching call —
@@ -843,22 +956,24 @@ defmodule Number42.Refactors.IdentifierExpansion do
 
   defp context_name(_value, _context), do: nil
 
-  defp derive_constant_name_from_value(value) when is_float(value) do
+  defp derive_constant_name_from_value(value, temporal?)
+
+  defp derive_constant_name_from_value(value, _temporal?) when is_float(value) do
     case well_known_float(value) do
       nil -> "default_float"
       name -> name
     end
   end
 
-  defp derive_constant_name_from_value(value) when is_integer(value) do
+  defp derive_constant_name_from_value(value, temporal?) when is_integer(value) do
     cond do
       name = Map.get(@well_known_ints, value) -> name
-      ms = millisecond_name(value) -> ms
+      name = contextual_int_name(value, temporal?) -> name
       true -> "int_#{encode_int(value)}"
     end
   end
 
-  defp derive_constant_name_from_value(value) when is_binary(value) do
+  defp derive_constant_name_from_value(value, _temporal?) when is_binary(value) do
     cond do
       url_shaped?(value) -> content_url_name(value) || "default_url"
       absolute_path?(value) -> content_path_name(value) || "default_string"
@@ -866,7 +981,15 @@ defmodule Number42.Refactors.IdentifierExpansion do
     end
   end
 
-  defp derive_constant_name_from_value(_value), do: "constant"
+  defp derive_constant_name_from_value(_value, _temporal?), do: "constant"
+
+  # Contextual well-known ints and millisecond multiples only resolve to
+  # a name when the call site reads as temporal/relative; otherwise nil
+  # so the value-in-name fallback takes over.
+  defp contextual_int_name(_value, false), do: nil
+
+  defp contextual_int_name(value, true),
+    do: Map.get(@contextual_well_known_ints, value) || millisecond_name(value)
 
   # A URL names itself after its host (sans `www.` and the TLD) plus its
   # path segments, suffixed `_url`: `https://api.example.com/v1` ->

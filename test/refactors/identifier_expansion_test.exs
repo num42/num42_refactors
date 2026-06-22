@@ -654,6 +654,19 @@ defmodule Number42.Refactors.IdentifierExpansionTest do
       assert "enabled" =
                IdentifierExpansion.derive_constant_name(true, %{key: "enabled?"})
     end
+
+    test "a key with no letters is rejected, not emitted raw" do
+      # A bare `:` or all-punctuation key would yield an uncompilable
+      # `@:_parts` / `@%%%`. With nothing to sanitize into a stem, the
+      # value falls through to a valid name.
+      assert "int_4" = IdentifierExpansion.derive_constant_name(4, %{key: ":"})
+      assert "int_4" = IdentifierExpansion.derive_constant_name(4, %{key: "%%%"})
+    end
+
+    test "a sanitizable key is normalized to a valid stem" do
+      assert "weird_name" = IdentifierExpansion.derive_constant_name(4, %{key: "weird-name"})
+      assert "foo_bar" = IdentifierExpansion.derive_constant_name(4, %{key: ":foo bar"})
+    end
   end
 
   describe "derive_constant_name/2 — well-known math values" do
@@ -695,29 +708,9 @@ defmodule Number42.Refactors.IdentifierExpansionTest do
     end
   end
 
-  describe "derive_constant_name/2 — well-known integers (Bug 3)" do
-    test "1000 → kilo" do
-      assert "kilo" = IdentifierExpansion.derive_constant_name(1000, %{})
-    end
-
+  describe "derive_constant_name/2 — universal well-known integers (Bug 3)" do
     test "1024 → kibi" do
       assert "kibi" = IdentifierExpansion.derive_constant_name(1024, %{})
-    end
-
-    test "60 → seconds_per_minute" do
-      assert "seconds_per_minute" = IdentifierExpansion.derive_constant_name(60, %{})
-    end
-
-    test "3600 → seconds_per_hour" do
-      assert "seconds_per_hour" = IdentifierExpansion.derive_constant_name(3600, %{})
-    end
-
-    test "86400 → seconds_per_day" do
-      assert "seconds_per_day" = IdentifierExpansion.derive_constant_name(86_400, %{})
-    end
-
-    test "100 → percent" do
-      assert "percent" = IdentifierExpansion.derive_constant_name(100, %{})
     end
 
     test "255 → max_byte" do
@@ -733,13 +726,45 @@ defmodule Number42.Refactors.IdentifierExpansionTest do
     end
   end
 
-  describe "derive_constant_name/2 — millisecond multiples (Bug 3)" do
-    test "5000 → timeout_5s_ms" do
-      assert "timeout_5s_ms" = IdentifierExpansion.derive_constant_name(5000, %{})
+  # A temporal/relative signal in the surrounding context (one that is
+  # NOT itself a recognized `@context_stems` entry, so it does not win as
+  # a name on its own) licenses the contextual well-known names. A key
+  # always wins outright (it *is* the name), so these gate-tests use a
+  # bare temporal-flavoured `context`.
+  describe "derive_constant_name/2 — contextual well-known integers need a temporal signal" do
+    test "1000 → kilo under a temporal context" do
+      assert "kilo" = IdentifierExpansion.derive_constant_name(1000, %{context: "sleep_duration"})
     end
 
-    test "30000 → timeout_30s_ms" do
-      assert "timeout_30s_ms" = IdentifierExpansion.derive_constant_name(30_000, %{})
+    test "60 → seconds_per_minute under a temporal context" do
+      assert "seconds_per_minute" =
+               IdentifierExpansion.derive_constant_name(60, %{context: "sleep_duration"})
+    end
+
+    test "3600 → seconds_per_hour under a temporal context" do
+      assert "seconds_per_hour" =
+               IdentifierExpansion.derive_constant_name(3600, %{context: "expiry"})
+    end
+
+    test "86400 → seconds_per_day under a temporal context" do
+      assert "seconds_per_day" =
+               IdentifierExpansion.derive_constant_name(86_400, %{context: "cookie_age"})
+    end
+
+    test "100 → percent under a relative context" do
+      assert "percent" = IdentifierExpansion.derive_constant_name(100, %{context: "share_pct"})
+    end
+  end
+
+  describe "derive_constant_name/2 — millisecond multiples need a temporal signal (Bug 3)" do
+    test "5000 → timeout_5s_ms under a temporal context" do
+      assert "timeout_5s_ms" =
+               IdentifierExpansion.derive_constant_name(5000, %{context: "sleep_duration"})
+    end
+
+    test "30000 → timeout_30s_ms under a temporal context" do
+      assert "timeout_30s_ms" =
+               IdentifierExpansion.derive_constant_name(30_000, %{context: "sleep_duration"})
     end
   end
 
@@ -774,6 +799,149 @@ defmodule Number42.Refactors.IdentifierExpansionTest do
     test "explicit key wins over pi-recognition" do
       assert "ratio" =
                IdentifierExpansion.derive_constant_name(3.141592653589793, %{key: "ratio"})
+    end
+  end
+
+  describe "derive_constant_name/2 — clause-head axis" do
+    test "function name + string pattern names the constant" do
+      assert "image_width_md" =
+               IdentifierExpansion.derive_constant_name(80, %{
+                 clause: {"image_width", "md"}
+               })
+    end
+
+    test "function name + atom pattern names the constant" do
+      assert "icon_size_large" =
+               IdentifierExpansion.derive_constant_name(96, %{
+                 clause: {"icon_size", :large}
+               })
+    end
+
+    test "clause beats well-known value (60 is not always seconds_per_minute)" do
+      assert "grid_columns_wide" =
+               IdentifierExpansion.derive_constant_name(60, %{
+                 clause: {"grid_columns", "wide"}
+               })
+    end
+
+    test "key still beats clause" do
+      assert "limit" =
+               IdentifierExpansion.derive_constant_name(80, %{
+                 key: "limit",
+                 clause: {"image_width", "md"}
+               })
+    end
+
+    test "clause beats call-context" do
+      assert "image_width_md" =
+               IdentifierExpansion.derive_constant_name(80, %{
+                 context: "slice",
+                 clause: {"image_width", "md"}
+               })
+    end
+
+    test "non-identifier pattern is sanitized to a valid stem" do
+      assert "padding_2xl" =
+               IdentifierExpansion.derive_constant_name(80, %{
+                 clause: {"padding", "2xl"}
+               })
+    end
+
+    test "numeric pattern falls back to the function name alone" do
+      assert "level_color" =
+               IdentifierExpansion.derive_constant_name(80, %{
+                 clause: {"level_color", 3}
+               })
+    end
+  end
+
+  describe "derive_constant_name/2 — context-dependent well-known gating" do
+    test "60 without a temporal signal is not seconds_per_minute" do
+      assert "int_60" = IdentifierExpansion.derive_constant_name(60, %{})
+    end
+
+    test "60 with a temporal context is seconds_per_minute" do
+      assert "seconds_per_minute" =
+               IdentifierExpansion.derive_constant_name(60, %{context: "sleep_duration"})
+    end
+
+    test "100 without a relative signal is not percent" do
+      assert "int_100" = IdentifierExpansion.derive_constant_name(100, %{})
+    end
+
+    test "100 under a percent-ish context is percent" do
+      assert "percent" =
+               IdentifierExpansion.derive_constant_name(100, %{context: "share_pct"})
+    end
+
+    test "3600 without a temporal signal stays a value name" do
+      assert "int_3600" = IdentifierExpansion.derive_constant_name(3600, %{})
+    end
+
+    test "3600 with a temporal context is seconds_per_hour" do
+      assert "seconds_per_hour" =
+               IdentifierExpansion.derive_constant_name(3600, %{context: "expiry"})
+    end
+
+    test "a millimeter max(2000) is not a millisecond timeout" do
+      assert "int_2000" =
+               IdentifierExpansion.derive_constant_name(2000, %{context: "max"})
+    end
+
+    test "2000 under a temporal context is a millisecond timeout" do
+      assert "timeout_2s_ms" =
+               IdentifierExpansion.derive_constant_name(2000, %{context: "sleep_duration"})
+    end
+
+    test "universally-unambiguous well-known values still fire without a signal" do
+      assert "kibi" = IdentifierExpansion.derive_constant_name(1024, %{})
+      assert "max_byte" = IdentifierExpansion.derive_constant_name(255, %{})
+      assert "degrees_full" = IdentifierExpansion.derive_constant_name(360, %{})
+      assert "max_word" = IdentifierExpansion.derive_constant_name(65_535, %{})
+    end
+
+    test "clause pattern counts as the naming signal but not as a temporal one" do
+      assert "image_width_md" =
+               IdentifierExpansion.derive_constant_name(60, %{clause: {"image_width", "md"}})
+    end
+  end
+
+  describe "nameable?/2 — value-only fallback detection" do
+    test "a value-only int fallback is not meaningful" do
+      refute IdentifierExpansion.nameable?(42, %{})
+    end
+
+    test "a negative value-only int fallback is not meaningful" do
+      refute IdentifierExpansion.nameable?(-7, %{})
+    end
+
+    test "default_float fallback is not meaningful" do
+      refute IdentifierExpansion.nameable?(0.123_45, %{})
+    end
+
+    test "default_string fallback is not meaningful" do
+      refute IdentifierExpansion.nameable?("hello", %{})
+    end
+
+    test "a key-derived name is meaningful" do
+      assert IdentifierExpansion.nameable?(42, %{key: "limit"})
+    end
+
+    test "a clause-derived name is meaningful" do
+      assert IdentifierExpansion.nameable?(42, %{clause: {"image_width", "md"}})
+    end
+
+    test "a universal well-known integer is meaningful without a signal" do
+      assert IdentifierExpansion.nameable?(1024, %{})
+    end
+
+    test "a contextual well-known integer is meaningful only with a temporal signal" do
+      refute IdentifierExpansion.nameable?(3600, %{})
+      assert IdentifierExpansion.nameable?(3600, %{context: "expiry"})
+    end
+
+    test "a content-derived url is meaningful" do
+      assert IdentifierExpansion.nameable?("https://api.example.com/v1", %{})
     end
   end
 

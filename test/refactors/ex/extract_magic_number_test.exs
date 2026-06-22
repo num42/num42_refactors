@@ -30,15 +30,15 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
         @subject,
         ~S'''
         defmodule M do
-          def a, do: 3600
-          def b, do: 3600
+          def a, do: 1024
+          def b, do: 1024
         end
         ''',
         ~S'''
         defmodule M do
-          @seconds_per_hour 3600
-          def a, do: @seconds_per_hour
-          def b, do: @seconds_per_hour
+          @kibi 1024
+          def a, do: @kibi
+          def b, do: @kibi
         end
         ''',
         @on
@@ -65,41 +65,126 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
       )
     end
 
-    test "hoists a repeated float literal" do
+    test "enriches a generic key with the literal param and the call's noun" do
       assert_rewrites(
         @subject,
         ~S'''
         defmodule M do
-          def a, do: 19.99
-          def b, do: 19.99
+          def f(cs), do: validate_length(cs, :email, max: 160)
+          def g(cs), do: validate_length(cs, :email, max: 160)
         end
         ''',
         ~S'''
         defmodule M do
-          @default_float 19.99
-          def a, do: @default_float
-          def b, do: @default_float
+          @email_max_length 160
+          def f(cs), do: validate_length(cs, :email, max: @email_max_length)
+          def g(cs), do: validate_length(cs, :email, max: @email_max_length)
         end
         ''',
         @on
       )
     end
 
-    test "two distinct repeated values get distinct names" do
+    test "a punctuation delimiter param does not leak into the name" do
+      # `String.split(entry, ":", parts: 4)` — the `":"` is a delimiter,
+      # not a subject. It must not become part of the attribute name (a
+      # raw `:` would yield the uncompilable `@:_parts`). With no usable
+      # param the key stands alone, enriched only by the call noun if any.
       assert_rewrites(
         @subject,
         ~S'''
         defmodule M do
-          def a, do: {3600, 7200}
-          def b, do: {3600, 7200}
+          def a(e), do: String.split(e, ":", parts: 4)
+          def b(e), do: String.split(e, ":", parts: 4)
         end
         ''',
         ~S'''
         defmodule M do
-          @seconds_per_hour 3600
-          @int_7200 7200
-          def a, do: {@seconds_per_hour, @int_7200}
-          def b, do: {@seconds_per_hour, @int_7200}
+          @parts 4
+          def a(e), do: String.split(e, ":", parts: @parts)
+          def b(e), do: String.split(e, ":", parts: @parts)
+        end
+        ''',
+        @on
+      )
+    end
+
+    test "falls back to the enclosing function name when the call has no literal param" do
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def show(js), do: JS.show(js, time: 300)
+          def hide(js), do: JS.hide(js, time: 200)
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          @show_time 300
+          @hide_time 200
+          def show(js), do: JS.show(js, time: @show_time)
+          def hide(js), do: JS.hide(js, time: @hide_time)
+        end
+        ''',
+        min_occurrences: 1,
+        enabled: true
+      )
+    end
+
+    test "deduplicates repeated tokens across param, key and call noun" do
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def f, do: set_size(:size, size: 12)
+          def g, do: set_size(:size, size: 12)
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          @size 12
+          def f, do: set_size(:size, size: @size)
+          def g, do: set_size(:size, size: @size)
+        end
+        ''',
+        @on
+      )
+    end
+
+    test "hoists a repeated float literal when its key gives it a name" do
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def a, do: at(rate: 19.99)
+          def b, do: at(rate: 19.99)
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          @rate 19.99
+          def a, do: at(rate: @rate)
+          def b, do: at(rate: @rate)
+        end
+        ''',
+        @on
+      )
+    end
+
+    test "two distinct repeated values: only the nameable one is hoisted" do
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def a, do: {1024, 7200}
+          def b, do: {1024, 7200}
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          @kibi 1024
+          def a, do: {@kibi, 7200}
+          def b, do: {@kibi, 7200}
         end
         ''',
         @on
@@ -138,17 +223,17 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
         @subject,
         ~S'''
         defmodule M do
-          def a, do: 3600
-          def b, do: 3600
-          def c, do: 3600
+          def a, do: 1024
+          def b, do: 1024
+          def c, do: 1024
         end
         ''',
         ~S'''
         defmodule M do
-          @seconds_per_hour 3600
-          def a, do: @seconds_per_hour
-          def b, do: @seconds_per_hour
-          def c, do: @seconds_per_hour
+          @kibi 1024
+          def a, do: @kibi
+          def b, do: @kibi
+          def c, do: @kibi
         end
         ''',
         [min_occurrences: 3] ++ @on
@@ -184,8 +269,81 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
       )
     end
 
+    test "literals inside an arithmetic module-attribute body are not counted or rewritten" do
+      # `@one_mb 1024 * 1024` is already a named constant; its body
+      # literals must never be hoisted (that would yield `@kibi * @kibi`,
+      # indirection over an already-named value) nor counted toward the
+      # threshold. Here the only `1024`s are inside the attribute body, so
+      # nothing crosses the threshold and the source is untouched.
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          @one_mb 1024 * 1024
+          def size, do: @one_mb
+        end
+        ''',
+        @on
+      )
+    end
+
+    test "the attribute body is left intact even when the same value is hoisted elsewhere" do
+      # The free `1024`s in the def body are genuine magic numbers (twice,
+      # universal `@kibi`) and may hoist — but the `@one_mb` body keeps its
+      # literal `1024 * 1024`; it is never rewritten to `@kibi * @kibi`.
+      actual =
+        ExtractMagicNumber.transform(
+          ~S'''
+          defmodule M do
+            @one_mb 1024 * 1024
+            def chunk, do: stream(buffer_size: 1024 * 1024)
+          end
+          ''',
+          @on
+        )
+
+      assert actual =~ "@one_mb 1024 * 1024"
+      refute actual =~ "@one_mb @kibi"
+    end
+
+    test "literals inside a module-attribute lookup map are not hoisted" do
+      # `@gap_map %{4 => "gap-4", ...}` is a closed lookup table. Replacing
+      # an entry key with `@default` mixes a symbolic key into a literal
+      # map. The map's literals are excluded; the lone remaining body
+      # occurrence is below threshold → unchanged.
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          @gap_map %{0 => "gap-0", 4 => "gap-4", 5 => "gap-5"}
+          def class(g), do: Map.get(@gap_map, 4)
+        end
+        ''',
+        @on
+      )
+    end
+
     test "no defmodule wrapper — nothing to do" do
       assert_unchanged(@subject, "def a, do: 3600\ndef b, do: 3600", @on)
+    end
+
+    test "component attr/slot defaults are declarations, not hoisted" do
+      # `attr :gap, default: 4` declares a component's default; it reads as
+      # a spec, not a repeated magic value. Its literal is excluded even
+      # when two declarations share a value (and would otherwise collide on
+      # one enriched name), so nothing is hoisted.
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          attr :gap, :integer, default: 4
+          attr :gap, :integer, default: 4
+          slot :inner, default: 4
+          def render(assigns), do: assigns
+        end
+        ''',
+        @on
+      )
     end
 
     test "literals in pattern positions are never hoisted (module attr is illegal in a pattern)" do
@@ -210,17 +368,17 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
         @subject,
         ~S'''
         defmodule M do
-          def f(404), do: :not_found
-          def g, do: 404
-          def h, do: 404
+          def f(1024), do: :match
+          def g, do: at(1024)
+          def h, do: at(1024)
         end
         ''',
         ~S'''
         defmodule M do
-          @int_404 404
-          def f(404), do: :not_found
-          def g, do: @int_404
-          def h, do: @int_404
+          @kibi 1024
+          def f(1024), do: :match
+          def g, do: at(@kibi)
+          def h, do: at(@kibi)
         end
         ''',
         @on
@@ -255,6 +413,40 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
         defmodule M do
           def s, do: {&a/3, &b/3}
           def t, do: 3
+        end
+        ''',
+        @on
+      )
+    end
+  end
+
+  describe "import/alias/require directives are never touched" do
+    test "an arity in an `import only:` list is never hoisted" do
+      # `import M, only: [foo: 4]` — the `4` is a function arity, not data.
+      # Replacing it with `@attr` yields `only: [foo: @attr]`, which is not
+      # a valid directive. Directive literals are neither candidate nor
+      # counted, so the body `4`s alone fall below the threshold.
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          import Other, only: [foo: 4]
+          def a, do: at(4)
+          def b, do: at(4)
+        end
+        ''',
+        @on
+      )
+    end
+
+    test "arities across import and except do not pad a data literal's count" do
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          import A, only: [f: 4]
+          import B, except: [g: 4]
+          def a, do: at(4)
         end
         ''',
         @on
@@ -307,20 +499,178 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
     end
   end
 
+  describe "ambiguous cross-context values are left inline" do
+    test "a value carrying two distinct keyword keys is not hoisted" do
+      # `5` is a batch size at one site (`batch_size: 5`) and a concurrency
+      # cap at another (`max_concurrency: 5`). They share a value by
+      # coincidence, not meaning — fusing them into one `@attr` would stamp
+      # one site's name onto the other. Divergent naming signals → inline.
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          def run, do: async(batch_size: 5)
+          def cap, do: limit(max_concurrency: 5)
+        end
+        ''',
+        @on
+      )
+    end
+
+    test "a value with one consistent key across sites is still hoisted" do
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def a, do: connect(retries: 240)
+          def b, do: reconnect(retries: 240)
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          @retries 240
+          def a, do: connect(retries: @retries)
+          def b, do: reconnect(retries: @retries)
+        end
+        ''',
+        @on
+      )
+    end
+  end
+
+  describe "clause-head names" do
+    test "derives a name from the function clause and its string pattern" do
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def image_width("md"), do: 80
+          def image_width(_), do: 80
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          @image_width_md 80
+          def image_width("md"), do: @image_width_md
+          def image_width(_), do: @image_width_md
+        end
+        ''',
+        @on
+      )
+    end
+
+    test "derives a name from the function clause and its atom pattern" do
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def icon_size(:large), do: 96
+          def icon_size(_), do: 96
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          @icon_size_large 96
+          def icon_size(:large), do: @icon_size_large
+          def icon_size(_), do: @icon_size_large
+        end
+        ''',
+        @on
+      )
+    end
+
+    test "a nil pattern names the constant, a wildcard names the default" do
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def quality_total_count(nil), do: 3
+          def quality_total_count(_), do: 5
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          @quality_total_count_nil 3
+          @quality_total_count_default 5
+          def quality_total_count(nil), do: @quality_total_count_nil
+          def quality_total_count(_), do: @quality_total_count_default
+        end
+        ''',
+        min_occurrences: 1,
+        enabled: true
+      )
+    end
+
+    test "a keyword key still beats the clause head" do
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def gap("md"), do: [size: 80]
+          def gap(_), do: [size: 80]
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          @size 80
+          def gap("md"), do: [size: @size]
+          def gap(_), do: [size: @size]
+        end
+        ''',
+        @on
+      )
+    end
+  end
+
+  describe "value-only fallback is left inline" do
+    test "a repeated literal with no derivable name is not hoisted" do
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          def a, do: foo(240)
+          def b, do: bar(240)
+        end
+        ''',
+        @on
+      )
+    end
+
+    test "a derivable literal in the same module is still hoisted" do
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def a, do: foo(240) + 1024
+          def b, do: bar(240) + 1024
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          @kibi 1024
+          def a, do: foo(240) + @kibi
+          def b, do: bar(240) + @kibi
+        end
+        ''',
+        @on
+      )
+    end
+  end
+
   describe "blank line after attribute block (Aufgabe 5)" do
     test "a blank line separates the hoisted attribute from the first definition" do
       actual =
         ExtractMagicNumber.transform(
           ~S'''
           defmodule M do
-            def a, do: 3600
-            def b, do: 3600
+            def a, do: 1024
+            def b, do: 1024
           end
           ''',
           @on
         )
 
-      assert actual =~ "@seconds_per_hour 3600\n\n  def a"
+      assert actual =~ "@kibi 1024\n\n  def a"
     end
   end
 

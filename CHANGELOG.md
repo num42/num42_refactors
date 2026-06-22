@@ -21,6 +21,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   via the Engine's existing per-file `skipped_modules`, keeping the Engine
   path-blind.
 
+### Changed
+
+- `ExtractMagicNumber` naming, a series of fixes that together removed every
+  garbage/lying/coincidental name produced on position-db:
+  - **Clause-head axis** — derive a name from the enclosing function clause
+    when the literal *is* the clause body (`defp image_width("md"), do: 80` →
+    `@image_width_md`), via a new `opts[:clause]` axis in
+    `IdentifierExpansion.derive_constant_name/2` that outranks the
+    well-known/call-context axes.
+  - **Value-only skip** — a literal whose only derivable name is the bare
+    value-in-name fallback (`int_240`, `default_float`, `default_string`) is
+    left inline; the indirection carried no information the literal did not.
+    New predicate `IdentifierExpansion.nameable?/2` exposes the test.
+  - **Context-gated well-known/ms names** — `60 → seconds_per_minute`,
+    `100 → percent`, `1000 → kilo`, `3600 → seconds_per_hour`,
+    `86400 → seconds_per_day` and millisecond multiples (`2000 →
+    timeout_2s_ms`) now require a temporal/relative signal in the enclosing
+    key/context. Without one they fall through to the value name (then the
+    value-only skip leaves them inline), so a millimeter `max(2000)` no longer
+    becomes `@timeout_2s_ms` and a `min(100)` measurement no longer becomes
+    `@percent`. Universally-unambiguous values (`1024 → kibi`, `255 →
+    max_byte`, `360 → degrees_full`, `65535 → max_word`) still fire freely.
+  - **Attribute-body literals excluded** — every numeric literal anywhere
+    inside an `@attr` body (arithmetic operands `@one_mb 1024 * 1024`, map
+    entries `@gap_map %{4 => "gap-4"}`) is now excluded from candidates and the
+    occurrence count; it is already a named constant, so it is never rewritten
+    to `@kibi * @kibi` nor spliced with a symbolic key.
+  - **Ambiguous cross-context values left inline** — a value whose occurrences
+    carry two distinct keyword keys (`batch_size: 5` vs `max_concurrency: 5`)
+    shares a value by coincidence, not meaning; it is no longer fused into one
+    `@attr` that stamps one site's name onto the other.
+  - **Import/alias/require + attr/slot literals excluded** — an arity in an
+    `import M, only: [foo: 4]` directive is no longer rewritten to
+    `only: [foo: @attr]` (would not compile), and a component declaration's
+    `attr :gap, default: 4` keeps its literal default (a spec, not a recurring
+    value).
+  - **`nil`/`_` clause patterns name the constant** — `f(nil)`/`f(_)` clauses
+    now yield `@f_nil`/`@f_default` instead of a `@f`/`@f_2` collision.
+  - **Keyword keys enriched with param + call noun** — a generic key gains the
+    call's first literal param and the call's noun (verb-prefix stripped),
+    deduped: `validate_length(:email, max: 160)` → `@email_max_length`,
+    `validate_length(:password, min: 12, max: 72)` → `@password_min_length` /
+    `@password_max_length`. With no literal param, a thin wrapper around a
+    like-named call borrows the function name (`def show, do: JS.show(time:
+    300)` → `@show_time`); an unrelated enclosing function is not used.
+  - **Every derived name is a valid attribute stem** — name tokens are
+    sanitized to `[a-z0-9_]` and any with no letter is dropped, so a delimiter
+    param (`String.split(e, ":", parts: 4)`) no longer leaked a `:` into the
+    name (the uncompilable `@:_parts`); it now yields `@parts`. A key that
+    sanitizes to nothing (a bare `:` / all-punctuation) is rejected and the
+    value falls through to a valid name.
+
 ### Removed
 
 - `ExtractRepeatedGuardToDefguard`: removed. Measured against a real codebase
