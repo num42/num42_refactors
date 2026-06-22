@@ -137,20 +137,35 @@ defmodule Number42.Refactors.IdentifierExpansion do
     {"golden_ratio", (1 + :math.sqrt(5)) / 2}
   ]
 
-  # Well-known integers for `derive_constant_name/2`. Exact match only —
-  # these values carry the same meaning in any project. Extend by
-  # appending a `{value, name}` pair.
+  # Well-known integers for `derive_constant_name/2` that carry the same
+  # meaning in *any* context — a bit-width, a byte ceiling, a full turn
+  # in degrees. Matched unconditionally. Extend by appending `{value,
+  # name}`.
   @well_known_ints %{
-    60 => "seconds_per_minute",
-    100 => "percent",
     255 => "max_byte",
     360 => "degrees_full",
-    1000 => "kilo",
     1024 => "kibi",
+    65_535 => "max_word"
+  }
+
+  # Well-known integers whose name only holds in a temporal or relative
+  # context — `60` is seconds-per-minute *only* when it counts time, not
+  # when it bounds a millimeter. These fire from `derive_constant_name/2`
+  # only when an enclosing key/context carries a temporal/relative signal
+  # (`temporal_signal?/1`); otherwise the value falls through to the
+  # value-in-name fallback, where the caller's value-only skip leaves it
+  # inline rather than stamping a physically false unit on it.
+  @contextual_well_known_ints %{
+    60 => "seconds_per_minute",
+    100 => "percent",
+    1000 => "kilo",
     3600 => "seconds_per_hour",
-    65_535 => "max_word",
     86_400 => "seconds_per_day"
   }
+
+  # Substrings in a key/context that license a temporal/relative reading
+  # of a contextual well-known value or a millisecond multiple.
+  @temporal_signals ~w(time timeout age interval delay duration expir per_ percent pct ratio rate ms sec minute hour day)
 
   # Call-name → name-stem heuristics for the `opts[:context]` axis. The
   # surrounding call (`String.slice`, `Enum.take`, …) names a bound on
@@ -783,9 +798,15 @@ defmodule Number42.Refactors.IdentifierExpansion do
      argument (`slice → max_slice`, `take → max_take`). No match →
      fall through.
   4. Well-known values — floats (`pi`, `e`, … within a tolerance) and
-     integers (`60 → seconds_per_minute`, `1024 → kibi`, …).
-  5. Millisecond multiples — a round multiple of `1000` reads as a
-     second-scaled timeout: `5000 → timeout_5s_ms`.
+     context-free integers whose meaning never shifts (`1024 → kibi`,
+     `255 → max_byte`, `360 → degrees_full`, `65535 → max_word`).
+  5. Context-dependent well-known values — `60 → seconds_per_minute`,
+     `100 → percent`, `1000 → kilo`, `3600 → seconds_per_hour`,
+     `86400 → seconds_per_day`, and millisecond multiples
+     (`5000 → timeout_5s_ms`). These fire *only* when the enclosing
+     key/context carries a temporal/relative word (`age`, `timeout`,
+     `pct`, `duration`, …); a bare `60` bounding a millimeter is not
+     seconds, so without a signal it falls through to the value name.
   6. Value-in-name fallback — never fails and never collides:
      integer → `int_<value>` (`int_42`, negatives `int_neg_7`),
      float → `default_float`. A URL or absolute path names itself from
@@ -812,12 +833,16 @@ defmodule Number42.Refactors.IdentifierExpansion do
       "etc_myapp_config_toml_path"
 
       iex> alias Number42.Refactors.IdentifierExpansion
-      iex> IdentifierExpansion.derive_constant_name(3600, %{})
+      iex> IdentifierExpansion.derive_constant_name(1024, %{})
+      "kibi"
+
+      iex> alias Number42.Refactors.IdentifierExpansion
+      iex> IdentifierExpansion.derive_constant_name(3600, %{context: "expiry"})
       "seconds_per_hour"
 
       iex> alias Number42.Refactors.IdentifierExpansion
-      iex> IdentifierExpansion.derive_constant_name(5000, %{})
-      "timeout_5s_ms"
+      iex> IdentifierExpansion.derive_constant_name(3600, %{})
+      "int_3600"
 
       iex> alias Number42.Refactors.IdentifierExpansion
       iex> IdentifierExpansion.derive_constant_name(200, %{context: "slice"})
@@ -837,8 +862,19 @@ defmodule Number42.Refactors.IdentifierExpansion do
       key = Map.get(opts, :key) -> strip_marker(key)
       name = clause_name(Map.get(opts, :clause)) -> name
       name = context_name(value, Map.get(opts, :context)) -> name
-      true -> derive_constant_name_from_value(value)
+      true -> derive_constant_name_from_value(value, temporal_signal?(opts))
     end
+  end
+
+  # Whether the enclosing key/context licenses a temporal or relative
+  # reading of a value (`max_age_seconds`, `retry_timeout_ms`,
+  # `share_pct`). The clause pattern is a naming signal but not a
+  # temporal one — `image_width("md")` does not make `60` a duration.
+  defp temporal_signal?(opts) do
+    [Map.get(opts, :key), Map.get(opts, :context)]
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.map(&(&1 |> to_string() |> String.downcase()))
+    |> Enum.any?(fn str -> Enum.any?(@temporal_signals, &String.contains?(str, &1)) end)
   end
 
   @doc """
@@ -901,22 +937,24 @@ defmodule Number42.Refactors.IdentifierExpansion do
 
   defp context_name(_value, _context), do: nil
 
-  defp derive_constant_name_from_value(value) when is_float(value) do
+  defp derive_constant_name_from_value(value, temporal?)
+
+  defp derive_constant_name_from_value(value, _temporal?) when is_float(value) do
     case well_known_float(value) do
       nil -> "default_float"
       name -> name
     end
   end
 
-  defp derive_constant_name_from_value(value) when is_integer(value) do
+  defp derive_constant_name_from_value(value, temporal?) when is_integer(value) do
     cond do
       name = Map.get(@well_known_ints, value) -> name
-      ms = millisecond_name(value) -> ms
+      name = contextual_int_name(value, temporal?) -> name
       true -> "int_#{encode_int(value)}"
     end
   end
 
-  defp derive_constant_name_from_value(value) when is_binary(value) do
+  defp derive_constant_name_from_value(value, _temporal?) when is_binary(value) do
     cond do
       url_shaped?(value) -> content_url_name(value) || "default_url"
       absolute_path?(value) -> content_path_name(value) || "default_string"
@@ -924,7 +962,15 @@ defmodule Number42.Refactors.IdentifierExpansion do
     end
   end
 
-  defp derive_constant_name_from_value(_value), do: "constant"
+  defp derive_constant_name_from_value(_value, _temporal?), do: "constant"
+
+  # Contextual well-known ints and millisecond multiples only resolve to
+  # a name when the call site reads as temporal/relative; otherwise nil
+  # so the value-in-name fallback takes over.
+  defp contextual_int_name(_value, false), do: nil
+
+  defp contextual_int_name(value, true),
+    do: Map.get(@contextual_well_known_ints, value) || millisecond_name(value)
 
   # A URL names itself after its host (sans `www.` and the TLD) plus its
   # path segments, suffixed `_url`: `https://api.example.com/v1` ->

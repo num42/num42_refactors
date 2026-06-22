@@ -695,29 +695,9 @@ defmodule Number42.Refactors.IdentifierExpansionTest do
     end
   end
 
-  describe "derive_constant_name/2 — well-known integers (Bug 3)" do
-    test "1000 → kilo" do
-      assert "kilo" = IdentifierExpansion.derive_constant_name(1000, %{})
-    end
-
+  describe "derive_constant_name/2 — universal well-known integers (Bug 3)" do
     test "1024 → kibi" do
       assert "kibi" = IdentifierExpansion.derive_constant_name(1024, %{})
-    end
-
-    test "60 → seconds_per_minute" do
-      assert "seconds_per_minute" = IdentifierExpansion.derive_constant_name(60, %{})
-    end
-
-    test "3600 → seconds_per_hour" do
-      assert "seconds_per_hour" = IdentifierExpansion.derive_constant_name(3600, %{})
-    end
-
-    test "86400 → seconds_per_day" do
-      assert "seconds_per_day" = IdentifierExpansion.derive_constant_name(86_400, %{})
-    end
-
-    test "100 → percent" do
-      assert "percent" = IdentifierExpansion.derive_constant_name(100, %{})
     end
 
     test "255 → max_byte" do
@@ -733,13 +713,45 @@ defmodule Number42.Refactors.IdentifierExpansionTest do
     end
   end
 
-  describe "derive_constant_name/2 — millisecond multiples (Bug 3)" do
-    test "5000 → timeout_5s_ms" do
-      assert "timeout_5s_ms" = IdentifierExpansion.derive_constant_name(5000, %{})
+  # A temporal/relative signal in the surrounding context (one that is
+  # NOT itself a recognized `@context_stems` entry, so it does not win as
+  # a name on its own) licenses the contextual well-known names. A key
+  # always wins outright (it *is* the name), so these gate-tests use a
+  # bare temporal-flavoured `context`.
+  describe "derive_constant_name/2 — contextual well-known integers need a temporal signal" do
+    test "1000 → kilo under a temporal context" do
+      assert "kilo" = IdentifierExpansion.derive_constant_name(1000, %{context: "sleep_duration"})
     end
 
-    test "30000 → timeout_30s_ms" do
-      assert "timeout_30s_ms" = IdentifierExpansion.derive_constant_name(30_000, %{})
+    test "60 → seconds_per_minute under a temporal context" do
+      assert "seconds_per_minute" =
+               IdentifierExpansion.derive_constant_name(60, %{context: "sleep_duration"})
+    end
+
+    test "3600 → seconds_per_hour under a temporal context" do
+      assert "seconds_per_hour" =
+               IdentifierExpansion.derive_constant_name(3600, %{context: "expiry"})
+    end
+
+    test "86400 → seconds_per_day under a temporal context" do
+      assert "seconds_per_day" =
+               IdentifierExpansion.derive_constant_name(86_400, %{context: "cookie_age"})
+    end
+
+    test "100 → percent under a relative context" do
+      assert "percent" = IdentifierExpansion.derive_constant_name(100, %{context: "share_pct"})
+    end
+  end
+
+  describe "derive_constant_name/2 — millisecond multiples need a temporal signal (Bug 3)" do
+    test "5000 → timeout_5s_ms under a temporal context" do
+      assert "timeout_5s_ms" =
+               IdentifierExpansion.derive_constant_name(5000, %{context: "sleep_duration"})
+    end
+
+    test "30000 → timeout_30s_ms under a temporal context" do
+      assert "timeout_30s_ms" =
+               IdentifierExpansion.derive_constant_name(30_000, %{context: "sleep_duration"})
     end
   end
 
@@ -830,6 +842,57 @@ defmodule Number42.Refactors.IdentifierExpansionTest do
     end
   end
 
+  describe "derive_constant_name/2 — context-dependent well-known gating" do
+    test "60 without a temporal signal is not seconds_per_minute" do
+      assert "int_60" = IdentifierExpansion.derive_constant_name(60, %{})
+    end
+
+    test "60 with a temporal context is seconds_per_minute" do
+      assert "seconds_per_minute" =
+               IdentifierExpansion.derive_constant_name(60, %{context: "sleep_duration"})
+    end
+
+    test "100 without a relative signal is not percent" do
+      assert "int_100" = IdentifierExpansion.derive_constant_name(100, %{})
+    end
+
+    test "100 under a percent-ish context is percent" do
+      assert "percent" =
+               IdentifierExpansion.derive_constant_name(100, %{context: "share_pct"})
+    end
+
+    test "3600 without a temporal signal stays a value name" do
+      assert "int_3600" = IdentifierExpansion.derive_constant_name(3600, %{})
+    end
+
+    test "3600 with a temporal context is seconds_per_hour" do
+      assert "seconds_per_hour" =
+               IdentifierExpansion.derive_constant_name(3600, %{context: "expiry"})
+    end
+
+    test "a millimeter max(2000) is not a millisecond timeout" do
+      assert "int_2000" =
+               IdentifierExpansion.derive_constant_name(2000, %{context: "max"})
+    end
+
+    test "2000 under a temporal context is a millisecond timeout" do
+      assert "timeout_2s_ms" =
+               IdentifierExpansion.derive_constant_name(2000, %{context: "sleep_duration"})
+    end
+
+    test "universally-unambiguous well-known values still fire without a signal" do
+      assert "kibi" = IdentifierExpansion.derive_constant_name(1024, %{})
+      assert "max_byte" = IdentifierExpansion.derive_constant_name(255, %{})
+      assert "degrees_full" = IdentifierExpansion.derive_constant_name(360, %{})
+      assert "max_word" = IdentifierExpansion.derive_constant_name(65_535, %{})
+    end
+
+    test "clause pattern counts as the naming signal but not as a temporal one" do
+      assert "image_width_md" =
+               IdentifierExpansion.derive_constant_name(60, %{clause: {"image_width", "md"}})
+    end
+  end
+
   describe "nameable?/2 — value-only fallback detection" do
     test "a value-only int fallback is not meaningful" do
       refute IdentifierExpansion.nameable?(42, %{})
@@ -855,8 +918,13 @@ defmodule Number42.Refactors.IdentifierExpansionTest do
       assert IdentifierExpansion.nameable?(42, %{clause: {"image_width", "md"}})
     end
 
-    test "a well-known integer is meaningful" do
-      assert IdentifierExpansion.nameable?(3600, %{})
+    test "a universal well-known integer is meaningful without a signal" do
+      assert IdentifierExpansion.nameable?(1024, %{})
+    end
+
+    test "a contextual well-known integer is meaningful only with a temporal signal" do
+      refute IdentifierExpansion.nameable?(3600, %{})
+      assert IdentifierExpansion.nameable?(3600, %{context: "expiry"})
     end
 
     test "a content-derived url is meaningful" do

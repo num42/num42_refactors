@@ -23,16 +23,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- `ExtractMagicNumber` naming: derive a constant name from the enclosing
-  function clause when the literal *is* the clause body
-  (`defp image_width("md"), do: 80` → `@image_width_md`), via a new
-  `opts[:clause]` axis in `IdentifierExpansion.derive_constant_name/2` that
-  outranks the well-known/call-context axes. And a literal whose only derivable
-  name would be the bare value-in-name fallback (`int_240`, `default_float`,
-  `default_string`) is now left inline instead of hoisted — that indirection
-  carried no information the literal did not. Measured on position-db this cut
-  the touched-file count from 45 to 25, removing the entire `@int_*` block.
-  New predicate `IdentifierExpansion.nameable?/2` exposes the fallback test.
+- `ExtractMagicNumber` naming, several fixes that together cut the
+  touched-file count on position-db from 45 to 11 and removed every
+  garbage/lying name:
+  - **Clause-head axis** — derive a name from the enclosing function clause
+    when the literal *is* the clause body (`defp image_width("md"), do: 80` →
+    `@image_width_md`), via a new `opts[:clause]` axis in
+    `IdentifierExpansion.derive_constant_name/2` that outranks the
+    well-known/call-context axes.
+  - **Value-only skip** — a literal whose only derivable name is the bare
+    value-in-name fallback (`int_240`, `default_float`, `default_string`) is
+    left inline; the indirection carried no information the literal did not.
+    New predicate `IdentifierExpansion.nameable?/2` exposes the test.
+  - **Context-gated well-known/ms names** — `60 → seconds_per_minute`,
+    `100 → percent`, `1000 → kilo`, `3600 → seconds_per_hour`,
+    `86400 → seconds_per_day` and millisecond multiples (`2000 →
+    timeout_2s_ms`) now require a temporal/relative signal in the enclosing
+    key/context. Without one they fall through to the value name (then the
+    value-only skip leaves them inline), so a millimeter `max(2000)` no longer
+    becomes `@timeout_2s_ms` and a `min(100)` measurement no longer becomes
+    `@percent`. Universally-unambiguous values (`1024 → kibi`, `255 →
+    max_byte`, `360 → degrees_full`, `65535 → max_word`) still fire freely.
+  - **Attribute-body literals excluded** — every numeric literal anywhere
+    inside an `@attr` body (arithmetic operands `@one_mb 1024 * 1024`, map
+    entries `@gap_map %{4 => "gap-4"}`) is now excluded from candidates and the
+    occurrence count; it is already a named constant, so it is never rewritten
+    to `@kibi * @kibi` nor spliced with a symbolic key.
+  - **Ambiguous cross-context values left inline** — a value whose occurrences
+    carry two distinct keyword keys (`batch_size: 5` vs `max_concurrency: 5`)
+    shares a value by coincidence, not meaning; it is no longer fused into one
+    `@attr` that stamps one site's name onto the other.
 
 ### Removed
 

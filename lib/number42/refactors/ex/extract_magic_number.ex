@@ -224,14 +224,23 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
     end)
   end
 
-  # Literal nodes that ARE the value of an `@attr value` definition.
-  # They are already named constants — neither candidates nor counted.
+  # Every numeric literal anywhere in the body of an `@attr value`
+  # definition. The body is already a named constant (`@one_mb`,
+  # `@gap_map`); a literal inside it — an arithmetic operand
+  # (`@one_mb 1024 * 1024`) or a map/keyword entry
+  # (`@gap_map %{4 => "gap-4"}`) — is already covered by that name.
+  # Hoisting it out trades the name for `@kibi * @kibi` or splices a
+  # symbolic key into a literal table. So the whole body subtree is
+  # excluded — neither candidate nor counted.
   defp attribute_value_nodes(exprs) do
     exprs
     |> Enum.flat_map(&Macro.prewalker/1)
     |> Enum.flat_map(fn
-      {:@, _, [{name, _, [value_node]}]} when is_atom(name) -> [value_node]
-      _ -> []
+      {:@, _, [{name, _, [value_node]}]} when is_atom(name) ->
+        numeric_literal_nodes(value_node)
+
+      _ ->
+        []
     end)
     |> MapSet.new()
   end
@@ -365,19 +374,35 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
 
   # [{value, hits}] → [{name, value, hits}] with collision-suffixed
   # names. Sorted by source position so name ordering is deterministic.
-  # A group whose only derivable name is the bare value-in-name fallback
-  # (`int_240`) is dropped: hoisting it trades a clear inline literal for
-  # an opaquely-named indirection of equal information.
+  # Two groups are dropped before naming:
+  #
+  #   * the only derivable name is the bare value-in-name fallback
+  #     (`int_240`) — the indirection carries no information the literal
+  #     does not; and
+  #   * the occurrences disagree on what they mean — distinct keyword keys
+  #     (`batch_size: 5` vs `max_concurrency: 5`) sharing a value by
+  #     coincidence. Naming the group would stamp one site's name onto an
+  #     unrelated one; they are not the same constant.
   defp assign_names(groups) do
     groups
     |> Enum.sort_by(fn {_value, hits} -> hit_position(hd(hits)) end)
-    |> Enum.filter(fn {value, hits} -> IdentifierExpansion.nameable?(value, name_opts(hits)) end)
+    |> Enum.filter(fn {value, hits} ->
+      unambiguous?(hits) and IdentifierExpansion.nameable?(value, name_opts(hits))
+    end)
     |> Enum.reduce({[], MapSet.new()}, fn {value, hits}, {named, taken} ->
       name = unique_name(value, hits, taken)
       {[{name, value, hits} | named], MapSet.put(taken, name)}
     end)
     |> elem(0)
     |> Enum.reverse()
+  end
+
+  # Occurrences agree on meaning when they carry at most one distinct
+  # keyword key — `nil` (no key) is compatible with any single named key,
+  # but two different keys are a coincidental value clash, not one
+  # constant.
+  defp unambiguous?(hits) do
+    hits |> Enum.map(& &1.key) |> Enum.reject(&is_nil/1) |> Enum.uniq() |> length() <= 1
   end
 
   defp unique_name(value, hits, taken) do

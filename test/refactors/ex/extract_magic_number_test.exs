@@ -30,15 +30,15 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
         @subject,
         ~S'''
         defmodule M do
-          def a, do: 3600
-          def b, do: 3600
+          def a, do: 1024
+          def b, do: 1024
         end
         ''',
         ~S'''
         defmodule M do
-          @seconds_per_hour 3600
-          def a, do: @seconds_per_hour
-          def b, do: @seconds_per_hour
+          @kibi 1024
+          def a, do: @kibi
+          def b, do: @kibi
         end
         ''',
         @on
@@ -90,15 +90,15 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
         @subject,
         ~S'''
         defmodule M do
-          def a, do: {3600, 7200}
-          def b, do: {3600, 7200}
+          def a, do: {1024, 7200}
+          def b, do: {1024, 7200}
         end
         ''',
         ~S'''
         defmodule M do
-          @seconds_per_hour 3600
-          def a, do: {@seconds_per_hour, 7200}
-          def b, do: {@seconds_per_hour, 7200}
+          @kibi 1024
+          def a, do: {@kibi, 7200}
+          def b, do: {@kibi, 7200}
         end
         ''',
         @on
@@ -137,17 +137,17 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
         @subject,
         ~S'''
         defmodule M do
-          def a, do: 3600
-          def b, do: 3600
-          def c, do: 3600
+          def a, do: 1024
+          def b, do: 1024
+          def c, do: 1024
         end
         ''',
         ~S'''
         defmodule M do
-          @seconds_per_hour 3600
-          def a, do: @seconds_per_hour
-          def b, do: @seconds_per_hour
-          def c, do: @seconds_per_hour
+          @kibi 1024
+          def a, do: @kibi
+          def b, do: @kibi
+          def c, do: @kibi
         end
         ''',
         [min_occurrences: 3] ++ @on
@@ -183,6 +183,60 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
       )
     end
 
+    test "literals inside an arithmetic module-attribute body are not counted or rewritten" do
+      # `@one_mb 1024 * 1024` is already a named constant; its body
+      # literals must never be hoisted (that would yield `@kibi * @kibi`,
+      # indirection over an already-named value) nor counted toward the
+      # threshold. Here the only `1024`s are inside the attribute body, so
+      # nothing crosses the threshold and the source is untouched.
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          @one_mb 1024 * 1024
+          def size, do: @one_mb
+        end
+        ''',
+        @on
+      )
+    end
+
+    test "the attribute body is left intact even when the same value is hoisted elsewhere" do
+      # The free `1024`s in the def body are genuine magic numbers (twice,
+      # universal `@kibi`) and may hoist — but the `@one_mb` body keeps its
+      # literal `1024 * 1024`; it is never rewritten to `@kibi * @kibi`.
+      actual =
+        ExtractMagicNumber.transform(
+          ~S'''
+          defmodule M do
+            @one_mb 1024 * 1024
+            def chunk, do: stream(buffer_size: 1024 * 1024)
+          end
+          ''',
+          @on
+        )
+
+      assert actual =~ "@one_mb 1024 * 1024"
+      refute actual =~ "@one_mb @kibi"
+    end
+
+    test "literals inside a module-attribute lookup map are not hoisted" do
+      # `@gap_map %{4 => "gap-4", ...}` is a closed lookup table. Replacing
+      # an entry key with `@default` mixes a symbolic key into a literal
+      # map. The map's literals are excluded; the lone remaining body
+      # occurrence is below threshold → unchanged.
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          @gap_map %{0 => "gap-0", 4 => "gap-4", 5 => "gap-5"}
+          def class(g), do: Map.get(@gap_map, 4)
+        end
+        ''',
+        @on
+      )
+    end
+
     test "no defmodule wrapper — nothing to do" do
       assert_unchanged(@subject, "def a, do: 3600\ndef b, do: 3600", @on)
     end
@@ -209,17 +263,17 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
         @subject,
         ~S'''
         defmodule M do
-          def f(3600), do: :match
-          def g, do: at(3600)
-          def h, do: at(3600)
+          def f(1024), do: :match
+          def g, do: at(1024)
+          def h, do: at(1024)
         end
         ''',
         ~S'''
         defmodule M do
-          @seconds_per_hour 3600
-          def f(3600), do: :match
-          def g, do: at(@seconds_per_hour)
-          def h, do: at(@seconds_per_hour)
+          @kibi 1024
+          def f(1024), do: :match
+          def g, do: at(@kibi)
+          def h, do: at(@kibi)
         end
         ''',
         @on
@@ -299,6 +353,45 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
           @max_slice 200
           def a(x), do: String.slice(x, 0, @max_slice)
           def b(x), do: String.slice(x, 0, @max_slice)
+        end
+        ''',
+        @on
+      )
+    end
+  end
+
+  describe "ambiguous cross-context values are left inline" do
+    test "a value carrying two distinct keyword keys is not hoisted" do
+      # `5` is a batch size at one site (`batch_size: 5`) and a concurrency
+      # cap at another (`max_concurrency: 5`). They share a value by
+      # coincidence, not meaning — fusing them into one `@attr` would stamp
+      # one site's name onto the other. Divergent naming signals → inline.
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          def run, do: async(batch_size: 5)
+          def cap, do: limit(max_concurrency: 5)
+        end
+        ''',
+        @on
+      )
+    end
+
+    test "a value with one consistent key across sites is still hoisted" do
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def a, do: connect(retries: 240)
+          def b, do: reconnect(retries: 240)
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          @retries 240
+          def a, do: connect(retries: @retries)
+          def b, do: reconnect(retries: @retries)
         end
         ''',
         @on
@@ -387,15 +480,15 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
         @subject,
         ~S'''
         defmodule M do
-          def a, do: foo(240) + 3600
-          def b, do: bar(240) + 3600
+          def a, do: foo(240) + 1024
+          def b, do: bar(240) + 1024
         end
         ''',
         ~S'''
         defmodule M do
-          @seconds_per_hour 3600
-          def a, do: foo(240) + @seconds_per_hour
-          def b, do: bar(240) + @seconds_per_hour
+          @kibi 1024
+          def a, do: foo(240) + @kibi
+          def b, do: bar(240) + @kibi
         end
         ''',
         @on
@@ -409,14 +502,14 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
         ExtractMagicNumber.transform(
           ~S'''
           defmodule M do
-            def a, do: 3600
-            def b, do: 3600
+            def a, do: 1024
+            def b, do: 1024
           end
           ''',
           @on
         )
 
-      assert actual =~ "@seconds_per_hour 3600\n\n  def a"
+      assert actual =~ "@kibi 1024\n\n  def a"
     end
   end
 
