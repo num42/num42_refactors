@@ -356,7 +356,7 @@ defmodule Number42.Refactors.Heex.Tree do
   end
 
   defp find_tag_end(body, from), do: body |> do_find_tag_end(from, false, 0)
-  defp html_tokens(text, meta), do: scan_html(text, meta.line, [])
+  defp html_tokens(text, meta, base), do: scan_html(text, meta.line, base, [])
 
   defp leading_offset_to_marker({:element, _, _, _, _}, body, line_offset),
     do: find_offset_from(body, line_offset, "<")
@@ -436,10 +436,12 @@ defmodule Number42.Refactors.Heex.Tree do
 
   defp parse_tokens_or_error(_, _body), do: :error
 
-  defp push_text(piece, _line, [{:text, prev, t_meta} | rest]),
+  defp push_text(piece, _line, _pos, [{:text, prev, t_meta} | rest]),
     do: [{:text, prev <> piece, t_meta} | rest]
 
-  defp push_text(piece, line, acc), do: [{:text, piece, %{line: line}} | acc]
+  defp push_text(piece, line, pos, acc),
+    do: [{:text, piece, %{line: line, byte_offset: pos}} | acc]
+
   defp read_attr_name(bin), do: read_attr_name(bin, [])
 
   defp read_attr_name(<<c, rest::binary>>, acc)
@@ -467,6 +469,18 @@ defmodule Number42.Refactors.Heex.Tree do
   defp read_attrs_loop("/>" <> rest, line, acc), do: {acc |> Enum.reverse(), true, rest, line}
   defp read_attrs_loop(">" <> rest, line, acc), do: {acc |> Enum.reverse(), false, rest, line}
   defp read_attrs_loop("", line, acc), do: {acc |> Enum.reverse(), false, "", line}
+
+  # A standalone `{...}` is a HEEx spread attribute (`{@rest}` dynamic
+  # attributes, `{[{:"a", b}]}` dynamic-attribute list). It has no name, so
+  # consume the balanced curly the same way `attr={...}` values are read and
+  # record it as a nameless `:expr` attr. Without this the loop bailed at the
+  # `{`, leaving the rest of the open tag (including its `>`) as stray text and
+  # desyncing the byte-offset scan.
+  defp read_attrs_loop("{" <> rest, line, acc) do
+    {value, after_curly, line} = read_curly(rest, 1, [], line)
+    {after_curly, line} = skip_ws_nl(after_curly, line)
+    read_attrs_loop(after_curly, line, [{"", value} | acc])
+  end
 
   defp read_attrs_loop(bin, line, acc) do
     {name, after_name} = read_attr_name(bin)
@@ -570,47 +584,55 @@ defmodule Number42.Refactors.Heex.Tree do
   defp scan_curlies(<<c, rest::binary>>, depth, buf, cur_line, chunk_line, acc),
     do: scan_curlies(rest, depth, [<<c>> | buf], cur_line, chunk_line, acc)
 
-  defp scan_html("", _line, acc), do: acc |> Enum.reverse()
+  # `pos` is the absolute byte offset in `body` of the start of the current
+  # remaining binary, threaded so every HTML event records its exact
+  # `byte_offset`. This replaces the old re-scan-from-cursor (`tag_at`) that
+  # could match a `<` inside EEx code or a comment.
+  defp scan_html("", _line, _pos, acc), do: acc |> Enum.reverse()
 
-  defp scan_html("<!--" <> rest, line, acc) do
+  defp scan_html("<!--" <> rest, line, pos, acc) do
     case :binary.match(rest, "-->") do
-      {pos, _} ->
-        consumed = binary_part(rest, 0, pos + 3)
-        after_comment = binary_part(rest, pos + 3, byte_size(rest) - pos - 3)
-        scan_html(after_comment, line + count_newlines(consumed), acc)
+      {at, _} ->
+        consumed = binary_part(rest, 0, at + 3)
+        after_comment = binary_part(rest, at + 3, byte_size(rest) - at - 3)
+        scan_html(after_comment, line + count_newlines(consumed), pos + 4 + at + 3, acc)
 
       :nomatch ->
         acc |> Enum.reverse()
     end
   end
 
-  defp scan_html("</" <> rest, line, acc) do
+  defp scan_html("</" <> rest, line, pos, acc) do
     {name, after_tag} = read_tag_name(rest)
     {after_close, line} = skip_until_nl(after_tag, ">", line)
-    scan_html(after_close, line, [{:close, name, %{line: line}} | acc])
+    consumed = byte_size(rest) - byte_size(after_close) + 2
+
+    scan_html(after_close, line, pos + consumed, [
+      {:close, name, %{line: line, byte_offset: pos}} | acc
+    ])
   end
 
-  defp scan_html("<" <> rest, line, acc) do
+  defp scan_html("<" <> rest, line, pos, acc) do
     {name, after_tag} = read_tag_name(rest)
 
     if name == "" do
-      scan_html(rest, line, push_text("<", line, acc))
+      scan_html(rest, line, pos + 1, push_text("<", line, pos, acc))
     else
       {attrs, self_close?, after_attrs, line_after} = read_attrs(after_tag, line)
+      consumed = byte_size(rest) - byte_size(after_attrs) + 1
+      kind = if self_close?, do: :self, else: :open
 
-      if self_close? do
-        scan_html(after_attrs, line_after, [{:self, name, attrs, %{line: line}} | acc])
-      else
-        scan_html(after_attrs, line_after, [{:open, name, attrs, %{line: line}} | acc])
-      end
+      scan_html(after_attrs, line_after, pos + consumed, [
+        {kind, name, attrs, %{line: line, byte_offset: pos}} | acc
+      ])
     end
   end
 
-  defp scan_html(<<?\n, rest::binary>>, line, acc),
-    do: rest |> scan_html(line + 1, push_text("\n", line, acc))
+  defp scan_html(<<?\n, rest::binary>>, line, pos, acc),
+    do: rest |> scan_html(line + 1, pos + 1, push_text("\n", line, pos, acc))
 
-  defp scan_html(<<c, rest::binary>>, line, acc),
-    do: rest |> scan_html(line, push_text(<<c>>, line, acc))
+  defp scan_html(<<c, rest::binary>>, line, pos, acc),
+    do: rest |> scan_html(line, pos + byte_size(<<c>>), push_text(<<c>>, line, pos, acc))
 
   defp scan_node_end({:element, tag, _attrs, _children, _meta}, body, start_byte) do
     # Walk from start_byte: read the open-tag's `>` or `/>`, then
@@ -803,33 +825,43 @@ defmodule Number42.Refactors.Heex.Tree do
 
   defp tokens_to_html(tokens, body) do
     # Convert each EEx token into one or more uniform stream events and
-    # interleave them with HTML tokens scanned out of `:text` chunks.
-    # The single combined stream is then fed to one reducer in
-    # `nest_elements/1`, so HTML elements that span an EEx block (e.g.
-    # `<ul>` opens before `<%= for %>` and closes after `<% end %>`)
-    # see one continuous parser stack.
+    # interleave them with HTML tokens scanned out of `:text` chunks. The
+    # single combined stream is fed to one reducer in `nest_elements/1`, so
+    # HTML elements that span an EEx block (e.g. `<ul>` opens before
+    # `<%= for %>` and closes after `<% end %>`) see one continuous stack.
+    #
+    # Every token carries an authoritative `{line, column}` from
+    # `EEx.tokenize/2`. We convert that to an exact byte offset in `body`
+    # (`line_bases` maps each line to its byte start; columns are codepoints,
+    # so we count bytes across the leading codepoints of the line). EEx events
+    # take that offset directly; HTML events take their text chunk's offset as
+    # a base and are pinned within the chunk by `scan_html`. No re-scanning for
+    # `<`/`<%` markers — so a `<` inside EEx code (`x < 5`) or a `<%!-- … --%>`
+    # comment can never be mistaken for a tag or block marker.
+    line_bases = line_byte_bases(body)
+
     tokens
     |> Enum.flat_map(fn
       {:text, chars, meta} ->
-        html_tokens(to_string(chars), meta)
+        html_tokens(to_string(chars), meta, token_offset(body, line_bases, meta))
 
       {:expr, ~c"=", code, meta} ->
-        [{:eex_expr_evt, to_string(code), meta}]
+        [{:eex_expr_evt, to_string(code), with_offset(meta, body, line_bases)}]
 
       {:expr, ~c"", _code, _meta} ->
         []
 
       {:start_expr, ~c"=", code, meta} ->
-        [{:eex_block_open, to_string(code), meta}]
+        [{:eex_block_open, to_string(code), with_offset(meta, body, line_bases)}]
 
       {:start_expr, ~c"", _code, meta} ->
-        [{:eex_opaque_open, meta}]
+        [{:eex_opaque_open, with_offset(meta, body, line_bases)}]
 
       {:middle_expr, _, _code, _meta} ->
         []
 
       {:end_expr, _, _code, meta} ->
-        [{:eex_block_close, meta}]
+        [{:eex_block_close, with_offset(meta, body, line_bases)}]
 
       {:eof, _meta} ->
         []
@@ -837,109 +869,42 @@ defmodule Number42.Refactors.Heex.Tree do
       _ ->
         []
     end)
-    |> assign_event_offsets(body)
   end
 
-  # Stamp every event with the byte offset of its leading marker by
-  # threading a single monotonic cursor through `body`. Events are in
-  # document order, so each marker is found at or after the previous
-  # cursor — this disambiguates same-line siblings and nested elements
-  # that the old line + first-marker lookup could not tell apart.
-  defp assign_event_offsets(events, body) do
-    limit = byte_size(body)
+  defp with_offset(meta, body, line_bases),
+    do: meta |> Map.new() |> Map.put(:byte_offset, token_offset(body, line_bases, meta))
 
-    {events, _cursor} =
-      events
-      |> Enum.map_reduce(0, fn event, cursor ->
-        {offset, next} = locate_event(event, body, cursor)
-        # An end-finder for a malformed/complex tag (e.g. a final `{@rest}`
-        # attribute before `>`) can report a position past the body end;
-        # clamp so the next event's `:binary.match` scope stays valid and
-        # never runs backwards.
-        {put_event_offset(event, min(offset, limit)), next |> min(limit) |> max(cursor)}
-      end)
-
-    events
+  # Byte offset in `body` of a token at `{line, column}` (1-based). `column`
+  # counts codepoints, so walk the line's leading `column - 1` codepoints and
+  # sum their byte sizes onto the line's byte base.
+  defp token_offset(body, line_bases, meta) do
+    line = Map.get(meta, :line, 1)
+    column = Map.get(meta, :column, 1)
+    base = Map.get(line_bases, line, byte_size(body))
+    base + codepoint_bytes(body, base, column - 1)
   end
 
-  # `{offset, next_cursor}` for an event: `offset` is where the node's
-  # range starts; `next_cursor` is just past the marker that ends this
-  # event's leading token, so following events (and text) keep advancing
-  # forward without re-reading bytes this event already owns.
-  defp locate_event({:open, _name, _attrs, _meta}, body, cursor),
-    do: tag_at(body, cursor, "<")
+  defp codepoint_bytes(_body, _from, 0), do: 0
 
-  defp locate_event({:self, _name, _attrs, _meta}, body, cursor),
-    do: tag_at(body, cursor, "<")
+  defp codepoint_bytes(body, from, n),
+    do: count_codepoint_bytes(binary_part(body, from, byte_size(body) - from), n, 0)
 
-  defp locate_event({:close, _name, _meta}, body, cursor),
-    do: tag_at(body, cursor, "</")
+  defp count_codepoint_bytes(_bin, 0, acc), do: acc
+  defp count_codepoint_bytes("", _n, acc), do: acc
 
-  defp locate_event({:text, raw, _meta}, _body, cursor),
-    do: {cursor, cursor + byte_size(raw)}
+  defp count_codepoint_bytes(<<cp::utf8, rest::binary>>, n, acc),
+    do: count_codepoint_bytes(rest, n - 1, acc + byte_size(<<cp::utf8>>))
 
-  defp locate_event({:eex_expr_evt, _code, _meta}, body, cursor),
-    do: eex_at(body, cursor)
+  defp count_codepoint_bytes(<<_byte, rest::binary>>, n, acc),
+    do: count_codepoint_bytes(rest, n - 1, acc + 1)
 
-  defp locate_event({:eex_block_open, _header, _meta}, body, cursor),
-    do: eex_at(body, cursor)
-
-  defp locate_event({:eex_block_close, _meta}, body, cursor),
-    do: eex_at(body, cursor)
-
-  defp locate_event({:eex_opaque_open, _meta}, body, cursor),
-    do: eex_at(body, cursor)
-
-  # Find the tag's `<`/`</` at or after `cursor`; advance the cursor just
-  # past the tag's terminating `>` (quote- and `{...}`-aware) so following
-  # events start after it.
-  defp tag_at(body, cursor, marker) do
-    case :binary.match(body, marker, scope: {cursor, byte_size(body) - cursor}) do
-      {pos, _len} -> {pos, tag_end_pos(body, pos)}
-      :nomatch -> {cursor, cursor}
-    end
+  # Map of `line => byte offset of that line's first byte` (lines are 1-based).
+  defp line_byte_bases(body) do
+    body
+    |> String.split("\n", trim: false)
+    |> Enum.reduce({%{}, 1, 0}, fn part, {map, line, base} ->
+      {Map.put(map, line, base), line + 1, base + byte_size(part) + 1}
+    end)
+    |> elem(0)
   end
-
-  defp tag_end_pos(body, lt_pos) do
-    case find_tag_end(body, lt_pos + 1) do
-      {:self, after_self} -> after_self
-      {:open, after_open} -> after_open
-    end
-  end
-
-  # Find an EEx `<%` at or after `cursor`; advance past its closing `%>`.
-  defp eex_at(body, cursor) do
-    case :binary.match(body, "<%", scope: {cursor, byte_size(body) - cursor}) do
-      {pos, _len} -> {pos, find_eex_close(body, pos)}
-      :nomatch -> {cursor, cursor}
-    end
-  end
-
-  defp put_event_offset({:open, name, attrs, meta}, off),
-    do: {:open, name, attrs, Map.put(meta_map(meta), :byte_offset, off)}
-
-  defp put_event_offset({:self, name, attrs, meta}, off),
-    do: {:self, name, attrs, Map.put(meta_map(meta), :byte_offset, off)}
-
-  defp put_event_offset({:close, name, meta}, off),
-    do: {:close, name, Map.put(meta_map(meta), :byte_offset, off)}
-
-  defp put_event_offset({:text, raw, meta}, off),
-    do: {:text, raw, Map.put(meta_map(meta), :byte_offset, off)}
-
-  defp put_event_offset({:eex_expr_evt, code, meta}, off),
-    do: {:eex_expr_evt, code, Map.put(meta_map(meta), :byte_offset, off)}
-
-  defp put_event_offset({:eex_block_open, header, meta}, off),
-    do: {:eex_block_open, header, Map.put(meta_map(meta), :byte_offset, off)}
-
-  defp put_event_offset({:eex_block_close, meta}, off),
-    do: {:eex_block_close, Map.put(meta_map(meta), :byte_offset, off)}
-
-  defp put_event_offset({:eex_opaque_open, meta}, off),
-    do: {:eex_opaque_open, Map.put(meta_map(meta), :byte_offset, off)}
-
-  # EEx token metas arrive as bare maps; HTML-scan metas already are.
-  defp meta_map(meta) when is_map(meta), do: meta
-  defp meta_map(meta) when is_list(meta), do: Map.new(meta)
 end

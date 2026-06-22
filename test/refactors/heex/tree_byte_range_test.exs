@@ -75,6 +75,120 @@ defmodule Number42.Refactors.Heex.TreeByteRangeTest do
     end
   end
 
+  describe "node_byte_range/2 — slice-starts-with-tag invariant (issue #348/#350)" do
+    # The real safety property every range consumer relies on: for an
+    # `{:element, tag, …}` node the slice must begin with `<tag`. A drift
+    # in the offset scan violates it — the slice lands on a sibling's close
+    # tag or collapses to an empty `end..end` range.
+    defp assert_every_element_slice_starts_with_tag(body) do
+      {:ok, tree} = Tree.parse_body(body)
+
+      bad =
+        Tree.walk(tree, [], fn
+          {:element, tag, _attrs, _children, _meta} = node, acc ->
+            {s, e} = Tree.node_byte_range(node, body)
+            slice = binary_part(body, s, max(e - s, 0))
+
+            if e - s > 0 and String.starts_with?(slice, "<" <> tag),
+              do: acc,
+              else: [{tag, s, e, String.slice(slice, 0, 30)} | acc]
+
+          _node, acc ->
+            acc
+        end)
+
+      assert bad == [], "elements whose slice does not start with their tag: #{inspect(bad)}"
+    end
+
+    test "standalone `{@rest}` spread attribute does not drift siblings" do
+      body = ~s|<div :if={@x} {@rest}>\n  <span>a</span>\n  <button>b</button>\n</div>\n|
+      assert_every_element_slice_starts_with_tag(body)
+    end
+
+    test "standalone `{[...]}` dynamic-attribute list does not drift children" do
+      body =
+        ~s|<button class="c" {[{:"phx-x", ""}]} type="button">\n  <.icon name="x" />\n</button>\n|
+
+      assert_every_element_slice_starts_with_tag(body)
+    end
+
+    test "bare `<` inside an `<%= if … do %>` expression is not matched as a tag" do
+      body =
+        ~s|<div>\n  <button {@rest}>x</button>\n  <%= if String.length(v) < 60 do %>\n    <span>y</span>\n  <% end %>\n</div>\n|
+
+      assert_every_element_slice_starts_with_tag(body)
+    end
+
+    test "reduced :flash shape — multi-line spread tag with nested components" do
+      body = """
+      <div
+        :if={msg = render_slot(@inner_block) || get(@flash, @kind)}
+        phx-click={JS.push("clear") |> hide("#flash")}
+        {@rest}
+      >
+        <p :if={@title}>
+          <Heroicons.info :if={@kind == :info} mini class="h-4 w-4" />
+          {@title}
+        </p>
+        <button :if={@close} type="button">
+          <Heroicons.x_mark solid class="h-5 w-5" />
+        </button>
+      </div>
+      """
+
+      assert_every_element_slice_starts_with_tag(body)
+    end
+
+    test "multibyte text before a marker keeps byte offsets aligned" do
+      # EEx columns count codepoints; a byte-naive offset would drift after the
+      # 2-byte `ü`/`ä`/`ö`/`é`. Both the `<%= %>` expr and the trailing `<div>`
+      # (preceded by multibyte content) must still slice correctly.
+      body = ~s|<p>Über ältere Größen</p>\n<%= @x %>\n<div>café</div>\n|
+      assert_every_element_slice_starts_with_tag(body)
+
+      {:ok, tree} = Tree.parse_body(body)
+
+      expr =
+        Tree.walk(tree, nil, fn
+          {:eex_expr, _, _} = n, _ -> n
+          _, acc -> acc
+        end)
+
+      {s, e} = Tree.node_byte_range(expr, body)
+      assert binary_part(body, s, e - s) == "<%= @x %>"
+    end
+
+    test "reduced menu_ui shape — spread attr + EEx if with `<` comparisons" do
+      body = """
+      <div>
+        <%= if not is_nil(value) do %>
+          <div class="bobble">
+            <button
+              class="x"
+              {[{:"phx-value-\#{name}", ""}]}
+              type="button"
+            >
+              <Heroicons.x_mark class="h-3 w-3" />
+            </button>
+          </div>
+        <% end %>
+
+        <%= if length(values) <= 3 && String.length(j) < 60 do %>
+          <div class="row">
+            <input type="radio" value={v} />
+          </div>
+        <% else %>
+          <select name={name}>
+            <option value="">pick</option>
+          </select>
+        <% end %>
+      </div>
+      """
+
+      assert_every_element_slice_starts_with_tag(body)
+    end
+  end
+
   describe "node_byte_range/2 for eex nodes" do
     test "covers an eex_expr `{...}` interpolation" do
       body = ~s(<span>{@title}</span>)
