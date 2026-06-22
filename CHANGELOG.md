@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- `ExtractRepeatedGuardToDefguard`: removed. Measured against a real codebase
+  (position-db, 378 files) it generated 41 `defguardp` macros, **all** wrapping a
+  single bare type primitive (`is_binary`/`is_atom`/`is_list`/`is_map`) — zero
+  compound guards. Every one was either a noise name over a primitive or an
+  outright lie (the macro name was derived from the first group member's variable
+  and stamped onto members with different variables, e.g. `is_valid_path` over
+  vars `s`/`type`/`options`, `is_valid_parent_id` over `search_term`). Repeated
+  *complex* guards worth naming essentially do not occur in real code: complex
+  validation lives in functions, not in deliberately-anaemic guards. The refactor
+  had a negative expected value on real input, so it is removed rather than gated.
+
 ### Added
 
 - `NormalizeComponentInvocationOrder` (#312): a default-OFF HEEx refactor that
