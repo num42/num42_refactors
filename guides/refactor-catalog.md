@@ -416,6 +416,13 @@ The highest-risk group — **default-off**, `--dry-run` first.
 Refactors that operate on HEEx templates (inline `~H` sigils and
 `.heex` files).
 
+### `Number42.Refactors.Ex.DropRedundantAttrDefaults`
+
+> Drop a call-site attr whose literal value equals the component's
+> declared default (`<.button size="md" />` → `<.button />` when
+> `attr :size, …, default: "md"`). Literal-only, exact, type-aware;
+> non-literals and unresolvable components are declined. Default-OFF.
+
 ### `Number42.Refactors.Ex.ExtractHeexExactClone`
 
 > Extract `:exact` HEEx clones into the configured `CoreComponents`

@@ -24,6 +24,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   position-db (10 files reordered, 0 non-idempotent) and whk_portal_umbrella
   (5 files; surfaced a `Heex.Tree` range bug #348 — the refactor defends against
   the degenerate range and skips the node).
+- `DropRedundantAttrDefaults` (#309): a default-OFF HEEx refactor that drops a
+  call-site attribute whose **literal** value equals the component's **declared
+  default** — `<.button size="md" />` becomes `<.button />` when `button`
+  declares `attr :size, :string, default: "md"`. A re-passed default carries no
+  information and pins the value against a later default change. The match is
+  literal-vs-literal, **exact and type-aware** (string/number/boolean/`nil`/atom
+  compared on a canonical `{kind, value}` pair — a string `"3"` never matches a
+  number default `3`); any non-literal (`@dynamic`, a call, a list/map) is never
+  touched. Defaults are resolved from the component's own module: a local
+  `<.name>` against the file's module or an `import`ed module, a qualified
+  `<Alias.name>` via the file's `alias` directives, using the corpus file list
+  threaded through `prepare/1`. Unresolvable components and attrs declared
+  without a `default:` are declined. Idempotent — it only removes redundant
+  attrs and never re-adds them.
 - `ExtractToPublicComponent` (#299): a default-OFF HEEx refactor that lifts a
   motif-classified `~H` subtree into its **own public file component module**
   (`lib/<app>_web/components/<name>.ex`) other modules can call — the public,
