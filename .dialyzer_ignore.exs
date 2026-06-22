@@ -103,11 +103,6 @@
   {"lib/number42/refactors/ex/extract_cond_if_guard_clauses.ex", :call},
   {"lib/number42/refactors/ex/extract_common_prolog.ex", :call},
   {"lib/number42/refactors/ex/extract_cond_to_guard_clauses.ex", :call},
-  # `extract_repeated_guard_to_defguard.ex` calls `Patch.replace` in the
-  # `emit_group/3` head-mapper; the `:call` plus the anonymous-mapper
-  # `:no_return` are pure follow-ons from the spec gap above.
-  {"lib/number42/refactors/ex/extract_repeated_guard_to_defguard.ex", :call},
-  {"lib/number42/refactors/ex/extract_repeated_guard_to_defguard.ex", :no_return},
   {"lib/number42/refactors/ex/extract_socket_to_pipe.ex", :call},
   {"lib/number42/refactors/ex/extract_socket_to_pipe.ex", :pattern_match},
   {"lib/number42/refactors/ex/extract_to_pipeline.ex", :call},

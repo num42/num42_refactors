@@ -194,7 +194,6 @@ defmodule Number42.Refactors.MixProject do
           Number42.Refactors.Ex.ExpandShortFormBindings,
           Number42.Refactors.Ex.ExpandShortFormFunctions,
           Number42.Refactors.Ex.ExpandShortFormParams,
-          Number42.Refactors.Ex.ExtractRepeatedGuardToDefguard,
           Number42.Refactors.Ex.IdentityPassthrough,
           Number42.Refactors.Ex.InlineSingleExpressionDef,
           Number42.Refactors.Ex.LiftLocalLambda,

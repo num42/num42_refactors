@@ -308,11 +308,6 @@ Refactors that clean up redundant or unhelpful `def` shapes.
 
 > Expand short-form parameter names to long forms.
 
-### `Number42.Refactors.Ex.ExtractRepeatedGuardToDefguard`
-
-> Extract a single-var `when`-guard repeated across `>= 3` clauses into
-> a `defguardp`, naming each head `when is_valid_var(var)`.
-
 ### `Number42.Refactors.Ex.IdentityPassthrough`
 
 > Remove `case` expressions where every clause is `pat -> pat`.
