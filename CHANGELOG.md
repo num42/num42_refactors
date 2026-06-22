@@ -23,9 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- `ExtractMagicNumber` naming, several fixes that together cut the
-  touched-file count on position-db from 45 to 11 and removed every
-  garbage/lying name:
+- `ExtractMagicNumber` naming, a series of fixes that together removed every
+  garbage/lying/coincidental name produced on position-db:
   - **Clause-head axis** — derive a name from the enclosing function clause
     when the literal *is* the clause body (`defp image_width("md"), do: 80` →
     `@image_width_md`), via a new `opts[:clause]` axis in
@@ -53,6 +52,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     carry two distinct keyword keys (`batch_size: 5` vs `max_concurrency: 5`)
     shares a value by coincidence, not meaning; it is no longer fused into one
     `@attr` that stamps one site's name onto the other.
+  - **Import/alias/require + attr/slot literals excluded** — an arity in an
+    `import M, only: [foo: 4]` directive is no longer rewritten to
+    `only: [foo: @attr]` (would not compile), and a component declaration's
+    `attr :gap, default: 4` keeps its literal default (a spec, not a recurring
+    value).
+  - **`nil`/`_` clause patterns name the constant** — `f(nil)`/`f(_)` clauses
+    now yield `@f_nil`/`@f_default` instead of a `@f`/`@f_2` collision.
+  - **Keyword keys enriched with param + call noun** — a generic key gains the
+    call's first literal param and the call's noun (verb-prefix stripped),
+    deduped: `validate_length(:email, max: 160)` → `@email_max_length`,
+    `validate_length(:password, min: 12, max: 72)` → `@password_min_length` /
+    `@password_max_length`. With no literal param, a thin wrapper around a
+    like-named call borrows the function name (`def show, do: JS.show(time:
+    300)` → `@show_time`); an unrelated enclosing function is not used.
 
 ### Removed
 

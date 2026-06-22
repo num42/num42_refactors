@@ -65,6 +65,68 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
       )
     end
 
+    test "enriches a generic key with the literal param and the call's noun" do
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def f(cs), do: validate_length(cs, :email, max: 160)
+          def g(cs), do: validate_length(cs, :email, max: 160)
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          @email_max_length 160
+          def f(cs), do: validate_length(cs, :email, max: @email_max_length)
+          def g(cs), do: validate_length(cs, :email, max: @email_max_length)
+        end
+        ''',
+        @on
+      )
+    end
+
+    test "falls back to the enclosing function name when the call has no literal param" do
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def show(js), do: JS.show(js, time: 300)
+          def hide(js), do: JS.hide(js, time: 200)
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          @show_time 300
+          @hide_time 200
+          def show(js), do: JS.show(js, time: @show_time)
+          def hide(js), do: JS.hide(js, time: @hide_time)
+        end
+        ''',
+        min_occurrences: 1,
+        enabled: true
+      )
+    end
+
+    test "deduplicates repeated tokens across param, key and call noun" do
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def f, do: set_size(:size, size: 12)
+          def g, do: set_size(:size, size: 12)
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          @size 12
+          def f, do: set_size(:size, size: @size)
+          def g, do: set_size(:size, size: @size)
+        end
+        ''',
+        @on
+      )
+    end
+
     test "hoists a repeated float literal when its key gives it a name" do
       assert_rewrites(
         @subject,
@@ -241,6 +303,25 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
       assert_unchanged(@subject, "def a, do: 3600\ndef b, do: 3600", @on)
     end
 
+    test "component attr/slot defaults are declarations, not hoisted" do
+      # `attr :gap, default: 4` declares a component's default; it reads as
+      # a spec, not a repeated magic value. Its literal is excluded even
+      # when two declarations share a value (and would otherwise collide on
+      # one enriched name), so nothing is hoisted.
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          attr :gap, :integer, default: 4
+          attr :gap, :integer, default: 4
+          slot :inner, default: 4
+          def render(assigns), do: assigns
+        end
+        ''',
+        @on
+      )
+    end
+
     test "literals in pattern positions are never hoisted (module attr is illegal in a pattern)" do
       # `def f(404)` and `x = 404` are match patterns; a module attribute
       # cannot appear there. Pattern literals are excluded from both the
@@ -308,6 +389,40 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
         defmodule M do
           def s, do: {&a/3, &b/3}
           def t, do: 3
+        end
+        ''',
+        @on
+      )
+    end
+  end
+
+  describe "import/alias/require directives are never touched" do
+    test "an arity in an `import only:` list is never hoisted" do
+      # `import M, only: [foo: 4]` — the `4` is a function arity, not data.
+      # Replacing it with `@attr` yields `only: [foo: @attr]`, which is not
+      # a valid directive. Directive literals are neither candidate nor
+      # counted, so the body `4`s alone fall below the threshold.
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          import Other, only: [foo: 4]
+          def a, do: at(4)
+          def b, do: at(4)
+        end
+        ''',
+        @on
+      )
+    end
+
+    test "arities across import and except do not pad a data literal's count" do
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          import A, only: [f: 4]
+          import B, except: [g: 4]
+          def a, do: at(4)
         end
         ''',
         @on
@@ -437,6 +552,28 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
         end
         ''',
         @on
+      )
+    end
+
+    test "a nil pattern names the constant, a wildcard names the default" do
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def quality_total_count(nil), do: 3
+          def quality_total_count(_), do: 5
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          @quality_total_count_nil 3
+          @quality_total_count_default 5
+          def quality_total_count(nil), do: @quality_total_count_nil
+          def quality_total_count(_), do: @quality_total_count_default
+        end
+        ''',
+        min_occurrences: 1,
+        enabled: true
       )
     end
 

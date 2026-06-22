@@ -139,7 +139,12 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
       body |> body_to_exprs() |> Enum.map(&prune_nested_modules/1) |> Enum.map(&prune_quotes/1)
 
     excluded =
-      [attribute_value_nodes(exprs), pattern_literal_nodes(exprs), capture_arity_nodes(exprs)]
+      [
+        attribute_value_nodes(exprs),
+        pattern_literal_nodes(exprs),
+        capture_arity_nodes(exprs),
+        directive_nodes(exprs)
+      ]
       |> Enum.reduce(&MapSet.union/2)
 
     occurrences = collect_occurrences(exprs, excluded)
@@ -208,6 +213,32 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
       {:&, _, [{:/, _, [{fun, _, _}, {:__block__, _, [arity]} = node]}]}
       when is_atom(fun) and is_integer(arity) ->
         [node]
+
+      _ ->
+        []
+    end)
+    |> MapSet.new()
+  end
+
+  # Every numeric literal under a directive or declaration call whose
+  # numbers are not repeated data:
+  #
+  #   * `import`/`alias`/`require` — the only number is a function arity
+  #     in an `only:`/`except:` list (`import M, only: [foo: 4]`); an
+  #     arity must stay a literal, `only: [foo: @attr]` would not compile.
+  #   * `attr`/`slot` — a component declaration's `default:` is a spec,
+  #     not a recurring magic value; `attr :gap, default: 4` reads as the
+  #     declaration it is, and hoisting `4` into `@gap_default` only adds
+  #     indirection.
+  #
+  # These literals are neither candidate nor counted.
+  @directive_calls [:import, :alias, :require, :attr, :slot]
+  defp directive_nodes(exprs) do
+    exprs
+    |> Enum.flat_map(&Macro.prewalker/1)
+    |> Enum.flat_map(fn
+      {directive, _, _} = node when directive in @directive_calls ->
+        numeric_literal_nodes(node)
 
       _ ->
         []
@@ -323,6 +354,15 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
     end
   end
 
+  # The discriminating token of a clause's first argument. A `nil`
+  # literal and the `_` wildcard both name their clause — `nil` and
+  # `default` — so a `f(nil)`/`f(_)` pair yields `@f_nil`/`@f_default`
+  # rather than a `@f`/`@f_2` collision. Other non-literal patterns carry
+  # no token (the function name stands alone).
+  defp literal_pattern({:__block__, _, [nil]}), do: "nil"
+  defp literal_pattern(nil), do: "nil"
+  defp literal_pattern({:_, _, ctx}) when is_atom(ctx), do: "default"
+
   defp literal_pattern({:__block__, _, [value]}) when is_binary(value) or is_atom(value),
     do: value
 
@@ -353,23 +393,123 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
     |> Enum.map(&{&1, Atom.to_string(fun)})
   end
 
-  # Map a literal value-node to the keyword key it sat under, for
-  # genuine keyword *arguments* only. Block keywords (`do:`/`else:`/…)
-  # are structural, not data, so they are excluded — their key would
-  # name the attribute `do`.
+  # Map a literal value-node to the name derived from the keyword key it
+  # sat under, enriched with the surrounding call: the call's first
+  # literal param and the call's noun (its name with a leading verb like
+  # `validate_`/`put_`/`set_` stripped) join the key, deduped and ordered
+  # `param_key_noun` — `validate_length(:email, max: 160)` → `email_max_length`.
+  # A bare keyword arg with no enriching call keeps just its key
+  # (`connect(timeout: 5000)` → `timeout`). Block keywords (`do:`/`else:`/…)
+  # are structural, not data, and excluded — their key would name the
+  # attribute `do`.
   @block_keywords ~w(do else after catch rescue)a
+  @call_verbs ~w(validate put set cast get fetch assign update build make)
   defp keyword_value_keys(exprs) do
     exprs
-    |> Enum.flat_map(&Macro.prewalker/1)
-    |> Enum.flat_map(fn
-      {{:__block__, _, [key]}, {:__block__, _, [value]} = value_node}
-      when is_atom(key) and is_number(value) and key not in @block_keywords ->
-        [{value_node, key}]
-
-      _ ->
-        []
-    end)
+    |> Enum.flat_map(&keyword_names_in_scope(&1, nil))
     |> Map.new()
+  end
+
+  # Walk carrying the nearest enclosing function name as scope, so a call
+  # with no literal param of its own can borrow the function as the
+  # subject (`def show, do: JS.show(time: 300)` → `show_time`). A `def`
+  # sets the scope for its whole body; the walk recurses with that scope
+  # instead of re-descending scope-less, so each call is named exactly
+  # once.
+  defp keyword_names_in_scope({kind, _, [head | rest]}, _scope)
+       when kind in [:def, :defp] do
+    fun = enclosing_function_name(head)
+    Enum.flat_map(rest, &keyword_names_in_scope(&1, fun))
+  end
+
+  defp keyword_names_in_scope({_, _, args} = node, scope) when is_list(args) do
+    call_keyword_names(node, scope) ++ Enum.flat_map(args, &keyword_names_in_scope(&1, scope))
+  end
+
+  defp keyword_names_in_scope({left, right}, scope) do
+    keyword_names_in_scope(left, scope) ++ keyword_names_in_scope(right, scope)
+  end
+
+  defp keyword_names_in_scope(list, scope) when is_list(list) do
+    Enum.flat_map(list, &keyword_names_in_scope(&1, scope))
+  end
+
+  defp keyword_names_in_scope(_node, _scope), do: []
+
+  defp enclosing_function_name(head) do
+    case strip_when(head) do
+      {fun, _, _} when is_atom(fun) -> Atom.to_string(fun)
+      _ -> nil
+    end
+  end
+
+  defp call_keyword_names({{:., _, [_mod, fun]}, _, args}, scope)
+       when is_atom(fun) and is_list(args),
+       do: keyword_names_in_call(fun, args, scope)
+
+  defp call_keyword_names({fun, _, args}, scope) when is_atom(fun) and is_list(args),
+    do: keyword_names_in_call(fun, args, scope)
+
+  defp call_keyword_names(_, _scope), do: []
+
+  defp keyword_names_in_call(fun, args, scope) do
+    subject = first_literal_param(args) || scope_subject(scope, fun)
+    noun = call_noun(fun)
+
+    for kw_list <- args,
+        is_list(kw_list),
+        {{:__block__, _, [key]}, {:__block__, _, [value]} = value_node} <- kw_list,
+        is_atom(key) and is_number(value) and key not in @block_keywords do
+      {value_node, enriched_name([subject, Atom.to_string(key), noun])}
+    end
+  end
+
+  # The enclosing function names the value only when the function is a
+  # thin wrapper around the like-named call — `def show, do: JS.show(time:
+  # 300)` (`show` == call `show`). A function whose name differs from the
+  # call it makes (`def a, do: connect(timeout: 5000)`) is not the
+  # subject; using it would split one constant across unrelated clause
+  # names (`a_timeout`/`b_timeout`).
+  defp scope_subject(nil, _fun), do: nil
+  defp scope_subject(scope, fun), do: if(scope == Atom.to_string(fun), do: scope, else: nil)
+
+  # The first positional argument that is a plain atom/string literal —
+  # `validate_length(:email, max: 160)` → `"email"`. Names the subject the
+  # call acts on. nil when no such param precedes the keywords.
+  defp first_literal_param(args) do
+    Enum.find_value(args, fn
+      {:__block__, _, [value]} when is_atom(value) and not is_nil(value) -> Atom.to_string(value)
+      {:__block__, _, [value]} when is_binary(value) -> value
+      _ -> nil
+    end)
+  end
+
+  # The call's noun: its name with a leading domain verb stripped
+  # (`validate_length` → `length`, `put_resp` → `resp`). nil when the name
+  # is a bare verb or carries no recognized verb prefix, so a plain call
+  # like `connect`/`reconnect` contributes nothing.
+  defp call_noun(fun) do
+    str = Atom.to_string(fun)
+
+    Enum.find_value(@call_verbs, fn verb ->
+      case String.split(str, verb <> "_", parts: 2) do
+        ["", noun] when noun != "" -> noun
+        _ -> nil
+      end
+    end)
+  end
+
+  # Join the available tokens into a single snake_case name, dropping nils
+  # and de-duplicating repeats while preserving order
+  # (`["email", "max", "length"]` → `"email_max_length"`,
+  # `["size", "size", nil]` → `"size"`).
+  defp enriched_name(tokens) do
+    tokens
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.flat_map(&String.split(&1, "_", trim: true))
+    |> Enum.dedup()
+    |> Enum.uniq()
+    |> Enum.join("_")
   end
 
   # [{value, hits}] → [{name, value, hits}] with collision-suffixed
