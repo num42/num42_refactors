@@ -156,6 +156,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `Heex.Tree.node_byte_range/2` (#348, #350): elements nested inside complex
+  real-world `~H` templates no longer resolve to degenerate (`end..end`, empty
+  slice) or wrong byte ranges (a sibling's closing `div>` mid-text). Root cause
+  was monotonic byte-offset drift in the parser's event scan: (1) `read_attrs`
+  could not parse a standalone `{…}` spread attribute (`{@rest}`,
+  `{[{:"phx-…", v}]}`), so it bailed mid-tag and dumped the rest of the open tag
+  (including its `>`) into the text stream, desyncing the cursor; (2) the cursor
+  re-found `<`/`<%` markers with a forward `:binary.match`, which could land on
+  a `<` inside EEx code (`x < 5`) or a `<%!-- … --%>` comment, after which the
+  monotonic `max(cursor)` clamp pushed every following node toward
+  `byte_size(body)`. Fixed at the source where offsets are stamped: spread
+  attributes are now consumed via curly balancing, and every node's byte offset
+  is derived from the authoritative `{line, column}` `EEx.tokenize/2` emits for
+  each token (codepoint-aware, multibyte-safe) instead of by re-scanning for
+  markers. HTML events are pinned within their own text chunk, so a `<`/`<%` in
+  EEx code or a comment can never be mistaken for a marker. Verified across the
+  whole whk-portal + position-db corpus: 236 → 0 bad element ranges over 7010
+  element nodes. The defensive "skip a node whose slice doesn't start with
+  `<tag`" guards added in #309/#312 can be relaxed in a follow-up.
 - `ProposeSharedHeexComponent` (#298): the applied refactor no longer produces a
   non-compiling or behaviour-changing tree on real templates (it compiled but
   broke on the one position-db candidate — same green-CI-but-broken class as
