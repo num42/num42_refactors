@@ -620,7 +620,6 @@ defmodule Number42.Refactors.Ex.DropRedundantAttrDefaults do
 
   defp binary_part_safe(bin, pos, len) do
     cond do
-      pos < 0 -> ""
       pos >= byte_size(bin) -> ""
       pos + len > byte_size(bin) -> binary_part(bin, pos, byte_size(bin) - pos)
       true -> binary_part(bin, pos, len)
