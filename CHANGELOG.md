@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `disable_for_glob` config key: switch a refactor off for files matching any of
+  its globs (`%{Module => ["lib/legacy/**", ...]}`), leaving it active on every
+  other file. Per-file gating, distinct from `skipped_modules` (whole-pipeline).
+- `enable_in_tests` config key (default `false`): a shortcut over
+  `disable_for_glob` for the literal hoisters (`ExtractMagicNumber`,
+  `ExtractStringLiteral`, `HoistHardcodedConfig`). When false they do not fire on
+  `test/**` files — a literal at a test assertion is its own documentation, so
+  hoisting it into a `@module_attribute` only hurts readability. Both run modes
+  (default and `--step-by-step`) honour the gating; it is implemented in the task
+  via the Engine's existing per-file `skipped_modules`, keeping the Engine
+  path-blind.
+
 ### Removed
 
 - `ExtractRepeatedGuardToDefguard`: removed. Measured against a real codebase

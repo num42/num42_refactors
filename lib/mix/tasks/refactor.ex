@@ -12,7 +12,17 @@ defmodule Mix.Tasks.Refactor do
         skipped_modules: [],
         configured_modules: [
           # {SomeRefactor, some_opt: true}
-        ]
+        ],
+        # Skip a refactor for files matching any of its globs (per-file,
+        # leaves the refactor active on every other file).
+        disable_for_glob: %{
+          # SomeRefactor => ["lib/legacy/**", "priv/**/*.ex"]
+        },
+        # Shortcut: when false (default), the literal hoisters
+        # (ExtractMagicNumber/ExtractStringLiteral/HoistHardcodedConfig) do
+        # not fire on `test/**` files — a literal in a test is its own
+        # documentation. Set true to hoist literals in tests too.
+        enable_in_tests: false
       ]
 
   ## Usage
@@ -139,7 +149,14 @@ defmodule Mix.Tasks.Refactor do
   use Mix.Task
 
   alias Number42.Refactors.Engine
-  import Mix.Tasks.Refactor.Shared, only: [expand_inputs_shared: 1]
+  import Mix.Tasks.Refactor.Shared, only: [expand_inputs_shared: 1, glob_match?: 2]
+
+  @literal_hoisters [
+    Number42.Refactors.Ex.ExtractMagicNumber,
+    Number42.Refactors.Ex.ExtractStringLiteral,
+    Number42.Refactors.Ex.HoistHardcodedConfig
+  ]
+  @test_glob "test/**/*.{ex,exs}"
 
   @config_path ".refactor.exs"
   @switches [
@@ -265,6 +282,7 @@ defmodule Mix.Tasks.Refactor do
 
     hits =
       files
+      |> Enum.reject(&module_globbed_out?(module, &1, engine_opts))
       |> Enum.flat_map(fn path ->
         source = File.read!(path)
         rewritten = Engine.apply_one(module, source, engine_opts)
@@ -652,6 +670,52 @@ defmodule Mix.Tasks.Refactor do
     end)
   end
 
+  # Per-file refactor gating. The base `skipped_modules` (config +
+  # `--exclude`) is path-agnostic; this augments it with the modules that
+  # `disable_for_glob` switches off for `path`, plus the `enable_in_tests`
+  # sugar (a `test/**` glob-disable for the literal hoisters —
+  # ExtractMagicNumber/ExtractStringLiteral/HoistHardcodedConfig). The
+  # Engine stays path-blind — it just receives a per-file `skipped_modules`.
+  @doc false
+  @spec skipped_for_file(Path.t(), [module()], map()) :: [module()]
+  def skipped_for_file(path, base_skipped, config) do
+    (base_skipped ++ globbed_out_modules(path, config)) |> Enum.uniq()
+  end
+
+  defp globbed_out_modules(path, config) do
+    config
+    |> disable_for_glob_with_test_gate()
+    |> Enum.filter(fn {_module, globs} -> Enum.any?(globs, &glob_match?(&1, path)) end)
+    |> Enum.map(fn {module, _globs} -> module end)
+  end
+
+  defp disable_for_glob_with_test_gate(config) do
+    base = Map.get(config, :disable_for_glob, %{})
+    gate_literal_hoisters(base, test_globs(config))
+  end
+
+  defp gate_literal_hoisters(base, []), do: base
+
+  defp gate_literal_hoisters(base, globs) do
+    Enum.reduce(@literal_hoisters, base, fn module, acc ->
+      Map.update(acc, module, globs, &(&1 ++ globs))
+    end)
+  end
+
+  defp test_globs(%{enable_in_tests: true}), do: []
+  defp test_globs(_config), do: [@test_glob]
+
+  defp engine_opts_for_file(path, engine_opts) do
+    base_skipped = Keyword.fetch!(engine_opts, :skipped_modules)
+    config = Keyword.get(engine_opts, :project_config, %{})
+    Keyword.put(engine_opts, :skipped_modules, skipped_for_file(path, base_skipped, config))
+  end
+
+  defp module_globbed_out?(module, path, engine_opts) do
+    config = Keyword.get(engine_opts, :project_config, %{})
+    module in skipped_for_file(path, [], config)
+  end
+
   defp process_file(path, engine_opts, run_opts) do
     source = File.read!(path)
 
@@ -660,7 +724,7 @@ defmodule Mix.Tasks.Refactor do
       changed?: changed?,
       reformat_triggered?: reformat?,
       source: new_source
-    } = Engine.run(source, engine_opts)
+    } = Engine.run(source, engine_opts_for_file(path, engine_opts))
 
     cond do
       not changed? ->

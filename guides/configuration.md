@@ -45,6 +45,16 @@ aborts with a clear error.
     Number42.Refactors.Ex.SortFunctions
   ],
 
+  # Skip a refactor only for files matching any of its globs. The
+  # refactor stays active on every other file.
+  disable_for_glob: %{
+    Number42.Refactors.Ex.ExtractStringLiteral => ["lib/legacy/**"]
+  },
+
+  # Shortcut. When false (default) the literal hoisters do not fire on
+  # test files. Set true to hoist literals in tests too.
+  enable_in_tests: false,
+
   # HEEx-aware refactors read this block.
   heex: %{
     # The CoreComponents module that ExtractHeexExactClone appends
@@ -110,12 +120,34 @@ A list of modules to remove from the pipeline entirely. Equivalent to
 not having them compiled in the first place. Use this for refactors
 whose output style doesn't fit your house rules.
 
-### `heex.core_components_module` (string)
+### `disable_for_glob` (map of `Module => [glob]`)
 
-Fully-qualified module name as a string. The HEEx clone extractor
-appends generated `defp <name>(assigns)` functions to the source file
-that contains `defmodule <this string>`. Omit it and HEEx clone
-extraction becomes a no-op.
+Switches a refactor off for any file whose path matches one of its
+globs, while leaving it active everywhere else. `skipped_modules`
+removes a refactor from the whole pipeline; `disable_for_glob` removes
+it only from the matching files. Globs are matched against the path as
+the task sees it (e.g. `test/foo/bar_test.exs`); `**` spans nested
+directories.
+
+```elixir
+disable_for_glob: %{
+  Number42.Refactors.Ex.ExtractStringLiteral => ["lib/legacy/**"],
+  Number42.Refactors.Ex.SortFunctions => ["priv/**/*.ex"]
+}
+```
+
+### `enable_in_tests` (boolean, default `false`)
+
+Shortcut over `disable_for_glob` for the **literal hoisters** —
+`ExtractMagicNumber`, `ExtractStringLiteral`, `HoistHardcodedConfig`.
+Each lifts a literal value (a number, a repeated string, a URL/path)
+into a `@module_attribute`. In tests that hurts: the concrete value at
+the assertion *is* the documentation, so hoisting it away makes the
+test harder to read. With `enable_in_tests: false` (the default) these
+three refactors do not fire on `test/**/*.{ex,exs}`. Set it to `true`
+to hoist literals in tests too. It is exactly equivalent to adding a
+`test/**` glob for all three under `disable_for_glob` — one source of
+truth.
 
 ## CLI overrides
 
