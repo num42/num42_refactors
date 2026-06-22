@@ -392,6 +392,7 @@ defmodule Mix.Tasks.Refactor do
     Number42.Refactors.Ex.ExtractRenamedClone,
     Number42.Refactors.Ex.ExtractSharedModule,
     Number42.Refactors.Ex.ExtractToPublicComponent,
+    Number42.Refactors.Ex.NormalizeComponentInvocationOrder,
     Number42.Refactors.Ex.ProposeSharedHeexComponent,
     Number42.Refactors.Ex.PromoteRepeatedPrivateHelpers,
     Number42.Refactors.Ex.PushParamIntoCallee
