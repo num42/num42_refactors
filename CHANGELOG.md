@@ -23,6 +23,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `SortReverseToDesc` is now **enabled by default** — the conservative opt-in
+  gate (`enabled: true`) is removed; `transform/2` always runs. The match is
+  arity-exact (`Enum.sort/1`, `Enum.sort_by/2` with a free direction slot,
+  followed by zero-arg `Enum.reverse/1`), the rewrites compile, and the pass is
+  idempotent. The only divergence it can introduce is the documented stable-sort
+  tie reordering (`Enum.sort/1` is stable; `Enum.sort(_, :desc)` keeps ties in
+  original order while `sort |> reverse` flips them) — a best-effort semantic
+  trade in line with the project's rewrite policy, not invalid output. A
+  full-suite dogfood run on position-db is green with zero false positives (its
+  non-sort `Enum.reverse/1` calls are all left untouched). A project that
+  observes tie order can opt the refactor out via `skipped_modules` /
+  `disable_for_glob`; the `{SortReverseToDesc, enabled: true}` opt is now
+  redundant (ignored) but harmless.
+
 - `InlineSingleUseBinding` is now **enabled by default** — the conservative
   opt-in gate (`enabled: true`) is removed; `transform/2` always runs. With its
   guards now covering the shapes that once produced invalid or meaning-changing

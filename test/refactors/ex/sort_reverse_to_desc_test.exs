@@ -5,8 +5,9 @@ defmodule Number42.Refactors.Ex.SortReverseToDescTest do
 
   @subject SortReverseToDesc
 
-  # Default-OFF: every assertion runs with the opt-in gate flipped on.
-  @on [enabled: true]
+  # Enabled by default and takes no opts; `@on` is the empty opts list,
+  # passed where a test wants to be explicit about it.
+  @on []
 
   describe "rewrites (sort)" do
     test "call-fed sort + reverse -> sort(:desc)" do
@@ -58,10 +59,6 @@ defmodule Number42.Refactors.Ex.SortReverseToDescTest do
   end
 
   describe "leaves alone" do
-    test "default-OFF: no-op without enabled: true" do
-      assert_unchanged(@subject, "Enum.sort(coll) |> Enum.reverse()")
-    end
-
     test "sort already carries a direction" do
       assert_unchanged(@subject, "Enum.sort(coll, :asc) |> Enum.reverse()", @on)
     end
