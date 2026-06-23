@@ -47,6 +47,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   un-refactored baseline at the same seed. The
   `{CaseToFunctionClauses, enabled: true}` entry in a project's `.refactor.exs`
   is now redundant (the opt is ignored) but harmless.
+- `DropRedundantAttrDefaults` is now **enabled by default** — the conservative
+  opt-in gate (`enabled: true`) is removed; `transform/2` always runs. It drops
+  a call-site attribute whose literal value equals the target component's
+  declared `attr ..., default:` (`<.button size="md" />` → `<.button />` when
+  `button` declares `attr :size, :string, default: "md"`). The match is
+  literal-vs-literal and type-aware (a string never matches a number, a
+  wrong-typed value never matches), and anything unresolvable is declined
+  (unknown tag, no matching declaration, an undeclared attr, an attr declared
+  without a `default:`, or a re-declared/shadowed attr — resolved per-component
+  so a `required:` re-declaration on a sibling component never causes a drop).
+  A full-suite dogfood run on a real Phoenix codebase (position-db) is green and
+  matches its baseline, so the gate was removed. The
+  `{DropRedundantAttrDefaults, enabled: true}` entry in a project's
+  `.refactor.exs` is now redundant (the opt is ignored) but harmless.
 
 - `InlineSingleUseBinding` is now **enabled by default** — the conservative
   opt-in gate (`enabled: true`) is removed; `transform/2` always runs. With its
