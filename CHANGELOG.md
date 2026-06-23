@@ -23,6 +23,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `InlineSingleCallerPrivate` is now **enabled by default** — the conservative
+  opt-in gate (`enabled: true`) is removed; `transform/2` always runs. A dogfood
+  run surfaced the one shape the moduledoc flagged as unsafe: a `defp` with a
+  `rescue`/`catch`/`after`/`else` clause was inlined by splicing only its `:do`
+  value, silently dropping the recovery clause so the call site began raising. A
+  new `has_try_clause?/1` guard skips any such helper. The feared fixpoint
+  miscount (inlining `A` whose body calls `B` deleting `B`) does not occur — the
+  engine re-parses between passes and at most one helper is rewritten per pass,
+  so `B`'s callers are recounted fresh. A full-suite dogfood run on position-db
+  is green and matches the unrefactored baseline. The
+  `{InlineSingleCallerPrivate, enabled: true}` entry in a project's
+  `.refactor.exs` is now redundant (the opt is ignored) but harmless.
+
 - `InlineSingleUseBinding` is now **enabled by default** — the conservative
   opt-in gate (`enabled: true`) is removed; `transform/2` always runs. With its
   guards now covering the shapes that once produced invalid or meaning-changing

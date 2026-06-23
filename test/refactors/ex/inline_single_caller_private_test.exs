@@ -5,24 +5,10 @@ defmodule Number42.Refactors.Ex.InlineSingleCallerPrivateTest do
 
   @subject InlineSingleCallerPrivate
 
-  # InlineSingleCallerPrivate is default-OFF: transform/2 is a no-op
-  # unless its own opts carry `enabled: true`. Every behaviour test below
-  # passes `@on` as the trailing opts so it exercises the enabled
-  # refactor; the default-OFF gate has its own dedicated test.
-  @on [enabled: true]
-
-  describe "default-OFF (opt-in only)" do
-    test "without enabled: true, transform is a no-op" do
-      source = """
-      defmodule M do
-        defp helper(x), do: x * 2 + offset()
-        def f(n), do: helper(n) + 1
-      end
-      """
-
-      assert apply_refactor(@subject, source) == source
-    end
-  end
+  # InlineSingleCallerPrivate is enabled by default and takes no opts;
+  # `@on` is the empty opts list, kept on the behavioural tests so the
+  # call shape stays uniform.
+  @on []
 
   describe "rewrites — canonical inline" do
     test "single-call-site defp is inlined and deleted" do
@@ -240,6 +226,65 @@ defmodule Number42.Refactors.Ex.InlineSingleCallerPrivateTest do
           end
 
           def f(n), do: helper(n)
+        end
+        """,
+        @on
+      )
+    end
+
+    test "rescue-bearing body is skipped (would drop the rescue clause)" do
+      # `fetch_do_body/1` only reads the `:do` value; without this guard the
+      # `rescue _ -> nil` clause is silently dropped and the inlined call
+      # raises instead of returning nil. Skip the whole helper.
+      assert_unchanged(
+        @subject,
+        """
+        defmodule M do
+          defp safe(mod) do
+            risky!(mod)
+          rescue
+            _ -> nil
+          end
+
+          def f(mod), do: safe(mod)
+        end
+        """,
+        @on
+      )
+    end
+
+    test "after-bearing body is skipped" do
+      assert_unchanged(
+        @subject,
+        """
+        defmodule M do
+          defp with_cleanup(h) do
+            read(h)
+          after
+            close(h)
+          end
+
+          def f(h), do: with_cleanup(h)
+        end
+        """,
+        @on
+      )
+    end
+
+    test "else-bearing (do/else try) body is skipped" do
+      assert_unchanged(
+        @subject,
+        """
+        defmodule M do
+          defp parse(x) do
+            String.to_integer(x)
+          rescue
+            _ -> :error
+          else
+            n -> {:ok, n}
+          end
+
+          def f(x), do: parse(x)
         end
         """,
         @on
