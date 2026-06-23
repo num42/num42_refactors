@@ -23,6 +23,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `PushParamIntoCallee` is now **enabled by default** — the opt-in gate is
+  removed. A dogfood run surfaced three correctness bugs, all fixed at the root:
+  substituting the pushed expression for a param is only sound when the param is
+  a pure *read*, so the eligibility check now declines when the param is rebound
+  (`s = s / 100` had become `55 = 55 / 100`, a `MatchError`), pinned (`^left`
+  had become `^:i`), or bound in a match pattern; and the rendered callee clause
+  now strips its leading comments before rendering (the patch range already
+  leaves them in place, so they were being duplicated). The default still only
+  touches `defp`. Regression tests cover all three. Full-suite dogfood on
+  position-db is green and matches the baseline.
+- `TopologicallyClusterIndependentBindings` is now **enabled by default** — the
+  opt-in gate is removed. The reorder is gated on strong purity and a dependency
+  DAG (a binding never crosses one it depends on; only pure, total,
+  exception-free RHSs participate), the same conservative analysis as
+  `CanonicalStatementOrder`. Full-suite dogfood on position-db (14 files) is
+  green and matches the baseline.
+- `ExtractPipelineToFunction` is now **enabled by default**, and **the
+  placeholder `<host>_pipeline` fallback name was removed**. A dogfood run showed
+  it minting meaningless names (`assign_building_currency_pipeline`) for 14 files
+  of mostly body-sized pipelines — pure indirection. The helper is now named only
+  from the pipeline's terminal call + seed object (`load_query`, `build_entries`);
+  when no meaningful name can be derived the extraction is **declined**. That
+  dropped the position-db hit from 14 noisy extractions to 2 well-named ones; the
+  suite is green and matches the baseline.
+- `ExtractFunctionFromBlock` is now **enabled by default**, and the same
+  placeholder removal was applied: `HelperNaming.name/6` gained a
+  `fallback: :none` option (other callers keep the `<host>_block` default), and
+  this refactor passes it — so when the live-outs name nothing meaningful the
+  extraction is declined instead of minting `<host>_block`. The dogfood hit
+  dropped from 65 files of mostly `_block`-named noise to 44 helpers named after
+  what they return (`fetch_source_and_formula`,
+  `original_width_and_original_height`); the suite is green and matches the
+  baseline.
 - `SortReverseToDesc` is now **enabled by default** — the conservative opt-in
   gate (`enabled: true`) is removed; `transform/2` always runs. The match is
   arity-exact (`Enum.sort/1`, `Enum.sort_by/2` with a free direction slot,

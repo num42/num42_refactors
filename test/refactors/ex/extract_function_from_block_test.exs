@@ -5,15 +5,14 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
 
   @subject ExtractFunctionFromBlock
 
-  # ExtractFunctionFromBlock is default-OFF: transform/2 is a no-op unless
-  # its own opts carry `enabled: true`. Every behaviour test below passes
-  # `@on` as the trailing opts so it exercises the enabled refactor; the
-  # default-OFF gate has its own dedicated test.
-  @on [enabled: true]
+  # ExtractFunctionFromBlock is enabled by default and takes no enable
+  # gate; `@on` is the empty opts list, kept on the behaviour tests for
+  # call-shape uniformity.
+  @on []
 
-  describe "default-OFF (opt-in only)" do
-    test "without enabled: true, transform is a no-op" do
-      source = """
+  describe "enabled by default" do
+    test "extracts with no enable opt" do
+      before_source = """
       defmodule M do
         def report(order) do
           subtotal = sum_lines(order)
@@ -24,7 +23,23 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
       end
       """
 
-      assert apply_refactor(@subject, source) == source
+      after_source = """
+      defmodule M do
+        def report(order) do
+          {tax, total} = tax_and_total(order)
+          format(total, tax)
+        end
+
+        defp tax_and_total(order) do
+          subtotal = sum_lines(order)
+          tax = subtotal * region_rate(order)
+          total = subtotal + tax
+          {tax, total}
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, after_source, [])
     end
   end
 
@@ -64,67 +79,40 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
       assert_rewrites(@subject, before_source, after_source, @on)
     end
 
-    # A trailing `!`/`?` is only legal as the final character of an
-    # identifier. When the live-out names are too terse to name the
-    # helper (`a`, `b`), the fallback derives from the host name —
-    # `verify!` + `_block` must become `verify_block!`, not the
-    # unparseable `verify!_block`.
-    test "keeps a trailing bang at the end of the fallback helper name" do
-      before_source = """
-      defmodule M do
-        defp verify!(scope, ids) do
-          a = load(scope)
-          b = build(ids)
-          compare(a, b)
+    # No placeholder `<host>_block` fallback: when the live-outs (`a`/`b`,
+    # `x`/`y`) name nothing meaningful, the extraction is declined rather
+    # than minting `verify_block!` / `valid_block?`. A block with no
+    # nameable result reads better left inline.
+    test "no meaningful name from short live-outs is left inline (bang host)" do
+      assert_unchanged(
+        @subject,
+        """
+        defmodule M do
+          defp verify!(scope, ids) do
+            a = load(scope)
+            b = build(ids)
+            compare(a, b)
+          end
         end
-      end
-      """
-
-      after_source = """
-      defmodule M do
-        defp verify!(scope, ids) do
-          {a, b} = verify_block!(scope, ids)
-          compare(a, b)
-        end
-
-        defp verify_block!(scope, ids) do
-          a = load(scope)
-          b = build(ids)
-          {a, b}
-        end
-      end
-      """
-
-      assert_rewrites(@subject, before_source, after_source, @on)
+        """,
+        @on
+      )
     end
 
-    test "keeps a trailing question mark at the end of the generated helper name" do
-      before_source = """
-      defmodule M do
-        defp valid?(a, b) do
-          x = foo(a)
-          y = bar(b)
-          check(x, y)
+    test "no meaningful name from short live-outs is left inline (question host)" do
+      assert_unchanged(
+        @subject,
+        """
+        defmodule M do
+          defp valid?(a, b) do
+            x = foo(a)
+            y = bar(b)
+            check(x, y)
+          end
         end
-      end
-      """
-
-      after_source = """
-      defmodule M do
-        defp valid?(a, b) do
-          {x, y} = valid_block?(a, b)
-          check(x, y)
-        end
-
-        defp valid_block?(a, b) do
-          x = foo(a)
-          y = bar(b)
-          {x, y}
-        end
-      end
-      """
-
-      assert_rewrites(@subject, before_source, after_source, @on)
+        """,
+        @on
+      )
     end
   end
 
@@ -160,36 +148,23 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
       assert_rewrites(@subject, before_source, after_source, @on)
     end
 
-    # `a_and_b` would otherwise be the name; if a parameter is literally
-    # named `a_and_b` the helper call would shadow it, so the fallback
-    # `<fn>_block` is used instead.
-    test "a result name colliding with a parameter falls back to <fn>_block" do
-      before_source = """
-      defmodule M do
-        def run(source_and_formula) do
-          source = first(source_and_formula)
-          formula = second(source_and_formula)
-          check(source, formula)
+    # The only meaningful name (`source_and_formula`) is literally the
+    # parameter, so it would shadow — and there is no placeholder fallback.
+    # The extraction is declined.
+    test "a result name colliding with a parameter is left inline" do
+      assert_unchanged(
+        @subject,
+        """
+        defmodule M do
+          def run(source_and_formula) do
+            source = first(source_and_formula)
+            formula = second(source_and_formula)
+            check(source, formula)
+          end
         end
-      end
-      """
-
-      after_source = """
-      defmodule M do
-        def run(source_and_formula) do
-          {source, formula} = run_block(source_and_formula)
-          check(source, formula)
-        end
-
-        defp run_block(source_and_formula) do
-          source = first(source_and_formula)
-          formula = second(source_and_formula)
-          {source, formula}
-        end
-      end
-      """
-
-      assert_rewrites(@subject, before_source, after_source, @on)
+        """,
+        @on
+      )
     end
 
     # A boolean live-out (`enabled?`) is dropped from the object — a
@@ -225,68 +200,41 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
       assert_rewrites(@subject, before_source, after_source, @on)
     end
 
-    # When *every* live-out is dropped (both boolean) and no verb-object
-    # name is possible, fall back to the host-derived `<fn>_block`.
-    test "all-boolean live-outs with no object fall back to <fn>_block" do
-      before_source = """
-      defmodule M do
-        defp gate(state) do
-          ready? = check_ready(state)
-          stale? = check_stale(state)
-          decide(ready?, stale?)
+    # Every live-out is boolean (dropped from the object) and no
+    # verb-object name is possible → no meaningful name → declined.
+    test "all-boolean live-outs with no object are left inline" do
+      assert_unchanged(
+        @subject,
+        """
+        defmodule M do
+          defp gate(state) do
+            ready? = check_ready(state)
+            stale? = check_stale(state)
+            decide(ready?, stale?)
+          end
         end
-      end
-      """
-
-      after_source = """
-      defmodule M do
-        defp gate(state) do
-          {ready?, stale?} = gate_block(state)
-          decide(ready?, stale?)
-        end
-
-        defp gate_block(state) do
-          ready? = check_ready(state)
-          stale? = check_stale(state)
-          {ready?, stale?}
-        end
-      end
-      """
-
-      assert_rewrites(@subject, before_source, after_source, @on)
+        """,
+        @on
+      )
     end
 
-    # Three or more live-outs would spell an `a_and_b_and_c` monster;
-    # fall back to the host-derived name.
-    test "three live-outs fall back to <fn>_block" do
-      before_source = """
-      defmodule M do
-        defp build(order) do
-          first = one(order)
-          second = two(order)
-          third = three(order)
-          assemble(first, second, third)
+    # Three or more live-outs would spell an `a_and_b_and_c` monster and
+    # there is no placeholder fallback → declined.
+    test "three live-outs with no concise name are left inline" do
+      assert_unchanged(
+        @subject,
+        """
+        defmodule M do
+          defp build(order) do
+            first = one(order)
+            second = two(order)
+            third = three(order)
+            assemble(first, second, third)
+          end
         end
-      end
-      """
-
-      after_source = """
-      defmodule M do
-        defp build(order) do
-          {first, second, third} = build_block(order)
-          assemble(first, second, third)
-        end
-
-        defp build_block(order) do
-          first = one(order)
-          second = two(order)
-          third = three(order)
-          {first, second, third}
-        end
-      end
-      """
-
-      assert_rewrites(@subject, before_source, after_source, @on)
+        """,
+        @on
+      )
     end
   end
 
@@ -298,24 +246,26 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
       before_source = """
       defmodule M do
         def f(a, b) do
-          x = g(a)
-          y = h(a)
-          combine(x, y, b)
+          header = g(a)
+          footer = h(a)
+          combine(header, footer, b)
         end
       end
       """
 
+      # Helper takes only `a` (read by the prefix), not `b`. Live-outs
+      # `{header, footer}` join to the standalone name `header_and_footer`.
       after_source = """
       defmodule M do
         def f(a, b) do
-          {x, y} = f_block(a)
-          combine(x, y, b)
+          {header, footer} = header_and_footer(a)
+          combine(header, footer, b)
         end
 
-        defp f_block(a) do
-          x = g(a)
-          y = h(a)
-          {x, y}
+        defp header_and_footer(a) do
+          header = g(a)
+          footer = h(a)
+          {header, footer}
         end
       end
       """
@@ -332,25 +282,28 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
     test "treats a self-shadowing read as a free parameter" do
       before_source = """
       defmodule M do
-        def scale(s, t) do
-          s = s / 100
-          c = s * factor(t)
-          render(c, s)
+        def scale(saturation, t) do
+          saturation = saturation / 100
+          channel = saturation * factor(t)
+          render(channel, saturation)
         end
       end
       """
 
+      # `saturation` is both a parameter and re-bound reading itself, so it
+      # stays a helper parameter. Live-outs `{saturation, channel}` name the
+      # helper `saturation_and_channel`.
       after_source = """
       defmodule M do
-        def scale(s, t) do
-          {s, c} = scale_block(s, t)
-          render(c, s)
+        def scale(saturation, t) do
+          {saturation, channel} = saturation_and_channel(saturation, t)
+          render(channel, saturation)
         end
 
-        defp scale_block(s, t) do
-          s = s / 100
-          c = s * factor(t)
-          {s, c}
+        defp saturation_and_channel(saturation, t) do
+          saturation = saturation / 100
+          channel = saturation * factor(t)
+          {saturation, channel}
         end
       end
       """
@@ -369,31 +322,34 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
       before_source = """
       defmodule M do
         def f(x) do
-          a = compute(x)
-          active? = check(a)
+          account = compute(x)
+          status = check(account)
           cond do
-            active? -> on(a)
-            true -> off(a)
+            status -> on(account)
+            true -> off(account)
           end
         end
       end
       """
 
+      # `status` is read only in the cond clause *test* (a boolean
+      # expression, not a pattern), so it is live-out and returned.
+      # Live-outs `{account, status}` name the helper `account_and_status`.
       after_source = """
       defmodule M do
         def f(x) do
-          {a, active?} = f_block(x)
+          {account, status} = compute_account_and_status(x)
 
           cond do
-            active? -> on(a)
-            true -> off(a)
+            status -> on(account)
+            true -> off(account)
           end
         end
 
-        defp f_block(x) do
-          a = compute(x)
-          active? = check(a)
-          {a, active?}
+        defp compute_account_and_status(x) do
+          account = compute(x)
+          status = check(account)
+          {account, status}
         end
       end
       """
@@ -469,37 +425,24 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlockTest do
   end
 
   describe "rewrites — single live-out value" do
-    test "extracts a multi-binding prefix with one live-out binding into a value-return helper" do
-      before_source = """
-      defmodule M do
-        def run(order) do
-          base = fetch(order)
-          total = base + surcharge(order)
-          render(total)
+    # A single live-out's only name *is* the bound variable, which would
+    # shadow it at the call site (`total = total(order)`). With no
+    # placeholder fallback and no verb composing onto the result, the
+    # extraction is declined rather than minting `run_block`.
+    test "a single live-out with no concise name is left inline" do
+      assert_unchanged(
+        @subject,
+        """
+        defmodule M do
+          def run(order) do
+            base = fetch(order)
+            total = base + surcharge(order)
+            render(total)
+          end
         end
-      end
-      """
-
-      # A single live-out's only name *is* the bound variable; naming the
-      # helper after it would shadow that variable at the call site
-      # (`total = total(order)`), so a single live-out falls back to the
-      # host-derived `run_block`.
-      after_source = """
-      defmodule M do
-        def run(order) do
-          total = run_block(order)
-          render(total)
-        end
-
-        defp run_block(order) do
-          base = fetch(order)
-          total = base + surcharge(order)
-          total
-        end
-      end
-      """
-
-      assert_rewrites(@subject, before_source, after_source, @on)
+        """,
+        @on
+      )
     end
   end
 

@@ -5,30 +5,50 @@ defmodule Number42.Refactors.Ex.ExtractPipelineToFunctionTest do
 
   @subject ExtractPipelineToFunction
 
-  # Default-OFF: transform/2 is a no-op unless its own opts carry
-  # `enabled: true`. Behaviour tests pass `@on`; the default-OFF gate has
-  # its own test.
-  @on [enabled: true]
+  # Enabled by default and takes no enable gate; `@on` is the empty opts
+  # list, kept on the behaviour tests for call-shape uniformity.
+  @on []
 
-  describe "default-OFF (opt-in only)" do
-    test "without enabled: true, transform is a no-op" do
-      source = """
+  describe "enabled by default" do
+    test "extracts with no enable opt" do
+      before_source = """
       defmodule M do
         def index(conn, params) do
           result =
             params
             |> Map.get("filters", %{})
             |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+            |> Enum.map(fn {k, v} -> {String.to_existing_atom(k), v} end)
             |> Enum.into(%{})
-            |> Map.put(:org, conn)
-            |> Enum.map(&serialize/1)
+            |> Map.put(:org_id, conn.assigns.current_org.id)
+            |> Repo.all()
 
           json(conn, result)
         end
       end
       """
 
-      assert apply_refactor(@subject, source) == source
+      after_source = """
+      defmodule M do
+        def index(conn, params) do
+          result = load_params(params, conn)
+
+          json(conn, result)
+        end
+
+        defp load_params(params, conn) do
+          params
+          |> Map.get("filters", %{})
+          |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+          |> Enum.map(fn {k, v} -> {String.to_existing_atom(k), v} end)
+          |> Enum.into(%{})
+          |> Map.put(:org_id, conn.assigns.current_org.id)
+          |> Repo.all()
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, after_source, [])
     end
   end
 
@@ -83,43 +103,65 @@ defmodule Number42.Refactors.Ex.ExtractPipelineToFunctionTest do
     test "extracts a long pipeline that is the body's tail" do
       before_source = """
       defmodule M do
-        def run(items, factor) do
-          log(items)
+        def run(query, factor) do
+          log(query)
 
-          items
-          |> Enum.map(fn i -> i * factor end)
-          |> Enum.filter(fn i -> i > 0 end)
-          |> Enum.uniq()
-          |> Enum.sort()
-          |> Enum.take(10)
+          query
+          |> where_active()
+          |> scale(factor)
+          |> distinct()
+          |> order()
+          |> Repo.all()
         end
       end
       """
 
-      # Terminal call `Enum.take` has no verb mapping; object `items`
-      # alone would shadow the parameter — so naming falls back to the
-      # host-derived `run_pipeline`. Free vars: `items` (seed) and
-      # `factor` (closed over).
+      # Terminal call `Repo.all` → verb `load`, seed object `query` →
+      # `load_query`. Free vars: `query` (seed) and `factor` (closed over).
       after_source = """
       defmodule M do
-        def run(items, factor) do
-          log(items)
+        def run(query, factor) do
+          log(query)
 
-          run_pipeline(items, factor)
+          load_query(query, factor)
         end
 
-        defp run_pipeline(items, factor) do
-          items
-          |> Enum.map(fn i -> i * factor end)
-          |> Enum.filter(fn i -> i > 0 end)
-          |> Enum.uniq()
-          |> Enum.sort()
-          |> Enum.take(10)
+        defp load_query(query, factor) do
+          query
+          |> where_active()
+          |> scale(factor)
+          |> distinct()
+          |> order()
+          |> Repo.all()
         end
       end
       """
 
       assert_rewrites(@subject, before_source, after_source, @on)
+    end
+
+    test "a tail pipeline with no nameable result is left inline (no _pipeline fallback)" do
+      # Terminal `Enum.take` has no verb mapping and the seed `items`
+      # shadows the parameter — no meaningful name can be derived, so the
+      # extraction is declined rather than minting `run_pipeline`.
+      assert_unchanged(
+        @subject,
+        """
+        defmodule M do
+          def run(items, factor) do
+            log(items)
+
+            items
+            |> Enum.map(fn i -> i * factor end)
+            |> Enum.filter(fn i -> i > 0 end)
+            |> Enum.uniq()
+            |> Enum.sort()
+            |> Enum.take(10)
+          end
+        end
+        """,
+        @on
+      )
     end
   end
 
@@ -127,35 +169,38 @@ defmodule Number42.Refactors.Ex.ExtractPipelineToFunctionTest do
     test "a variable closed over inside a lambda stage becomes a parameter" do
       before_source = """
       defmodule M do
-        def f(list, threshold) do
+        def f(entries, threshold) do
           scaled =
-            list
+            entries
             |> Enum.map(fn x -> x * 2 end)
             |> Enum.filter(fn x -> x > threshold end)
             |> Enum.uniq()
             |> Enum.sort()
-            |> Enum.reverse()
+            |> Enum.into(%{})
 
           use_it(scaled)
         end
       end
       """
 
+      # Terminal `Enum.into` → verb `build`, seed object `entries` →
+      # `build_entries`. `threshold` is closed over inside the filter
+      # lambda, so it becomes the second parameter.
       after_source = """
       defmodule M do
-        def f(list, threshold) do
-          scaled = f_pipeline(list, threshold)
+        def f(entries, threshold) do
+          scaled = build_entries(entries, threshold)
 
           use_it(scaled)
         end
 
-        defp f_pipeline(list, threshold) do
-          list
+        defp build_entries(entries, threshold) do
+          entries
           |> Enum.map(fn x -> x * 2 end)
           |> Enum.filter(fn x -> x > threshold end)
           |> Enum.uniq()
           |> Enum.sort()
-          |> Enum.reverse()
+          |> Enum.into(%{})
         end
       end
       """

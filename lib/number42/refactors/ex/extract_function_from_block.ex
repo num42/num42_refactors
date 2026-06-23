@@ -92,18 +92,18 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlock do
   string interpolation or a sigil are skipped — relocating an interpolated
   heredoc by range patch left a dangling `\"""` in the host.
 
-  ## Default-OFF (opt-in only)
+  ## Enabled by default
 
-  Disabled by default — `transform/2` is a no-op unless its own opts
-  carry `enabled: true`. Extracting a leading binding run is a judgement
-  call: the slice is a *setup phase*, not always a nameable
-  responsibility, so the result can read as indirection without a payoff
-  even with the verb/object naming. Opt in per project where the trade is
-  wanted:
-
-      configured_modules: [
-        {Number42.Refactors.Ex.ExtractFunctionFromBlock, enabled: true}
-      ]
+  The extraction only pays when the slice is a *nameable* responsibility,
+  so it is gated on naming: `HelperNaming.name/6` is called with
+  `fallback: :none`, so when no meaningful verb/object/result name can be
+  derived the extraction is **declined** (no `<host>_block` placeholder).
+  On top of the structural gates (a clean leading run of bare-variable
+  bindings, no control flow, no module-attribute dependency, a live-out
+  to return), a full-suite dogfood run on position-db is green and matches
+  the unrefactored baseline; the naming gate dropped the hit from 65 files
+  of mostly `_block`-named noise to 44 helpers named after what they
+  return (`fetch_source_and_formula`, `original_width_and_original_height`).
   """
 
   use Number42.Refactors.Refactor
@@ -135,12 +135,8 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlock do
   def reformat_after?, do: true
 
   @impl Number42.Refactors.Refactor
-  def transform(source, opts) do
-    if Keyword.get(opts, :enabled, false) do
-      Sourceror.parse_string(source) |> apply_to_parse_result(source)
-    else
-      source
-    end
+  def transform(source, _opts) do
+    Sourceror.parse_string(source) |> apply_to_parse_result(source)
   end
 
   defp apply_to_parse_result({:ok, ast}, source), do: apply_to_ast(ast, source)
@@ -190,7 +186,7 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlock do
          args = prefix_free_vars(prefix, param_names),
          live_out = live_out_bindings(prefix, tail),
          {:ok, helper_name} <-
-           HelperNaming.name(fn_name, live_out, prefix, args, existing_names) do
+           HelperNaming.name(fn_name, live_out, prefix, args, existing_names, fallback: :none) do
       build_extraction(prefix, live_out, args, helper_name, def_node, source)
     else
       _ -> nil

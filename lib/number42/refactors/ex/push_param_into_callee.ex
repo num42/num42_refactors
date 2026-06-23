@@ -103,21 +103,28 @@ defmodule Number42.Refactors.Ex.PushParamIntoCallee do
   `reformat_after?/0 == true` so the engine runs `mix format` to
   normalize whitespace produced by the patches.
 
-  ## Default-OFF (opt-in only)
+  ## Enabled by default
 
-  Disabled by default — `transform/2` is a no-op unless its own opts carry
-  `enabled: true`. A dogfood run surfaced rewrites that corrupt the callee
-  body when the pushed param is re-bound or transformed inside it (e.g.
-  `s = s / 100` collapsing to `55 = 55 / 100`). Enable per project once the
-  body-substitution is value-aware:
+  Substituting the pushed expression for the parameter is only sound when
+  the parameter is a pure *read* in the callee. The eligibility check
+  enforces exactly that and declines otherwise:
 
-      configured_modules: [
-        {Number42.Refactors.Ex.PushParamIntoCallee, enabled: true}
-      ]
+    * the param is plain (a bare var, not a pattern) in every head and is
+      not referenced by a guard (`check_param_plain_and_unguarded/2`); and
+    * the param is never a **write target** in any body — not rebound
+      (`s = s / 100`), not pinned (`^s`), not bound inside a match pattern
+      (`check_param_read_only_in_body/2`). An earlier dogfood run produced
+      `55 = 55 / 100` and `^:i` from exactly these shapes; they are now
+      declined at the root.
+
+  The default only touches `defp` (its caller set is provably the whole
+  module); `def` is rewritten — behind a backward-compat wrapper — only in
+  `public: true` mode.
   """
 
   use Number42.Refactors.Refactor
 
+  alias Number42.Refactors.AstHelpers
   alias Sourceror.Patch
 
   @excluded_path_prefixes ["test/", "dev/"]
@@ -187,11 +194,7 @@ defmodule Number42.Refactors.Ex.PushParamIntoCallee do
   def reformat_after?, do: true
   @impl Number42.Refactors.Refactor
   def transform(source, opts) do
-    if Keyword.get(opts, :enabled, false) do
-      Keyword.get(opts, :prepared) |> rewrite_with_plan_or_passthrough(source)
-    else
-      source
-    end
+    Keyword.get(opts, :prepared) |> rewrite_with_plan_or_passthrough(source)
   end
 
   # ── prepare/1 plumbing ────────────────────────────────────────────
@@ -296,7 +299,8 @@ defmodule Number42.Refactors.Ex.PushParamIntoCallee do
          :ok <- check_no_dynamic_dispatch(body_exprs),
          {:ok, call_args} <- uniform_call_args(name, arity, bodies),
          {:ok, pos, expr} <- pick_pushable_position(arity, call_args),
-         :ok <- check_param_plain_and_unguarded(clauses, pos) do
+         :ok <- check_param_plain_and_unguarded(clauses, pos),
+         :ok <- check_param_read_only_in_body(clauses, pos) do
       {:ok, %{arity: arity, expr: expr, name: name, pos: pos, public: kind == :def}}
     else
       _ -> :skip
@@ -522,6 +526,47 @@ defmodule Number42.Refactors.Ex.PushParamIntoCallee do
 
   defp param_in_guard?(_head, _pos), do: false
 
+  # The pushed expression replaces every reference to the parameter, so
+  # the parameter must be a pure *read* throughout each clause body.
+  # If it is ever a write target — rebound (`s = s / 100`, `s <- gen`),
+  # pinned (`^s`), or bound inside a match pattern — substituting an
+  # expression for it is unsound (`55 = 55 / 100`, `^:i`), so the whole
+  # candidate is declined. (Head-position rebinding is impossible; this
+  # complements the head/guard check.)
+  defp check_param_read_only_in_body(clauses, pos) do
+    safe? =
+      Enum.all?(clauses, fn {kind, _, [head | rest]} when kind in [:def, :defp] ->
+        case param_var_name_at(head, pos) do
+          nil -> true
+          name -> not var_written_or_pinned?(rest, name)
+        end
+      end)
+
+    if safe?, do: :ok, else: :skip
+  end
+
+  defp param_var_name_at(head, pos) do
+    case head |> strip_when() |> head_args() |> Enum.at(pos) do
+      {name, _, ctx} when is_atom(name) and is_atom(ctx) -> name
+      _ -> nil
+    end
+  end
+
+  # True if `name` appears anywhere in `ast` as a pin target (`^name`) or
+  # as a bound name on the LHS of a match (`=` / `<-`). Conservative: any
+  # match LHS that binds `name` disqualifies, even branches the value
+  # never reaches.
+  defp var_written_or_pinned?(ast, name) do
+    ast
+    |> Macro.prewalker()
+    |> Enum.any?(fn
+      {:^, _, [{^name, _, ctx}]} when is_atom(ctx) -> true
+      {:=, _, [lhs, _rhs]} -> name in AstHelpers.pattern_var_names(lhs)
+      {:<-, _, [lhs, _rhs]} -> name in AstHelpers.pattern_var_names(lhs)
+      _ -> false
+    end)
+  end
+
   defp head_args({_name, _, args}) when is_list(args), do: args
   defp head_args({_name, _, nil}), do: []
 
@@ -611,7 +656,10 @@ defmodule Number42.Refactors.Ex.PushParamIntoCallee do
     var_name = param_var_name(head, pos)
     new_head = head |> drop_param(pos) |> substitute_var(var_name, expr)
     new_body = body_kw |> substitute_var(var_name, expr)
-    replacement = {kind, meta, [new_head, new_body]}
+    # The patch range is `get_range/1`, which excludes the clause's
+    # leading/trailing comments — they stay in the surrounding source.
+    # Rendering them too would duplicate the comment block, so strip them.
+    replacement = {kind, strip_comments(meta), [new_head, new_body]}
     rendered = render(replacement) |> maybe_append_wrapper(head, pos, append_wrapper?)
     [Patch.replace({kind, meta, [head, body_kw]}, rendered)]
   end
@@ -689,6 +737,9 @@ defmodule Number42.Refactors.Ex.PushParamIntoCallee do
 
   defp strip_when({:when, _, [inner | _]}), do: inner
   defp strip_when(other), do: other
+
+  defp strip_comments(meta),
+    do: meta |> Keyword.put(:leading_comments, []) |> Keyword.put(:trailing_comments, [])
 
   defp strip_meta(ast) do
     Macro.prewalk(ast, fn
