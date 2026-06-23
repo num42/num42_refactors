@@ -72,6 +72,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is green and matches the unrefactored baseline. The
   `{InlineSingleCallerPrivate, enabled: true}` entry in a project's
   `.refactor.exs` is now redundant (the opt is ignored) but harmless.
+  Two readability skips were added on review of the dogfood diff: a
+  **`quote`-returning body** (inlining yields `unquote(quote do … end)` — the
+  nesting the named helper existed to avoid) and a **body spanning more than 5
+  source lines** (a `~H` template, heredoc or large literal — a name is the
+  right tool for such a block, not a call-site cram). These dropped the
+  position-db hit from 59 files to 47, all clean.
 
 - `InlineSingleUseBinding` is now **enabled by default** — the conservative
   opt-in gate (`enabled: true`) is removed; `transform/2` always runs. With its

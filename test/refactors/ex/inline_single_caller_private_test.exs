@@ -290,6 +290,56 @@ defmodule Number42.Refactors.Ex.InlineSingleCallerPrivateTest do
         @on
       )
     end
+
+    # A `quote`-returning helper carves a macro body into named sections
+    # stitched with `unquote(define_section())`. Inlining yields
+    # `unquote(quote do … end)` — worse than the named helper. Skip.
+    test "quote-returning body is skipped" do
+      assert_unchanged(
+        @subject,
+        """
+        defmodule M do
+          defmacro __using__(_opts) do
+            quote do
+              unquote(callbacks())
+            end
+          end
+
+          defp callbacks do
+            quote do
+              def type, do: :string
+            end
+          end
+        end
+        """,
+        @on
+      )
+    end
+
+    # A body spanning many source lines (here a heredoc) is structure a
+    # name should hold; cramming it into the single call site reads worse.
+    test "many-line body is skipped" do
+      assert_unchanged(
+        @subject,
+        """
+        defmodule M do
+          defp banner do
+            \"\"\"
+            line one
+            line two
+            line three
+            line four
+            line five
+            line six
+            \"\"\"
+          end
+
+          def f, do: banner()
+        end
+        """,
+        @on
+      )
+    end
   end
 
   describe "leaves alone — call-site count" do

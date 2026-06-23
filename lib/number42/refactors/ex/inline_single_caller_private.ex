@@ -234,11 +234,34 @@ defmodule Number42.Refactors.Ex.InlineSingleCallerPrivate do
   defp single_inlinable_body(body_kw) do
     with false <- has_try_clause?(body_kw),
          {:ok, body} <- fetch_do_body(body_kw),
+         false <- spans_many_lines?(body),
          {:ok, single} <- single_expression(body),
-         false <- contains_binding_construct?(single) do
+         false <- contains_binding_construct?(single),
+         false <- quote_body?(single) do
       {:ok, single}
     else
       _ -> :skip
+    end
+  end
+
+  # A `quote`-returning helper is structure, not noise: it carves a large
+  # macro body into named sections that are then stitched together with
+  # `unquote(define_section())`. Inlining one yields `unquote(quote do …
+  # end)` — the very nesting the named helper existed to avoid. Compiles,
+  # preserves semantics, reads worse. Skip.
+  defp quote_body?({:quote, _, _}), do: true
+  defp quote_body?(_), do: false
+
+  # The body spans more than @max_body_lines source lines — a `~H"""…"""`
+  # template, a heredoc, a large data literal. A name is exactly the right
+  # tool for such a block; splicing it into the single call site (often a
+  # control-flow branch or an operator operand) crams a screenful into an
+  # expression and reads worse than the call it replaced. Skip.
+  @max_body_lines 5
+  defp spans_many_lines?(ast) do
+    case Sourceror.get_range(ast) do
+      %{start: start, end: end_} -> end_[:line] - start[:line] >= @max_body_lines
+      _ -> false
     end
   end
 
