@@ -5,28 +5,9 @@ defmodule Number42.Refactors.Ex.CaseToFunctionClausesTest do
 
   @subject CaseToFunctionClauses
 
-  # CaseToFunctionClauses is default-OFF: transform/2 is a no-op unless
-  # its own opts carry `enabled: true`. Every behaviour test passes `@on`
-  # as the trailing opts so it exercises the enabled refactor; the
-  # default-OFF gate has its own dedicated test.
-  @on [enabled: true]
-
-  describe "default-OFF (opt-in only)" do
-    test "without enabled: true, transform is a no-op" do
-      source = """
-      defmodule M do
-        def handle(msg) do
-          case msg do
-            {:ok, v} -> log(v)
-            {:error, e} -> warn(e)
-          end
-        end
-      end
-      """
-
-      assert apply_refactor(@subject, source) == source
-    end
-  end
+  # The refactor is enabled by default and takes no opts; `@on` is the
+  # empty opts list, passed where a test wants to be explicit about it.
+  @on []
 
   describe "lifts" do
     test "canonical case-on-param → one clause per branch" do
@@ -141,6 +122,94 @@ defmodule Number42.Refactors.Ex.CaseToFunctionClausesTest do
         end
 
         def handle(:error), do: fail()
+      end
+      """
+
+      assert_rewrites(@subject, before_source, expected, @on)
+    end
+
+    test "branch body still references the scrutinee → pattern rebinds it" do
+      before_source = """
+      defmodule M do
+        def deliver(user, url) do
+          case user do
+            %User{confirmed_at: nil} -> confirm(user, url)
+            _ -> magic(user, url)
+          end
+        end
+      end
+      """
+
+      expected = """
+      defmodule M do
+        def deliver(%User{confirmed_at: nil} = user, url), do: confirm(user, url)
+        def deliver(user, url), do: magic(user, url)
+      end
+      """
+
+      assert_rewrites(@subject, before_source, expected, @on)
+    end
+
+    test "guard branch rebinds scrutinee when body still uses it" do
+      before_source = """
+      defmodule M do
+        def classify(n) do
+          case n do
+            x when x > 0 -> {:pos, n}
+            0 -> :zero
+            _ -> {:neg, n}
+          end
+        end
+      end
+      """
+
+      expected = """
+      defmodule M do
+        def classify(x = n) when x > 0, do: {:pos, n}
+        def classify(0), do: :zero
+        def classify(n), do: {:neg, n}
+      end
+      """
+
+      assert_rewrites(@subject, before_source, expected, @on)
+    end
+
+    test "extra param unused in a branch is underscore-prefixed there" do
+      before_source = """
+      defmodule M do
+        def route(kind, id) do
+          case kind do
+            :show -> path(id)
+            _ -> "/"
+          end
+        end
+      end
+      """
+
+      expected = """
+      defmodule M do
+        def route(:show, id), do: path(id)
+        def route(_, _id), do: "/"
+      end
+      """
+
+      assert_rewrites(@subject, before_source, expected, @on)
+    end
+
+    test "bare-var pattern matching the scrutinee name needs no rebind" do
+      before_source = """
+      defmodule M do
+        def f(msg) do
+          case msg do
+            msg -> handle(msg)
+          end
+        end
+      end
+      """
+
+      expected = """
+      defmodule M do
+        def f(msg), do: handle(msg)
       end
       """
 
@@ -352,6 +421,23 @@ defmodule Number42.Refactors.Ex.CaseToFunctionClausesTest do
             {:ok, v} -> {:logged, v, ctx}
             {:error, e} -> {:warned, e, ctx}
             n when is_integer(n) -> {:num, n, ctx}
+          end
+        end
+      end
+      """
+
+      out = apply_refactor(@subject, before_source, @on)
+
+      assert_compiles(out)
+    end
+
+    test "branch bodies reusing the scrutinee still compile (binding rebind)" do
+      before_source = """
+      defmodule CompileCheckCaseToFnRebind do
+        def deliver(user, url) do
+          case user do
+            %{confirmed_at: nil} -> {:confirm, user, url}
+            _ -> {:magic, user, url}
           end
         end
       end

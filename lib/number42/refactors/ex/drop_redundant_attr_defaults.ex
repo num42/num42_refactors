@@ -43,9 +43,17 @@ defmodule Number42.Refactors.Ex.DropRedundantAttrDefaults do
   kept). Cross-file resolution uses the corpus file list threaded through
   `prepare/1` as `:source_files`.
 
-  ## Default-OFF + idempotence
+  ## Enabled by default + idempotence
 
-  `transform/2` is a no-op unless the module's opts carry `enabled: true`.
+  `transform/2` runs unattended. The literal-vs-literal, type-aware match
+  (string never matches a number, a wrong-typed value never matches) plus the
+  decline-on-anything-unresolvable contract (unknown tag, no matching
+  declaration, an attr the component does not declare, an attr declared without
+  a `default:`, a re-declared/shadowed attr resolved per-component, a
+  degenerate byte range) cover the shapes that could otherwise change
+  rendering. A full-suite dogfood run on a real Phoenix codebase is green, so
+  the conservative opt-in gate was removed.
+
   The rewrite removes only redundant attrs and never re-adds them, so a second
   pass on its own output changes nothing — idempotent by construction.
 
@@ -110,12 +118,11 @@ defmodule Number42.Refactors.Ex.DropRedundantAttrDefaults do
 
   @impl Number42.Refactors.Refactor
   def transform(source, opts) do
-    with true <- Keyword.get(opts, :enabled, false),
-         prepared <- prepared_for(source, opts),
-         drops when drops != [] <- find_redundant(source, prepared) do
-      rewrite(source, drops)
-    else
-      _ -> source
+    prepared = prepared_for(source, opts)
+
+    case find_redundant(source, prepared) do
+      [] -> source
+      drops -> rewrite(source, drops)
     end
   end
 

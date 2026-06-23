@@ -37,6 +37,8 @@ defmodule Number42.Refactors.Ex.DropRedundantAttrDefaultsTest do
     """
   end
 
+  # The refactor is enabled by default; `enabled: true` is now ignored but
+  # harmless. The helper keeps the behavioural tests explicit about opting in.
   defp enabled(opts \\ []), do: Keyword.put(opts, :enabled, true)
 
   describe "literal equal to declared default — dropped" do
@@ -126,11 +128,7 @@ defmodule Number42.Refactors.Ex.DropRedundantAttrDefaultsTest do
     end
   end
 
-  describe "default-OFF + idempotence" do
-    test "is a no-op without enabled: true" do
-      assert_unchanged(@subject, local_module(~s(<.button size="md" />)), [])
-    end
-
+  describe "idempotence" do
     test "idempotent on a droppable call site" do
       assert_idempotent(@subject, local_module(~s(<.button size="md" count={3} />)), enabled())
     end

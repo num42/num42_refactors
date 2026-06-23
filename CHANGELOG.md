@@ -23,6 +23,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `SortReverseToDesc` is now **enabled by default** — the conservative opt-in
+  gate (`enabled: true`) is removed; `transform/2` always runs. The match is
+  arity-exact (`Enum.sort/1`, `Enum.sort_by/2` with a free direction slot,
+  followed by zero-arg `Enum.reverse/1`), the rewrites compile, and the pass is
+  idempotent. The only divergence it can introduce is the documented stable-sort
+  tie reordering (`Enum.sort/1` is stable; `Enum.sort(_, :desc)` keeps ties in
+  original order while `sort |> reverse` flips them) — a best-effort semantic
+  trade in line with the project's rewrite policy, not invalid output. A
+  full-suite dogfood run on position-db is green with zero false positives (its
+  non-sort `Enum.reverse/1` calls are all left untouched). A project that
+  observes tie order can opt the refactor out via `skipped_modules` /
+  `disable_for_glob`; the `{SortReverseToDesc, enabled: true}` opt is now
+  redundant (ignored) but harmless.
+- `CaseToFunctionClauses` is now **enabled by default** — the conservative
+  opt-in gate (`enabled: true`) is removed; `transform/2` always runs. The
+  documented binding-loss trap is now fixed: the lift is binding-preserving.
+  When a branch body or guard still references the scrutinee, the emitted
+  clause rebinds it (`%User{confirmed_at: nil} = user`), a `_` catch-all that
+  reuses the scrutinee takes the scrutinee's name, and an extra param a branch
+  never touches is `_`-prefixed on that clause (no injected unused-variable
+  warnings). A full-suite dogfood run on position-db is green and matches the
+  un-refactored baseline at the same seed. The
+  `{CaseToFunctionClauses, enabled: true}` entry in a project's `.refactor.exs`
+  is now redundant (the opt is ignored) but harmless.
+- `DropRedundantAttrDefaults` is now **enabled by default** — the conservative
+  opt-in gate (`enabled: true`) is removed; `transform/2` always runs. It drops
+  a call-site attribute whose literal value equals the target component's
+  declared `attr ..., default:` (`<.button size="md" />` → `<.button />` when
+  `button` declares `attr :size, :string, default: "md"`). The match is
+  literal-vs-literal and type-aware (a string never matches a number, a
+  wrong-typed value never matches), and anything unresolvable is declined
+  (unknown tag, no matching declaration, an undeclared attr, an attr declared
+  without a `default:`, or a re-declared/shadowed attr — resolved per-component
+  so a `required:` re-declaration on a sibling component never causes a drop).
+  A full-suite dogfood run on a real Phoenix codebase (position-db) is green and
+  matches its baseline, so the gate was removed. The
+  `{DropRedundantAttrDefaults, enabled: true}` entry in a project's
+- `InlineSingleCallerPrivate` is now **enabled by default** — the conservative
+  opt-in gate (`enabled: true`) is removed; `transform/2` always runs. A dogfood
+  run surfaced the one shape the moduledoc flagged as unsafe: a `defp` with a
+  `rescue`/`catch`/`after`/`else` clause was inlined by splicing only its `:do`
+  value, silently dropping the recovery clause so the call site began raising. A
+  new `has_try_clause?/1` guard skips any such helper. The feared fixpoint
+  miscount (inlining `A` whose body calls `B` deleting `B`) does not occur — the
+  engine re-parses between passes and at most one helper is rewritten per pass,
+  so `B`'s callers are recounted fresh. A full-suite dogfood run on position-db
+  is green and matches the unrefactored baseline. The
+  `{InlineSingleCallerPrivate, enabled: true}` entry in a project's
+  `.refactor.exs` is now redundant (the opt is ignored) but harmless.
+  Two readability skips were added on review of the dogfood diff: a
+  **`quote`-returning body** (inlining yields `unquote(quote do … end)` — the
+  nesting the named helper existed to avoid) and a **body spanning more than 5
+  source lines** (a `~H` template, heredoc or large literal — a name is the
+  right tool for such a block, not a call-site cram). These dropped the
+  position-db hit from 59 files to 47, all clean.
+
 - `InlineSingleUseBinding` is now **enabled by default** — the conservative
   opt-in gate (`enabled: true`) is removed; `transform/2` always runs. With its
   guards now covering the shapes that once produced invalid or meaning-changing

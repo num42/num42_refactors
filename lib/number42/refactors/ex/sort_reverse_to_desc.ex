@@ -41,15 +41,21 @@ defmodule Number42.Refactors.Ex.SortReverseToDesc do
   strictly behaviour-preserving when duplicate keys occur. The rewrite
   targets the dominant case — sortable values whose tie order is not
   observed — and treats the tie reordering as an accepted trade-off (in
-  line with the project's best-effort rewrite policy).
+  line with the project's best-effort rewrite policy; see
+  `guides/safety-and-limitations.md`).
 
-  Because that trade-off is real rather than cosmetic, this refactor is
-  **default-OFF**: `transform/2` is a no-op unless the module's opts carry
-  `enabled: true`. Opt in per project where the trade is wanted:
+  ## Enabled by default
 
-      configured_modules: [
-        {Number42.Refactors.Ex.SortReverseToDesc, enabled: true}
-      ]
+  This refactor runs unattended. The only divergence it can introduce is
+  the stable-sort tie reordering above — a documented, best-effort
+  semantic trade, not invalid or accidentally meaning-changing output:
+  the match is arity-exact (the `:desc` slot must be free), the
+  rewrites compile, and the pass is idempotent. A full-suite dogfood run
+  on a real codebase is green with zero false positives (the codebase's
+  non-sort `Enum.reverse/1` calls are all left untouched), so the
+  conservative opt-in gate was removed. Projects that observe tie order
+  on a specific file can opt out via `skipped_modules` /
+  `disable_for_glob`.
 
   ## Idempotence
 
@@ -64,7 +70,7 @@ defmodule Number42.Refactors.Ex.SortReverseToDesc do
 
   @impl Number42.Refactors.Refactor
   def description,
-    do: "Enum.sort(_) |> Enum.reverse() -> Enum.sort(_, :desc) (default-OFF)"
+    do: "Enum.sort(_) |> Enum.reverse() -> Enum.sort(_, :desc)"
 
   @impl Number42.Refactors.Refactor
   def explanation do
@@ -77,8 +83,7 @@ defmodule Number42.Refactors.Ex.SortReverseToDesc do
     Caveat: `Enum.sort/1` is stable, so `sort |> reverse` reverses the
     order of equal keys while `sort(:desc)` preserves it. When duplicate
     sort keys exist the tie order differs — the rewrite is best-effort,
-    targeting sortable values without observed ties, and is default-OFF
-    (opt in with `enabled: true`).
+    targeting sortable values without observed ties.
     """
   end
 
@@ -88,13 +93,8 @@ defmodule Number42.Refactors.Ex.SortReverseToDesc do
   def reformat_after?, do: true
 
   @impl Number42.Refactors.Refactor
-  def transform(source, opts) do
-    if Keyword.get(opts, :enabled, false) do
-      source |> Sourceror.parse_string() |> apply_patches(source)
-    else
-      source
-    end
-  end
+  def transform(source, _opts),
+    do: source |> Sourceror.parse_string() |> apply_patches(source)
 
   @impl Number42.Refactors.Refactor
   def patches(ast, source, _opts), do: build_patches(ast, source)

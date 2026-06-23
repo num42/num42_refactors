@@ -65,29 +65,26 @@ defmodule Number42.Refactors.Ex.CaseToFunctionClauses do
   After the split the function has one implementation clause per branch,
   none of which is a `case`-only body. A second pass finds no match.
 
-  ## Default-OFF (opt-in only)
+  ## Binding-preserving lift
 
-  Disabled by default — `transform/2` is a no-op unless its own opts
-  carry `enabled: true`. A dogfood run against position-db surfaced a
-  binding-loss bug: when a branch body still references the scrutinee
-  variable, lifting the branch pattern into the head drops that binding —
+  Each emitted clause is its own head, so the lift carries the bindings
+  the original single head provided:
 
-      def deliver(user, url) do
-        case user do
-          %User{confirmed_at: nil} -> confirm(user, url)
-          _ -> magic(user, url)
-        end
-      end
-      # becomes — `user` in the body is now unbound:
-      def deliver(%User{confirmed_at: nil}, url), do: confirm(user, url)
-      def deliver(_, url), do: magic(user, url)
+    * **Scrutinee reused in a branch body/guard** — the pattern rebinds
+      it (`%User{confirmed_at: nil} = user`), so `case user do %User{} ->
+      f(user)` lifts to `def g(%User{} = user), do: f(user)` rather than
+      leaving `user` unbound. A `_` catch-all whose body still uses the
+      scrutinee becomes the scrutinee name (`def g(user)`); a branch
+      whose pattern already binds the scrutinee name is left as-is.
+    * **Extra param unused by a branch** — that param is `_`-prefixed on
+      the clause that doesn't reference it (`def route(_, _id)`), so the
+      split never injects unused-variable warnings the single head hid.
 
-  Enable per project once the lift rebinds the scrutinee (`pattern =
-  user`) whenever a branch body still uses it:
+  ## Enabled by default
 
-      configured_modules: [
-        {Number42.Refactors.Ex.CaseToFunctionClauses, enabled: true}
-      ]
+  This refactor runs unattended. A full-suite dogfood run on a real
+  codebase is green with the binding-preserving lift above, so the
+  conservative opt-in gate was removed.
   """
 
   use Number42.Refactors.Refactor
@@ -115,18 +112,11 @@ defmodule Number42.Refactors.Ex.CaseToFunctionClauses do
   def reformat_after?, do: true
 
   @impl Number42.Refactors.Refactor
-  def transform(source, opts) do
-    if Keyword.get(opts, :enabled, false) do
-      Sourceror.parse_string(source) |> apply_patches(source)
-    else
-      source
-    end
-  end
+  def transform(source, _opts),
+    do: Sourceror.parse_string(source) |> apply_patches(source)
 
   @impl Number42.Refactors.Refactor
-  def patches(ast, source, opts) do
-    if Keyword.get(opts, :enabled, false), do: build_patches(ast, source), else: []
-  end
+  def patches(ast, source, _opts), do: build_patches(ast, source)
 
   defp apply_patches({:ok, ast}, source),
     do: build_patches(ast, source) |> patch_or_passthrough(source)
@@ -287,12 +277,18 @@ defmodule Number42.Refactors.Ex.CaseToFunctionClauses do
   defp render_clause(kind, fn_name, params, scrutinee_name, clause, source) do
     {:->, _, [[pattern_node], body]} = clause
     {pattern, guard} = unwrap_when(pattern_node)
+    scrutinee_text = render_scrutinee_slot(pattern, body, guard, scrutinee_name, source)
 
     head_slots =
       params
       |> Enum.map_join(", ", fn param ->
         {:ok, name} = bare_var(param)
-        if name == scrutinee_name, do: render_pattern(pattern, source), else: Atom.to_string(name)
+
+        cond do
+          name == scrutinee_name -> scrutinee_text
+          var_used_in_branch?(body, guard, name) -> Atom.to_string(name)
+          true -> "_" <> Atom.to_string(name)
+        end
       end)
 
     guard_text =
@@ -304,6 +300,56 @@ defmodule Number42.Refactors.Ex.CaseToFunctionClauses do
     head = "#{kind} #{fn_name}(#{head_slots})#{guard_text}"
     render_body(head, body, source)
   end
+
+  # The text for the param slot the `case` scrutinised. When the branch
+  # body (or guard) still references the scrutinee variable, the lift
+  # must keep that name bound — otherwise `case user do %User{} -> f(user)`
+  # becomes `def g(%User{}), do: f(user)` with `user` unbound. We rebind:
+  #
+  #   * scrutinee unused in the branch       → just the branch pattern
+  #   * pattern already binds the same name  → just the branch pattern
+  #   * pattern is `_`                       → the scrutinee name (the
+  #     catch-all matched anything; `_ = user` would only warn)
+  #   * any other pattern                    → `pattern = scrutinee`,
+  #     which matches the branch pattern and re-binds the whole arg
+  #     (`%User{} = user`, `{:ok, p} = res`, `n = msg`).
+  defp render_scrutinee_slot(pattern, body, guard, scrutinee_name, source) do
+    pattern_text = render_pattern(pattern, source)
+
+    cond do
+      not var_used_in_branch?(body, guard, scrutinee_name) -> pattern_text
+      bare_var_named?(pattern, scrutinee_name) -> pattern_text
+      underscore_pattern?(pattern) -> Atom.to_string(scrutinee_name)
+      true -> "#{pattern_text} = #{scrutinee_name}"
+    end
+  end
+
+  # A param is referenced by a branch if its name appears in the branch
+  # body or guard. The scrutinee slot uses this to decide whether to
+  # rebind; the other slots use it to decide whether to `_`-prefix an
+  # unused param (each emitted clause is its own head, so a param a
+  # branch never touches would otherwise warn).
+  defp var_used_in_branch?(body, guard, name),
+    do: var_referenced?(body, name) or (guard != nil and var_referenced?(guard, name))
+
+  defp var_referenced?(ast, name) do
+    ast
+    |> Macro.prewalker()
+    |> Enum.any?(fn
+      {^name, _, ctx} when is_atom(ctx) -> true
+      _ -> false
+    end)
+  end
+
+  defp bare_var_named?(pattern, name) do
+    case bare_var(pattern) do
+      {:ok, ^name} -> true
+      _ -> false
+    end
+  end
+
+  defp underscore_pattern?({:_, _, ctx}) when is_atom(ctx), do: true
+  defp underscore_pattern?(_), do: false
 
   defp render_body(head, body, source) do
     if simple_body?(body) do

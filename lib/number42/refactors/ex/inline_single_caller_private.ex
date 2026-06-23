@@ -95,23 +95,27 @@ defmodule Number42.Refactors.Ex.InlineSingleCallerPrivate do
   most **one** helper per pass (the first eligible one in source
   order); the engine's fixpoint loop picks up the rest on later passes.
 
-  ## Default-OFF (opt-in only)
+  ## Enabled by default
 
-  Disabled by default — `transform/2` is a no-op unless its own opts
-  carry `enabled: true`. A dogfood run against position-db surfaced a
-  miscount across the fixpoint loop: inlining a helper `A` whose body
-  itself calls helper `B` can turn `B`'s single call site into two (the
-  original plus the freshly-spliced one), after which a later pass still
-  treats `B` as single-caller, inlines one site, and **deletes** `B` —
-  leaving the other call site referencing an undefined function. The
-  inline of a `rescue`-wrapped body also drops the rescue clause,
-  silently changing error behaviour. Enable per project once call
-  counting is recomputed after each inline and rescue-bearing bodies are
-  excluded:
+  This refactor runs unattended. Two shapes once made it unsafe; both
+  are now handled:
 
-      configured_modules: [
-        {Number42.Refactors.Ex.InlineSingleCallerPrivate, enabled: true}
-      ]
+  - **`rescue`-wrapped body** — `fetch_do_body/1` reads only the `:do`
+    value, so inlining a `defp f do … rescue/catch/after/else … end`
+    silently dropped the recovery clause and the call site started
+    raising. `has_try_clause?/1` now skips any helper whose body keyword
+    carries a `:rescue`/`:catch`/`:after`/`:else` entry — its semantics
+    can't be reproduced by a value substitution.
+  - **fixpoint miscount** — the concern that inlining a helper `A` whose
+    body calls `B` turns `B`'s single call site into two and then a
+    later pass still deletes `B`. It does not occur: the engine re-parses
+    between passes and this refactor rewrites at most one helper per pass
+    (see *Idempotence*), so `B`'s callers are recounted fresh on the next
+    pass — once `A` is inlined `B` reads as two-caller and is left alone.
+
+  With those, a full-suite dogfood run on position-db is green and
+  matches the unrefactored baseline, so the conservative opt-in gate was
+  removed.
   """
 
   use Number42.Refactors.Refactor
@@ -136,13 +140,8 @@ defmodule Number42.Refactors.Ex.InlineSingleCallerPrivate do
   @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
   @impl Number42.Refactors.Refactor
-  def transform(source, opts) do
-    if Keyword.get(opts, :enabled, false) do
-      Sourceror.parse_string(source) |> apply_to_parse_result(source)
-    else
-      source
-    end
-  end
+  def transform(source, _opts),
+    do: Sourceror.parse_string(source) |> apply_to_parse_result(source)
 
   defp apply_to_parse_result({:ok, ast}, source),
     do: ast |> first_module_patches() |> patch_or_passthrough(source)
@@ -233,14 +232,55 @@ defmodule Number42.Refactors.Ex.InlineSingleCallerPrivate do
   end
 
   defp single_inlinable_body(body_kw) do
-    with {:ok, body} <- fetch_do_body(body_kw),
+    with false <- has_try_clause?(body_kw),
+         {:ok, body} <- fetch_do_body(body_kw),
+         false <- spans_many_lines?(body),
          {:ok, single} <- single_expression(body),
-         false <- contains_binding_construct?(single) do
+         false <- contains_binding_construct?(single),
+         false <- quote_body?(single) do
       {:ok, single}
     else
       _ -> :skip
     end
   end
+
+  # A `quote`-returning helper is structure, not noise: it carves a large
+  # macro body into named sections that are then stitched together with
+  # `unquote(define_section())`. Inlining one yields `unquote(quote do …
+  # end)` — the very nesting the named helper existed to avoid. Compiles,
+  # preserves semantics, reads worse. Skip.
+  defp quote_body?({:quote, _, _}), do: true
+  defp quote_body?(_), do: false
+
+  # The body spans more than @max_body_lines source lines — a `~H"""…"""`
+  # template, a heredoc, a large data literal. A name is exactly the right
+  # tool for such a block; splicing it into the single call site (often a
+  # control-flow branch or an operator operand) crams a screenful into an
+  # expression and reads worse than the call it replaced. Skip.
+  @max_body_lines 5
+  defp spans_many_lines?(ast) do
+    case Sourceror.get_range(ast) do
+      %{start: start, end: end_} -> end_[:line] - start[:line] >= @max_body_lines
+      _ -> false
+    end
+  end
+
+  # A def-form `try`: `defp f do body rescue/catch/after/else ... end`. The
+  # body keyword carries a `:rescue`/`:catch`/`:after`/`:else` entry beside
+  # the `:do`. Splicing only the `:do` value (what `fetch_do_body/1` returns)
+  # would silently drop the recovery/cleanup clause — a `rescue _ -> nil`
+  # helper would start raising at the call site. Inlining can't reproduce
+  # those semantics with a value substitution, so skip the whole helper.
+  @try_clause_keys ~w(rescue catch after else)a
+  defp has_try_clause?(body_kw) when is_list(body_kw) do
+    Enum.any?(body_kw, fn
+      {{:__block__, _, [key]}, _value} -> key in @try_clause_keys
+      {key, _value} when is_atom(key) -> key in @try_clause_keys
+      _ -> false
+    end)
+  end
+
+  defp has_try_clause?(_), do: false
 
   defp fetch_do_body(body_kw) when is_list(body_kw) do
     body_kw
