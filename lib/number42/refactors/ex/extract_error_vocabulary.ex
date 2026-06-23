@@ -33,10 +33,15 @@ defmodule Number42.Refactors.Ex.ExtractErrorVocabulary do
       head, or a function-head argument or `when`-guard literal. A
       function call can never stand in a pattern, so these are **left
       untouched**.
+    * **Type** — the tuple sits inside a `@spec`/`@type`/`@callback`/...
+      attribute, where it is a *type literal*, not a value. A function
+      call is no more valid in a typespec than in a pattern (it raises a
+      `TypespecError`), so these attribute subtrees are skipped wholesale.
 
   The walk descends only into construction positions when collecting
-  candidates and patching; pattern subtrees are skipped wholesale. A
-  module whose only occurrences are matches is left entirely unchanged.
+  candidates and patching; pattern and typespec subtrees are skipped
+  wholesale. A module whose only occurrences are matches or types is left
+  entirely unchanged.
 
   ## Naming and placement
 
@@ -69,15 +74,16 @@ defmodule Number42.Refactors.Ex.ExtractErrorVocabulary do
   synthesised helper's own body — a single occurrence, below threshold.
   The second pass therefore finds nothing to extract.
 
-  ## Default-OFF (opt-in only)
+  ## Default-ON
 
-  Disabled by default — `transform/2` is a no-op unless its opts carry
-  `enabled: true`. The naming heuristic (`error_<atom>`) and the
-  construction/match discrimination are conservative but the acceptance
-  criteria gate this on solid naming heuristics, so it ships opt-in:
+  Enabled by default. The construction/match/type discrimination is
+  conservative — only value-position `{:error, atom}` tuples are
+  rewritten, and a colliding helper name is skipped rather than suffixed —
+  so the rewrite is meaning-preserving. Tune the threshold via
+  `min_occurrences` (default `3`):
 
       configured_modules: [
-        {Number42.Refactors.Ex.ExtractErrorVocabulary, enabled: true}
+        {Number42.Refactors.Ex.ExtractErrorVocabulary, min_occurrences: 4}
       ]
   """
 
@@ -113,22 +119,14 @@ defmodule Number42.Refactors.Ex.ExtractErrorVocabulary do
 
   @impl Number42.Refactors.Refactor
   def transform(source, opts) do
-    if Keyword.get(opts, :enabled, false) do
-      min = Keyword.get(opts, :min_occurrences, @default_min_occurrences)
-      Sourceror.parse_string(source) |> apply_patches(source, min)
-    else
-      source
-    end
+    min = Keyword.get(opts, :min_occurrences, @default_min_occurrences)
+    Sourceror.parse_string(source) |> apply_patches(source, min)
   end
 
   @impl Number42.Refactors.Refactor
   def patches(ast, _source, opts) do
-    if Keyword.get(opts, :enabled, false) do
-      min = Keyword.get(opts, :min_occurrences, @default_min_occurrences)
-      build_patches(ast, min)
-    else
-      []
-    end
+    min = Keyword.get(opts, :min_occurrences, @default_min_occurrences)
+    build_patches(ast, min)
   end
 
   defp apply_patches({:ok, ast}, source, min),
@@ -183,6 +181,14 @@ defmodule Number42.Refactors.Ex.ExtractErrorVocabulary do
   # `pattern(s) -> body`: the head list is patterns, the body is a value.
   defp collect_constructions({:->, _, [_heads, body]}),
     do: collect_constructions(body)
+
+  # Type-context attributes (`@spec`, `@type`, `@callback`, ...) carry
+  # `{:error, atom}` as a *type literal*, not a constructed value. A
+  # function call can no more stand in a typespec than in a pattern, so
+  # these subtrees are skipped wholesale — same invariant as matches.
+  defp collect_constructions({:@, _, [{attr, _, _}]})
+       when attr in [:spec, :type, :typep, :opaque, :callback, :macrocallback],
+       do: []
 
   # def/defp/defmacro head + body: the head is patterns/guards, only the
   # `do:` (and `rescue`/`after`/...) bodies are values.

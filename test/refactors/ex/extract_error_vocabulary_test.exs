@@ -5,12 +5,13 @@ defmodule Number42.Refactors.Ex.ExtractErrorVocabularyTest do
 
   @subject ExtractErrorVocabulary
 
-  # Default-OFF: every rewriting assertion opts in with `enabled: true`.
-  @on [enabled: true]
+  # Enabled by default and takes no enable gate; `@on` is the empty opts
+  # list, kept on the behaviour tests for call-shape uniformity.
+  @on []
 
-  describe "default-off gate" do
-    test "without enabled: true the source is left untouched" do
-      src = """
+  describe "enabled by default" do
+    test "runs with no enable opt" do
+      before_source = """
       defmodule M do
         def a, do: {:error, :not_found}
         def b, do: {:error, :not_found}
@@ -18,7 +19,17 @@ defmodule Number42.Refactors.Ex.ExtractErrorVocabularyTest do
       end
       """
 
-      assert_unchanged(@subject, src)
+      expected = """
+      defmodule M do
+        defp error_not_found, do: {:error, :not_found}
+
+        def a, do: error_not_found()
+        def b, do: error_not_found()
+        def c, do: error_not_found()
+      end
+      """
+
+      assert_rewrites(@subject, before_source, expected, [])
     end
   end
 
@@ -205,6 +216,53 @@ defmodule Number42.Refactors.Ex.ExtractErrorVocabularyTest do
             :ok
           end
         end
+      end
+      """
+
+      assert_unchanged(@subject, before_source, @on)
+    end
+
+    test "{:error, atom} inside an @spec is a type literal, not a construction" do
+      # The tuple appears once in a @spec (a type context, where a `defp`
+      # call is invalid) and three times as a constructed value. Only the
+      # value positions are rewritten; the @spec stays a type literal so
+      # the result still compiles (a function call there is a TypespecError).
+      before_source = """
+      defmodule M do
+        @spec invite(term()) :: {:ok, term()} | {:error, :unauthorized}
+        def invite(%{admin: true} = u), do: {:ok, u}
+        def invite(_), do: {:error, :unauthorized}
+
+        def lock(_), do: {:error, :unauthorized}
+        def toggle(_), do: {:error, :unauthorized}
+      end
+      """
+
+      expected = """
+      defmodule M do
+        defp error_unauthorized, do: {:error, :unauthorized}
+
+        @spec invite(term()) :: {:ok, term()} | {:error, :unauthorized}
+        def invite(%{admin: true} = u), do: {:ok, u}
+        def invite(_), do: error_unauthorized()
+
+        def lock(_), do: error_unauthorized()
+        def toggle(_), do: error_unauthorized()
+      end
+      """
+
+      assert_rewrites(@subject, before_source, expected, @on)
+      assert_compiles(apply_refactor(@subject, before_source, @on))
+    end
+
+    test "@type referencing {:error, atom} is left untouched even when below other thresholds" do
+      # All occurrences are inside type contexts (one @type, one @spec) →
+      # no construction site exists → source unchanged.
+      before_source = """
+      defmodule M do
+        @type result :: {:ok, term()} | {:error, :not_found}
+        @spec fetch(term()) :: {:error, :not_found}
+        def fetch(_), do: raise("x")
       end
       """
 
