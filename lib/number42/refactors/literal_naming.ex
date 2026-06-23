@@ -357,15 +357,54 @@ defmodule Number42.Refactors.LiteralNaming do
   end
 
   @doc """
-  Whether a value group's occurrences agree on meaning — at most one
-  distinct keyword key. `nil` (no key) is compatible with any single
-  named key, but two different keys are a coincidental value clash, not
-  one constant.
+  Whether a value group's occurrences agree on the *deliberate* naming
+  signal they carry — the keyword key or the clause function.
+
+  A group is ambiguous when its hits disagree on the dominant deliberate
+  axis: two distinct keyword keys (`batch_size: 5` vs
+  `max_concurrency: 5`), or — the trap that motivated this — a keyed hit
+  mixed with a key-less one. A `nil` key is **not** a wildcard: an
+  occurrence with no key of its own (a positional arg, an arithmetic
+  operand, a tuple element) would silently inherit a name minted for an
+  unrelated keyword site — `max_concurrency: 10` lending its name to
+  `idx + 10`, or to `Map.get(ranges, prefix, {1, 10})`. So a keyed hit
+  only agrees with other hits carrying the *same* key.
+
+  The `context` axis (the surrounding call name) is deliberately **not**
+  an agreement source: it is a fallback name, below value-content for
+  strings (`log("x")`/`warn("x")` both name themselves `@x`), so a
+  context disagreement there is no clash.
   """
   @spec unambiguous?([map]) :: boolean()
   def unambiguous?(hits) do
-    hits |> Enum.map(& &1.key) |> Enum.reject(&is_nil/1) |> Enum.uniq() |> length() <= 1
+    case dominant_axis(hits) do
+      nil -> true
+      axis -> hits |> Enum.map(&axis_signal(&1, axis)) |> Enum.uniq() |> length() == 1
+    end
   end
+
+  # The highest-priority *deliberate* axis on which any hit carries a
+  # signal — key over clause, matching `derive_constant_name/2`'s order.
+  # nil when no hit carries a key or clause (the group is named by context
+  # or value-content, neither an ambiguity source).
+  defp dominant_axis(hits) do
+    Enum.find([:key, :clause], fn axis ->
+      Enum.any?(hits, &(not is_nil(axis_signal(&1, axis))))
+    end)
+  end
+
+  # The agreement token a hit contributes on an axis. The clause axis
+  # agrees on the *function name* — different patterns of one function
+  # (`icon_size(:large)`, `icon_size(_)`) return the same constant and
+  # are not a clash. The key axis agrees on its whole value.
+  defp axis_signal(hit, :clause) do
+    case Map.get(hit, :clause) do
+      {fun, _pattern} -> fun
+      other -> other
+    end
+  end
+
+  defp axis_signal(hit, axis), do: Map.get(hit, axis)
 
   # --- stem assembly -------------------------------------------------
 

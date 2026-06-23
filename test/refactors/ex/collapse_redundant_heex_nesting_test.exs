@@ -4,7 +4,8 @@ defmodule Number42.Refactors.Ex.CollapseRedundantHeexNestingTest do
   alias Number42.Refactors.Ex.CollapseRedundantHeexNesting
 
   @subject CollapseRedundantHeexNesting
-  @enabled [enabled: true]
+  # Enabled by default and takes no opts; kept named for call-shape uniformity.
+  @enabled []
 
   describe "metadata" do
     test "implements Refactor behaviour" do
@@ -21,8 +22,8 @@ defmodule Number42.Refactors.Ex.CollapseRedundantHeexNestingTest do
     end
   end
 
-  describe "default-off" do
-    test "is a no-op without enabled: true" do
+  describe "enabled by default" do
+    test "collapses with no enable opt" do
       source = """
       defmodule MyApp.Page do
         use Phoenix.Component
@@ -37,7 +38,9 @@ defmodule Number42.Refactors.Ex.CollapseRedundantHeexNestingTest do
       end
       """
 
-      assert_unchanged(@subject, source, [])
+      result = apply_refactor(@subject, source, [])
+      assert result =~ ~s(<div class="card">)
+      assert collapsed_div_count(result) == 1
     end
   end
 
@@ -68,7 +71,9 @@ defmodule Number42.Refactors.Ex.CollapseRedundantHeexNestingTest do
       assert collapsed_div_count(result) == 1
     end
 
-    test "section > section[class] collapses" do
+    test "section > section[class] is NOT collapsed — section is a semantic landmark" do
+      # Both tags are sectioning landmarks; collapsing would delete one
+      # (the dissolved inner). Only div/span are layout-inert.
       source = """
       defmodule MyApp.Page do
         use Phoenix.Component
@@ -83,9 +88,7 @@ defmodule Number42.Refactors.Ex.CollapseRedundantHeexNestingTest do
       end
       """
 
-      result = apply_refactor(@subject, source, @enabled)
-      assert result =~ ~s(<section class="panel">)
-      assert result =~ "Hi"
+      assert_unchanged(@subject, source, @enabled)
     end
 
     test "outer and inner may be different transparent containers" do
@@ -117,10 +120,10 @@ defmodule Number42.Refactors.Ex.CollapseRedundantHeexNestingTest do
         def render(assigns) do
           ~H\"\"\"
           <div>
-            <article class="entry">
+            <div class="entry">
               <h2>{@title}</h2>
               <p>{@text}</p>
-            </article>
+            </div>
           </div>
           \"\"\"
         end
@@ -131,7 +134,27 @@ defmodule Number42.Refactors.Ex.CollapseRedundantHeexNestingTest do
       assert result =~ ~s(<div class="entry">)
       assert result =~ "<h2>{@title}</h2>"
       assert result =~ "<p>{@text}</p>"
-      refute result =~ "<article"
+      assert collapsed_div_count(result) == 1
+    end
+
+    test "a semantic inner (article[class]) is NOT dissolved into a div wrapper" do
+      # Hoisting the class up would dissolve the <article>, deleting the
+      # landmark. Only div/span inners are dissolvable for Case B.
+      source = """
+      defmodule MyApp.Page do
+        use Phoenix.Component
+
+        def render(assigns) do
+          ~H\"\"\"
+          <div>
+            <article class="entry">{@text}</article>
+          </div>
+          \"\"\"
+        end
+      end
+      """
+
+      assert_unchanged(@subject, source, @enabled)
     end
   end
 
@@ -490,7 +513,9 @@ defmodule Number42.Refactors.Ex.CollapseRedundantHeexNestingTest do
             </section>
 
             <footer class="legal">
-              <small>© {@year}</small>
+              <div>
+                <div class="copyright">© {@year}</div>
+              </div>
             </footer>
           </main>
           \"\"\"
@@ -500,10 +525,14 @@ defmodule Number42.Refactors.Ex.CollapseRedundantHeexNestingTest do
 
       result = apply_refactor(@subject, source, @enabled)
 
-      # The one redundant `<div>` wrapping `<article class="metric-card">`
-      # collapses: outer div adopts the class, the article dissolves.
-      assert result =~ ~s(<div class="metric-card">)
-      refute result =~ "<article"
+      # The one genuinely-redundant `<div><div class="copyright">` collapses:
+      # both layout-inert, so the outer adopts the class and the inner div
+      # dissolves.
+      assert result =~ ~s(<div class="copyright">© {@year}</div>)
+
+      # The `<div>` wrapping a semantic `<article class="metric-card">` is
+      # NOT collapsed — dissolving the article would delete the landmark.
+      assert result =~ ~s(<article class="metric-card">)
 
       # The article's inner content is preserved verbatim.
       assert result =~ ~s(<span class="metric-label">{@label}</span>)
@@ -546,19 +575,19 @@ defmodule Number42.Refactors.Ex.CollapseRedundantHeexNestingTest do
       refute result =~ "<div>"
     end
 
-    test "attribute-less article wrapping a single section collapses (outer wins)" do
+    test "attribute-less div wrapping a single inner div collapses (outer wins)" do
       source = """
       defmodule MyApp.Page do
         use Phoenix.Component
 
         def render(assigns) do
           ~H\"\"\"
-          <article>
-            <section>
+          <div>
+            <div>
               <h2>{@title}</h2>
               <p>{@body}</p>
-            </section>
-          </article>
+            </div>
+          </div>
           \"\"\"
         end
       end
@@ -566,11 +595,30 @@ defmodule Number42.Refactors.Ex.CollapseRedundantHeexNestingTest do
 
       result = apply_refactor(@subject, source, @enabled)
 
-      # outer tag wins; the inner section dissolves, its children promoted
-      assert result =~ "<article>"
-      refute result =~ "<section>"
+      # outer tag wins; the inner div dissolves, its children promoted
       assert result =~ "<h2>{@title}</h2>"
       assert result =~ "<p>{@body}</p>"
+      assert collapsed_div_count(result) == 1
+    end
+
+    test "a semantic wrapper (article) is NOT dissolved around its child" do
+      # The wrapper is the landmark here; dissolving it deletes the
+      # <article>. Only div/span wrappers are collapsible.
+      source = """
+      defmodule MyApp.Page do
+        use Phoenix.Component
+
+        def render(assigns) do
+          ~H\"\"\"
+          <article>
+            <div>{@body}</div>
+          </article>
+          \"\"\"
+        end
+      end
+      """
+
+      assert_unchanged(@subject, source, @enabled)
     end
 
     test "inner transparent container with only a class is Case B (hoist), not A" do
