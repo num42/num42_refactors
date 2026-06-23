@@ -5,22 +5,30 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
 
   @subject ExtractMagicNumber
 
-  # ExtractMagicNumber is default-OFF: transform/2 is a no-op unless its
-  # own opts carry `enabled: true`. Every behaviour test below passes
-  # `enabled: true` as the trailing opts so it exercises the enabled
-  # refactor; the default-OFF gate has its own dedicated test.
-  @on [enabled: true]
+  # ExtractMagicNumber is enabled by default and takes no enable gate;
+  # `@on` is the empty opts list. `min_occurrences:` is still a live opt
+  # and a few tests pass it explicitly.
+  @on []
 
-  describe "default-OFF (opt-in only)" do
-    test "without enabled: true, transform is a no-op" do
-      source = ~S'''
-      defmodule M do
-        def a, do: 3600
-        def b, do: 3600
-      end
-      '''
-
-      assert apply_refactor(@subject, source) == source
+  describe "enabled by default" do
+    test "hoists without any enable opt" do
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def a, do: connect(timeout: 5000)
+          def b, do: reconnect(timeout: 5000)
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          @timeout 5000
+          def a, do: connect(timeout: @timeout)
+          def b, do: reconnect(timeout: @timeout)
+        end
+        ''',
+        []
+      )
     end
   end
 
@@ -126,8 +134,7 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
           def hide(js), do: JS.hide(js, time: @hide_time)
         end
         ''',
-        min_occurrences: 1,
-        enabled: true
+        min_occurrences: 1
       )
     end
 
@@ -517,6 +524,42 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
       )
     end
 
+    # Regression (position-db dogfood): `10` is a `max_concurrency:`
+    # keyword at one site and a bare arithmetic operand / tuple element at
+    # two others. A key-less occurrence is not a wildcard that absorbs the
+    # keyword name — `idx + @max_concurrency` would lie about what the
+    # value means. A keyed hit mixed with key-less hits is ambiguous.
+    test "a keyword-keyed value mixed with key-less occurrences is left inline" do
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          def cap(xs), do: Task.async_stream(xs, &run/1, max_concurrency: 10)
+          def offset(base, idx), do: base + idx + 10
+          def bounds(m, k), do: Map.get(m, k, {1, 10})
+        end
+        ''',
+        @on
+      )
+    end
+
+    # Regression (position-db dogfood): `5` is `max_concurrency:` at one
+    # site and the positional default of `Map.get/3` at another. The
+    # positional site carries no key, so it must not inherit the
+    # `max_concurrency` name.
+    test "a keyword-keyed value mixed with a positional default is left inline" do
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          def sort(secs, prio), do: Enum.sort_by(secs, &Map.get(prio, &1, 5))
+          def cap(xs), do: Task.async_stream(xs, &run/1, max_concurrency: 5)
+        end
+        ''',
+        @on
+      )
+    end
+
     test "a value with one consistent key across sites is still hoisted" do
       assert_rewrites(
         @subject,
@@ -596,8 +639,7 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumberTest do
           def quality_total_count(_), do: @quality_total_count_default
         end
         ''',
-        min_occurrences: 1,
-        enabled: true
+        min_occurrences: 1
       )
     end
 

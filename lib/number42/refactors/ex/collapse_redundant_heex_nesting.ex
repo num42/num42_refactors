@@ -30,31 +30,26 @@ defmodule Number42.Refactors.Ex.CollapseRedundantHeexNesting do
   case — an attribute-bearing wrapper around a styleless transparent
   child (styling down) — is out of scope here.
 
-  ## Default-OFF (opt-in only)
-
-  Disabled by default until its guards are trusted. Enable per project
-  via `.refactor.exs`:
-
-      configured_modules: [
-        {Number42.Refactors.Ex.CollapseRedundantHeexNesting, enabled: true}
-      ]
-
-  Without `enabled: true`, `transform/2` is a no-op.
+  ## Enabled by default
 
   ## Trigger (all must hold)
 
-  - **Outer** is a transparent container
-    (`div span section article main aside nav header footer`) with
-    **exactly zero attributes**.
+  - **Outer** is a layout-inert container — `div` or `span` only — with
+    **exactly zero attributes**. The sectioning elements (`section`,
+    `article`, `main`, `aside`, `nav`, `header`, `footer`) are semantic
+    landmarks and are **never** collapsed: dropping a class-less
+    `<header>` would silently remove an ARIA landmark.
   - **Outer** has **exactly one child element** and **no non-whitespace
     text** and **no `{...}` expression** siblings of that child. A
     leading/trailing text or interpolation sibling means the wrapper
     carries content of its own and is not redundant.
-  - **Child** is a plain transparent-container *element* — not a
-    component (`<.x>`), not a slot entry (`<:x>`), not an `<%= … %>`
-    block — whose **only attribute is `class`**. Any other attribute
-    (`id`, `phx-*`, `:for`, event listeners, …) vetoes: it would be
-    silently dropped or would change semantics if hoisted blindly.
+  - **Child** is one of:
+    - a `div`/`span` whose **only attribute is `class`** (Case B —
+      the outer adopts the class, the inner dissolves); or
+    - a component (`<.x>`), kept verbatim, or an attribute-less plain
+      element (Case A — the wrapper dissolves, the child is promoted).
+    A plain element carrying any non-`class` attribute (`id`, `phx-*`,
+    `:for`, a listener) vetoes — promoting it would drop the attribute.
 
   ## Content-model gate (fail-safe toward not collapsing)
 
@@ -88,7 +83,13 @@ defmodule Number42.Refactors.Ex.CollapseRedundantHeexNesting do
   alias Number42.Refactors.Heex.Tree
   alias Sourceror.Patch
 
-  @transparent_containers ~w(div span section article main aside nav header footer)
+  # Only div/span are layout-inert — collapsing them away changes nothing
+  # a browser, screen reader or CSS selector observes. The sectioning
+  # elements (section article main aside nav header footer) are semantic
+  # landmarks: dropping a class-less `<header>` silently removes an ARIA
+  # landmark. So they are NOT collapsible — neither as the dissolved outer
+  # nor as a dissolved Case-B inner.
+  @transparent_containers ~w(div span)
 
   # Tags whose content model forbids reparenting their children or
   # fusing them away. The gate is enforced on the inner tag.
@@ -101,17 +102,18 @@ defmodule Number42.Refactors.Ex.CollapseRedundantHeexNesting do
   @impl Number42.Refactors.Refactor
   def explanation do
     """
-    A transparent, attribute-less container that wraps exactly one
-    transparent child element — whose only attribute is `class` — adds a
-    level of nesting and nothing else. We collapse the two into one: the
-    outer tag stays, adopts the child's `class`, and the child dissolves,
-    promoting its inner content. Only `div span section article main
-    aside nav header footer` qualify as transparent containers, and we
-    never collapse across a content-model boundary (`table`, `tr`, `ul`,
-    `select`, `figure`, …). The child must carry `class` and nothing
-    else — any `id`, `phx-*`, `:for` or listener vetoes the rewrite.
-    Opt-in (default-off) and idempotent: the merged element keeps a
-    `class`, so it can't match again.
+    A layout-inert `div`/`span` with no attributes that wraps exactly one
+    child adds a level of nesting and nothing else. We collapse the two
+    into one: when the child is a class-only `div`/`span` the outer adopts
+    its `class` and the child dissolves; when the child is a component or
+    an attribute-less element the wrapper dissolves and the child is
+    promoted verbatim. Only `div` and `span` qualify — the sectioning
+    elements (`section`, `nav`, `header`, …) are semantic landmarks and
+    are never collapsed away. We never collapse across a content-model
+    boundary (`table`, `tr`, `ul`, `select`, `figure`, …), and any
+    non-`class` attribute on a plain inner element vetoes the rewrite.
+    Idempotent: the merged element keeps a `class`, so it can't match
+    again.
     """
   end
 
@@ -122,12 +124,8 @@ defmodule Number42.Refactors.Ex.CollapseRedundantHeexNesting do
   def reformat_after?, do: true
 
   @impl Number42.Refactors.Refactor
-  def transform(source, opts) do
-    if Keyword.get(opts, :enabled, false) do
-      Sourceror.parse_string(source) |> rewrite(source)
-    else
-      source
-    end
+  def transform(source, _opts) do
+    Sourceror.parse_string(source) |> rewrite(source)
   end
 
   defp rewrite({:ok, ast}, source), do: ast |> collect_h_sigils() |> apply_sigils(source)

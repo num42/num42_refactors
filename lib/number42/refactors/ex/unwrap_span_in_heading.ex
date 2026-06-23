@@ -25,13 +25,14 @@ defmodule Number42.Refactors.Ex.UnwrapSpanInHeading do
   itself or on its classes. Removing the wrapper trims the markup and
   matches the semantic-HTML guidance.
 
-  ## Default-OFF (opt-in only)
+  ## Enabled by default
 
-  Unwrapping touches markup structure, and the class-hoist branch makes
-  a judgement call about where styling belongs. So this refactor only
-  fires with `enabled: true` in its own opts; without it `transform/2`
-  is a no-op (same convention as `GenerateHeexAssignContracts` and
-  `HeexAttributeBundleToComponent`).
+  Every rewrite is conservative: a bare attribute-less `<span>` is pure
+  layout and dropping it changes nothing observable, and the class-hoist
+  branch fires only when the span is the heading's sole child with a lone
+  static class and the heading has no class to collide with. The heading
+  / `<header>` landmark itself is always kept — only the styling-only
+  span inside it is removed.
 
   ## Detection
 
@@ -53,7 +54,6 @@ defmodule Number42.Refactors.Ex.UnwrapSpanInHeading do
 
   ## Skip list (source left unchanged when any holds)
 
-  - **Not opted in.** No `enabled: true` → no-op.
   - **Span outside a heading/header.** Nothing to do.
   - **Span with a meaning-bearing attribute** (`id`, `aria-*`, `data-*`,
     event bindings, `style`, …) — anything other than a lone static
@@ -79,12 +79,11 @@ defmodule Number42.Refactors.Ex.UnwrapSpanInHeading do
 
   @impl Number42.Refactors.Refactor
   def description,
-    do: "Unwrap styling-only <span> nested inside <h1>-<h6>/<header> (opt-in, default-off)"
+    do: "Unwrap styling-only <span> nested inside <h1>-<h6>/<header>"
 
   @impl Number42.Refactors.Refactor
   def explanation do
     """
-    OPINIONATED / OPT-IN (default-off, runs only with `enabled: true`).
     A `<span>` inside `<h1>`-`<h6>` or `<header>` is almost always a
     styling-only wrapper with no semantic meaning — exactly the layout-
     hook misuse the semantic-HTML guidance discourages. For each such
@@ -102,12 +101,8 @@ defmodule Number42.Refactors.Ex.UnwrapSpanInHeading do
   def reformat_after?, do: true
 
   @impl Number42.Refactors.Refactor
-  def transform(source, opts) do
-    if Keyword.get(opts, :enabled, false) do
-      Sourceror.parse_string(source) |> rewrite(source)
-    else
-      source
-    end
+  def transform(source, _opts) do
+    Sourceror.parse_string(source) |> rewrite(source)
   end
 
   defp rewrite({:ok, ast}, source) do

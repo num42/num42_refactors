@@ -58,17 +58,26 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
   After the rewrite each occurrence is `@name`, no longer a bare
   literal, so the second pass counts zero occurrences and stops.
 
-  ## Default-OFF (opt-in only)
+  ## Enabled by default
 
-  Disabled by default — `transform/2` is a no-op unless its own opts
-  carry `enabled: true`. The derived attribute names are frequently
-  meaningless (`@int_42`, `@timeout_5s_ms`) and the same literal can
-  carry different meanings within one module, so hoisting trades a clear
-  inline value for an opaquely-named indirection. Enable per project
-  once name derivation is trustworthy for that codebase:
+  The two risks that once kept this opt-in are now gates, not hopes:
+
+  - **Meaningless names** — a group whose only derivation is the bare
+    value (`@int_42`) is dropped by `nameable?/1`. A literal is hoisted
+    only when an axis (keyword key, clause head, recognized call) gives
+    it a name that says something the value does not.
+  - **One literal, several meanings** — `LiteralNaming.unambiguous?/1`
+    drops a group whose occurrences disagree on the deliberate naming
+    axis: two distinct keys, or a keyed site mixed with a key-less one
+    (`max_concurrency: 10` must not lend its name to `idx + 10`). The
+    call-context stem matches a whole function-name segment, so
+    `send_chunked(conn, 200)` is not misread as a chunk size.
+
+  Tune the threshold per project if a value should repeat more before it
+  is hoisted:
 
       configured_modules: [
-        {Number42.Refactors.Ex.ExtractMagicNumber, enabled: true}
+        {Number42.Refactors.Ex.ExtractMagicNumber, min_occurrences: 3}
       ]
   """
 
@@ -100,22 +109,14 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
 
   @impl Number42.Refactors.Refactor
   def transform(source, opts) do
-    if Keyword.get(opts, :enabled, false) do
-      min = Keyword.get(opts, :min_occurrences, @default_min_occurrences)
-      Sourceror.parse_string(source) |> apply_patches(source, min)
-    else
-      source
-    end
+    min = Keyword.get(opts, :min_occurrences, @default_min_occurrences)
+    Sourceror.parse_string(source) |> apply_patches(source, min)
   end
 
   @impl Number42.Refactors.Refactor
   def patches(ast, _source, opts) do
-    if Keyword.get(opts, :enabled, false) do
-      min = Keyword.get(opts, :min_occurrences, @default_min_occurrences)
-      build_patches(ast, min)
-    else
-      []
-    end
+    min = Keyword.get(opts, :min_occurrences, @default_min_occurrences)
+    build_patches(ast, min)
   end
 
   defp apply_patches({:ok, ast}, source, min),

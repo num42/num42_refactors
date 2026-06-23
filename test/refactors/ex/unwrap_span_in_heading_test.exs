@@ -5,19 +5,33 @@ defmodule Number42.Refactors.Ex.UnwrapSpanInHeadingTest do
 
   @subject UnwrapSpanInHeading
 
-  @enabled [enabled: true]
+  # Enabled by default and takes no opts; kept named for call-shape uniformity.
+  @enabled []
 
-  describe "default-off" do
-    test "does nothing unless enabled: true" do
-      assert_unchanged(@subject, ~S'''
-      defmodule MyView do
-        def title(assigns) do
-          ~H"""
-          <h1><span>Dashboard</span></h1>
-          """
+  describe "enabled by default" do
+    test "unwraps with no enable opt" do
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule MyView do
+          def title(assigns) do
+            ~H"""
+            <h1><span>Dashboard</span></h1>
+            """
+          end
         end
-      end
-      ''')
+        ''',
+        ~S'''
+        defmodule MyView do
+          def title(assigns) do
+            ~H"""
+            <h1>Dashboard</h1>
+            """
+          end
+        end
+        ''',
+        []
+      )
     end
   end
 

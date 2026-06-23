@@ -90,15 +90,18 @@ defmodule Number42.Refactors.Ex.CanonicalStatementOrder do
   The **last statement of the whole body** (the return value) is always
   treated as a fixed barrier — never sorted forward.
 
-  ## Default-OFF (opt-in only)
+  ## Enabled by default
 
-  Disabled by default — `transform/2` is a no-op unless its own opts
-  carry `enabled: true`. Statement reordering is heavyweight and
-  judgement-laden; opt in per project:
+  The reorder rests on a conservative def-use + side-effect DAG: a
+  statement never crosses one it depends on (RAW/WAW/WAR), anything not
+  provably pure keeps its relative order, and control-flow / pinned /
+  dynamic-key statements are barriers that stay fixed. Only genuinely
+  independent pure statements move. Tune the minimum block size per
+  project if needed:
 
       configured_modules: [
         {Number42.Refactors.Ex.CanonicalStatementOrder,
-         enabled: true, min_block_statements: 3}
+         min_block_statements: 4}
       ]
 
   ## Source slicing
@@ -119,7 +122,7 @@ defmodule Number42.Refactors.Ex.CanonicalStatementOrder do
 
   @impl Number42.Refactors.Refactor
   def description,
-    do: "Reorder independent statements into a canonical, deterministic order (default-OFF)"
+    do: "Reorder independent statements into a canonical, deterministic order"
 
   @impl Number42.Refactors.Refactor
   def explanation do
@@ -146,12 +149,8 @@ defmodule Number42.Refactors.Ex.CanonicalStatementOrder do
 
   @impl Number42.Refactors.Refactor
   def transform(source, opts) do
-    if Keyword.get(opts, :enabled, false) do
-      min = Keyword.get(opts, :min_block_statements, @default_min_block_statements)
-      Sourceror.parse_string(source) |> apply_to_parse_result(source, min)
-    else
-      source
-    end
+    min = Keyword.get(opts, :min_block_statements, @default_min_block_statements)
+    Sourceror.parse_string(source) |> apply_to_parse_result(source, min)
   end
 
   defp apply_to_parse_result({:ok, ast}, source, min),

@@ -56,6 +56,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   what they return (`fetch_source_and_formula`,
   `original_width_and_original_height`); the suite is green and matches the
   baseline.
+- `UnwrapSpanInHeading` is now **enabled by default** — the opt-in gate
+  (`enabled: true`) is removed; `transform/2` always runs. Every rewrite is
+  conservative: a bare attribute-less `<span>` under a heading/`<header>` is
+  pure layout and dropping it changes nothing observable, and the class-hoist
+  branch fires only when the span is the heading's sole child with a lone static
+  class and the heading has no class to collide with. The heading/`<header>`
+  landmark itself is always kept. A full-suite dogfood run on position-db (1
+  file) is green and matches the unrefactored baseline at the same seed.
+- `CollapseRedundantHeexNesting` is now **enabled by default** — the opt-in gate
+  is removed; `transform/2` always runs. **The transparent-container set was
+  narrowed from nine tags to `div`/`span` only.** A dogfood run showed it
+  collapsing `<header><.x/></header>` to `<.x/>` — deleting a semantic ARIA
+  landmark. Only `div`/`span` are layout-inert; the sectioning elements
+  (`section article main aside nav header footer`) are landmarks and are now
+  never collapsed, neither as the dissolved outer nor as a dissolved Case-B
+  inner. With that fix a full-suite dogfood run on position-db (12 files) is
+  green, matches the baseline, and removes no landmark (net deletions are
+  `div`/`span` only).
+- `ExtractMagicNumber` is now **enabled by default** — the opt-in gate is
+  removed; `transform/2` always runs. A dogfood run surfaced three naming
+  bugs, all fixed at the root:
+  (1) `LiteralNaming.unambiguous?/1` only compared the keyword-key axis, so a
+  keyed occurrence (`max_concurrency: 10`) coalesced with key-less ones (a bare
+  `idx + 10`, a tuple element) and stamped the keyword name on unrelated sites —
+  it now requires every hit to agree on the dominant *deliberate* axis (key, or
+  clause function), treating a `nil` key as a disagreement rather than a
+  wildcard, while still allowing the value-content/context name path (so
+  `log("x")`/`warn("x")` → `@x` is unaffected);
+  (2) the call-context stem matched a raw substring, so `send_chunked(conn, 200)`
+  was misnamed `@chunk_size` (the `200` is an HTTP status) — it now matches a
+  whole `_`-delimited function-name segment (`chunk_every` ✓, `send_chunked` ✗);
+  (3) the two above, combined, also dropped a bad `search.ex` hoist. With the
+  fixes a full-suite dogfood run on position-db (8 files) is green and matches
+  the baseline; remaining hoists are all concept-coherent.
+- `CanonicalStatementOrder` is now **enabled by default** — the opt-in gate is
+  removed; `transform/2` always runs (`min_block_statements` stays a live opt).
+  The reorder rests on a conservative def-use + side-effect DAG: a statement
+  never crosses one it depends on (RAW/WAW/WAR), anything not provably pure keeps
+  its relative order, and control-flow / pinned / dynamic-key statements are
+  barriers; the return value is always pinned. A full-suite dogfood run on
+  position-db (29 files) is green and matches the baseline at the same seed —
+  the dangerous shapes (an `app.start` side effect before a config read, an
+  `assigns` rebind with later readers, a raising `Map.fetch!`) all kept their
+  required order; only genuinely independent pure statements moved.
 - `SortReverseToDesc` is now **enabled by default** — the conservative opt-in
   gate (`enabled: true`) is removed; `transform/2` always runs. The match is
   arity-exact (`Enum.sort/1`, `Enum.sort_by/2` with a free direction slot,

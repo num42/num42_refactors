@@ -793,6 +793,22 @@ defmodule Number42.Refactors.IdentifierExpansionTest do
       assert "int_200" =
                IdentifierExpansion.derive_constant_name(200, %{context: "foo"})
     end
+
+    test "a chunking call's leading segment names a chunk-size constant" do
+      assert "chunk_size" =
+               IdentifierExpansion.derive_constant_name(5000, %{context: "chunk_every"})
+    end
+
+    # Regression (position-db dogfood): the needle must match a whole
+    # `_`-segment, not an arbitrary substring. `send_chunked(conn, 200)`
+    # *contains* "chunk" but is a `send`/`chunked` compound whose numeric
+    # arg is an HTTP status — naming it `@chunk_size` would lie. Falls
+    # through to the value fallback (which the caller's nameable? skip
+    # then leaves inline).
+    test "a substring-only stem match (send_chunked) does not name a chunk size" do
+      assert "int_200" =
+               IdentifierExpansion.derive_constant_name(200, %{context: "send_chunked"})
+    end
   end
 
   describe "derive_constant_name/2 — key beats well-known value" do

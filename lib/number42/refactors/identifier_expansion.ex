@@ -974,10 +974,14 @@ defmodule Number42.Refactors.IdentifierExpansion do
 
   # Call-name heuristic: an integer bounded by a recognized call gets a
   # bound-shaped name. Only fires for integers under a matching call —
-  # otherwise nil, so the value fallback takes over.
+  # otherwise nil, so the value fallback takes over. The needle must match
+  # a whole `_`-delimited *segment* of the function name, not an arbitrary
+  # substring: `chunk_every` (segment `chunk`) is a chunking call, but
+  # `send_chunked` (segments `send`/`chunked`) is not — its numeric arg is
+  # an HTTP status, and a substring match would misname it `@chunk_size`.
   defp context_name(value, context) when is_integer(value) and context not in [nil, ""] do
-    str = to_string(context)
-    Enum.find_value(@context_stems, fn {needle, stem} -> if str =~ needle, do: stem end)
+    segments = context |> to_string() |> String.split("_")
+    Enum.find_value(@context_stems, fn {needle, stem} -> if needle in segments, do: stem end)
   end
 
   defp context_name(_value, _context), do: nil

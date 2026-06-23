@@ -6,24 +6,38 @@ defmodule Number42.Refactors.Ex.CanonicalStatementOrderTest do
 
   @subject CanonicalStatementOrder
 
-  # Opt-in default-OFF refactor — every reordering assertion threads
-  # `enabled: true`.
-  @on [enabled: true]
+  # Enabled by default and takes no enable gate; `@on` is the empty opts
+  # list. `min_block_statements:` is still a live opt, threaded where a
+  # test needs it.
+  @on []
 
-  describe "Slice 0 — default-OFF no-op" do
-    test "is a no-op unless enabled" do
-      source = """
+  describe "Slice 0 — enabled by default" do
+    test "reorders with no enable opt" do
+      before_source = """
       defmodule M do
-        def f() do
-          b = 2
-          a = 1
+        def f(input) do
+          x = Map.put(%{}, :x, input)
+          y = Map.put(%{}, :y, input)
+          z = Map.put(%{}, :z, input)
 
-          {a, b}
+          {x, y, z}
         end
       end
       """
 
-      assert_unchanged(@subject, source, [])
+      after_source = """
+      defmodule M do
+        def f(input) do
+          z = Map.put(%{}, :z, input)
+          x = Map.put(%{}, :x, input)
+          y = Map.put(%{}, :y, input)
+
+          {x, y, z}
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, after_source, [])
     end
   end
 
