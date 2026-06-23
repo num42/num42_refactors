@@ -112,7 +112,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - string options to compile-time macro calls (`use P, token: "X"`) are
     left inline — `use` hands `__using__/1` raw AST, so `@token` there is a
     `String.Chars`-on-Tuple crash (`use` joins `import`/`alias`/`require`
-    in the directive exclusion, which the string refactor now applies).
+    in the directive exclusion, which the string refactor now applies);
+  - string literals inside an Ecto/Phoenix schema-DSL block (`schema
+    "items" do field … end`) are left inline — the table name must stay a
+    literal (`schema @items do` does not expand) and the field block is
+    compile-time DSL. The whole `schema`/`embedded_schema`/`field`/
+    `belongs_to`/`has_many`/… subtree is pruned, like a query.
+
+  Also: the hoisted attribute block now anchors at the first *non-pruned*
+  top-level expression, so a leading pruned subtree (schema, query, quote)
+  no longer pushes `@attr` definitions before `defmodule`.
+
+### Added
+
+- `ExtractStringLiteral` config `:hoist_in_attr_bodies` (default `false`):
+  whether to hoist string literals nested inside a module-attribute body
+  (`@routes %{home: "/home"}`). Off by default — an attribute body is
+  already a named constant, so rewriting a map/list entry to `@home_path`
+  splices a symbolic key into a literal table. Set `true` to opt in.
 
 ### Removed
 
