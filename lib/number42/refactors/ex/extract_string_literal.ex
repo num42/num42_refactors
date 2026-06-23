@@ -79,11 +79,24 @@ defmodule Number42.Refactors.Ex.ExtractStringLiteral do
   use Number42.Refactors.Refactor
 
   alias Number42.Refactors.IdentifierExpansion
+  alias Number42.Refactors.LiteralNaming
   alias Sourceror.Patch
 
-  @default_min_occurrences 2
   @default_min_length 3
+  @default_name_max_words 5
   @doc_attrs ~w(moduledoc doc typedoc shortdoc)a
+
+  # Filler words dropped when naming a constant after a sentence's first
+  # words — auxiliaries, articles, pronouns, prepositions. Negations
+  # (`not`/`no`/`never`) are deliberately kept: they carry meaning.
+  @name_stopwords ~w(
+    a an the this that these those
+    i you your he she it we they
+    is are was were be been being am
+    has have had do does did
+    to of in on at by for with from as
+    and or but
+  )
 
   @impl Number42.Refactors.Refactor
   def description, do: "Hoist repeated string literals into a named `@module_attribute`"
@@ -106,9 +119,7 @@ defmodule Number42.Refactors.Ex.ExtractStringLiteral do
   @impl Number42.Refactors.Refactor
   def transform(source, opts) do
     if Keyword.get(opts, :enabled, false) do
-      min = Keyword.get(opts, :min_occurrences, @default_min_occurrences)
-      min_length = Keyword.get(opts, :min_length, @default_min_length)
-      Sourceror.parse_string(source) |> apply_patches(source, min, min_length)
+      Sourceror.parse_string(source) |> apply_patches(source, settings(opts))
     else
       source
     end
@@ -117,32 +128,40 @@ defmodule Number42.Refactors.Ex.ExtractStringLiteral do
   @impl Number42.Refactors.Refactor
   def patches(ast, _source, opts) do
     if Keyword.get(opts, :enabled, false) do
-      min = Keyword.get(opts, :min_occurrences, @default_min_occurrences)
-      min_length = Keyword.get(opts, :min_length, @default_min_length)
-      build_patches(ast, min, min_length)
+      build_patches(ast, settings(opts))
     else
       []
     end
   end
 
-  defp apply_patches({:ok, ast}, source, min, min_length),
-    do: ast |> build_patches(min, min_length) |> patch_or_passthrough(source)
+  # `:min_occurrences` overrides every context class when set; otherwise
+  # the per-role defaults apply (keyword/log need 2, the rest need 1).
+  defp settings(opts) do
+    %{
+      min_override: Keyword.get(opts, :min_occurrences),
+      min_length: Keyword.get(opts, :min_length, @default_min_length),
+      name_max_words: Keyword.get(opts, :name_max_words, @default_name_max_words)
+    }
+  end
 
-  defp apply_patches({:error, _}, source, _min, _min_length), do: source
+  defp apply_patches({:ok, ast}, source, settings),
+    do: ast |> build_patches(settings) |> patch_or_passthrough(source)
+
+  defp apply_patches({:error, _}, source, _settings), do: source
 
   defp patch_or_passthrough([], source), do: source
   defp patch_or_passthrough(patches, source), do: Sourceror.patch_string(source, patches)
 
-  defp build_patches(ast, min, min_length) do
+  defp build_patches(ast, settings) do
     ast
     |> Macro.prewalker()
     |> Enum.flat_map(fn
-      {:defmodule, _, [_name, [{_do, body}]]} -> module_patches(body, min, min_length)
+      {:defmodule, _, [_name, [{_do, body}]]} -> module_patches(body, settings)
       _ -> []
     end)
   end
 
-  defp module_patches(body, min, min_length) do
+  defp module_patches(body, settings) do
     exprs =
       body |> body_to_exprs() |> Enum.map(&prune_nested_modules/1) |> Enum.map(&prune_quotes/1)
 
@@ -153,10 +172,24 @@ defmodule Number42.Refactors.Ex.ExtractStringLiteral do
       |> Enum.reduce(&MapSet.union/2)
 
     exprs
-    |> collect_occurrences(excluded, min_length)
-    |> Enum.filter(fn {_value, hits} -> length(hits) >= min end)
-    |> assign_names(existing)
+    |> collect_occurrences(excluded, settings)
+    |> Enum.filter(fn {_value, hits} -> length(hits) >= required_min(hits, settings) end)
+    |> assign_names(existing, settings)
     |> emit_patches(exprs)
+  end
+
+  # The occurrence threshold a value group must clear. An explicit
+  # `:min_occurrences` overrides every role; otherwise each role carries
+  # its own default and the group needs the strictest one any of its
+  # occurrences demands (a keyword/log use is not loosened by a sibling
+  # plain use).
+  @role_min %{keyword: 2, log: 2, other: 1}
+  defp required_min(_hits, %{min_override: override}) when is_integer(override), do: override
+
+  defp required_min(hits, _settings) do
+    hits
+    |> Enum.map(fn %{role: role} -> Map.fetch!(@role_min, role) end)
+    |> Enum.max()
   end
 
   # Replace nested `defmodule` subtrees with an inert marker so a module's
@@ -192,15 +225,14 @@ defmodule Number42.Refactors.Ex.ExtractStringLiteral do
   end
 
   defp pattern_subtrees({kind, _, [head | _]}) when def_or_macro_kind?(kind),
-    do: head |> strip_when() |> head_args()
+    do: head |> LiteralNaming.strip_when() |> head_args()
 
-  defp pattern_subtrees({:->, _, [lhs, _body]}), do: lhs |> List.wrap() |> Enum.map(&strip_when/1)
+  defp pattern_subtrees({:->, _, [lhs, _body]}),
+    do: lhs |> List.wrap() |> Enum.map(&LiteralNaming.strip_when/1)
+
   defp pattern_subtrees({:=, _, [lhs, _rhs]}), do: [lhs]
   defp pattern_subtrees({:<-, _, [lhs, _rhs]}), do: [lhs]
   defp pattern_subtrees(_), do: []
-
-  defp strip_when({:when, _, [pat | _]}), do: pat
-  defp strip_when(other), do: other
 
   defp head_args({name, _, args}) when is_atom(name) and is_list(args), do: args
   defp head_args(_), do: []
@@ -245,54 +277,55 @@ defmodule Number42.Refactors.Ex.ExtractStringLiteral do
     |> MapSet.new()
   end
 
-  # %{value => [%{node, value, key}]} — every hoistable string-literal node,
-  # grouped by value, in source order, tagged with the keyword key it sat
-  # under (or nil).
-  defp collect_occurrences(exprs, excluded, min_length) do
-    keys = keyword_value_keys(exprs)
+  # %{value => [%{node, value, key, context, clause, role}]} — every
+  # hoistable string-literal node, grouped by value, in source order,
+  # tagged with the shared naming axes (keyword key / call context /
+  # clause head) and its syntactic role (for the per-role threshold).
+  defp collect_occurrences(exprs, excluded, settings) do
+    ctx = %{
+      excluded: excluded,
+      keys: LiteralNaming.keyword_value_keys(exprs, &is_binary/1),
+      contexts: LiteralNaming.call_contexts(exprs, &is_binary/1),
+      clauses: LiteralNaming.clause_contexts(exprs, &is_binary/1),
+      roles: LiteralNaming.occurrence_roles(exprs, &is_binary/1),
+      min_length: settings.min_length
+    }
 
     exprs
-    |> Enum.flat_map(&literal_hits(&1, excluded, keys, min_length))
+    |> Enum.flat_map(&literal_hits(&1, ctx))
     |> Enum.group_by(fn %{value: value} -> value end)
   end
 
-  defp literal_hits(expr, excluded, keys, min_length) do
+  defp literal_hits(expr, ctx) do
     {_, hits} =
-      Macro.prewalk(expr, [], fn node, acc ->
-        {node, prepend_hit(node, acc, excluded, keys, min_length)}
-      end)
+      Macro.prewalk(expr, [], fn node, acc -> {node, prepend_hit(node, acc, ctx)} end)
 
     Enum.reverse(hits)
   end
 
-  defp prepend_hit({:__block__, _, [value]} = node, acc, excluded, keys, min_length)
-       when is_binary(value) do
+  defp prepend_hit({:__block__, _, [value]} = node, acc, ctx) when is_binary(value) do
     cond do
-      String.length(value) < min_length -> acc
-      MapSet.member?(excluded, node) -> acc
-      true -> [%{node: node, value: value, key: Map.get(keys, node)} | acc]
+      String.length(value) < ctx.min_length ->
+        acc
+
+      MapSet.member?(ctx.excluded, node) ->
+        acc
+
+      true ->
+        hit = %{
+          node: node,
+          value: value,
+          key: Map.get(ctx.keys, node),
+          context: Map.get(ctx.contexts, node),
+          clause: Map.get(ctx.clauses, node),
+          role: Map.get(ctx.roles, node, :other)
+        }
+
+        [hit | acc]
     end
   end
 
-  defp prepend_hit(_node, acc, _excluded, _keys, _min_length), do: acc
-
-  # Map a string-literal value-node to the keyword key it sat under, for
-  # genuine keyword *arguments* only. Block keywords (`do:`/`else:`/…) are
-  # structural, not data, so they are excluded.
-  @block_keywords ~w(do else after catch rescue)a
-  defp keyword_value_keys(exprs) do
-    exprs
-    |> Enum.flat_map(&Macro.prewalker/1)
-    |> Enum.flat_map(fn
-      {{:__block__, _, [key]}, {:__block__, _, [value]} = value_node}
-      when is_atom(key) and is_binary(value) and key not in @block_keywords ->
-        [{value_node, key}]
-
-      _ ->
-        []
-    end)
-    |> Map.new()
-  end
+  defp prepend_hit(_node, acc, _ctx), do: acc
 
   # An interpolated string is `{:<<>>, _, segments}`, not a `:__block__`
   # literal — so it never reaches `prepend_hit`. A plain literal is a
@@ -301,53 +334,94 @@ defmodule Number42.Refactors.Ex.ExtractStringLiteral do
   defp plain_string_node?(_), do: false
 
   # [{value, hits}] → [%{name, value, hits}] with collision-suffixed names.
-  # Sorted by source position so name ordering is deterministic.
-  defp assign_names(groups, existing) do
+  # Sorted by source position so name ordering is deterministic. A group
+  # whose occurrences carry two distinct keyword keys is dropped — a
+  # coincidental value clash, not one constant (the same guard the number
+  # refactor uses). Strings keep value-only-fallback groups, naming them by
+  # slugifying their own content, so the `nameable?` skip does NOT apply.
+  defp assign_names(groups, existing, settings) do
     taken = Map.new(existing, &{&1, nil})
 
     groups
     |> Enum.sort_by(fn {_value, hits} -> hit_position(hd(hits)) end)
+    |> Enum.filter(fn {_value, hits} -> LiteralNaming.unambiguous?(hits) end)
     |> Enum.reduce({[], taken}, fn {value, hits}, {named, taken} ->
-      name = unique_name(value, hits, taken)
-      {[%{name: name, value: value, hits: hits} | named], Map.put(taken, name, nil)}
+      case unique_name(value, hits, taken, settings) do
+        nil -> {named, taken}
+        name -> {[%{name: name, value: value, hits: hits} | named], Map.put(taken, name, nil)}
+      end
     end)
     |> elem(0)
     |> Enum.reverse()
   end
 
-  defp unique_name(value, hits, taken) do
-    base = string_constant_name(value, key_for(hits))
-    {:ok, name} = resolve_collision(base, taken, on_collision: :suffix)
-    name
+  defp unique_name(value, hits, taken, settings) do
+    case string_constant_name(value, hits, settings) do
+      nil ->
+        nil
+
+      base ->
+        {:ok, name} = resolve_collision(base, taken, on_collision: :suffix)
+        name
+    end
   end
 
-  # Prefer `derive_constant_name/2` (key, URL, path), then slugify the
-  # string's own content. A content string with no usable name falls back
-  # to `string` (collision-suffixed to `string_2`, … by the caller).
-  defp string_constant_name(value, key) do
-    case IdentifierExpansion.derive_constant_name(value, %{key: key}) do
-      "default_string" -> slugify(value) || "string"
+  # Name a string by its *function* before its content. Try the shared
+  # naming axes (key/context/clause/URL/path); a bare generic key is
+  # enriched with the value when the value is a short identifier
+  # (`as: "collection"` → `as_collection`). Only when no axis names it does
+  # the content speak: a word-shaped string is named by its first words
+  # (stopwords filtered, capped at `name_max_words`); a punctuation-heavy
+  # string (SQL fragment, header) names nothing and is left inline (nil).
+  @generic_keys ~w(as id name type key tag kind role slot mode status state)
+  defp string_constant_name(value, hits, settings) do
+    case IdentifierExpansion.derive_constant_name(value, LiteralNaming.name_opts(hits)) do
+      "default_string" -> content_name(value, settings)
+      key when key in @generic_keys -> enrich_generic_key(key, value)
       name -> name
     end
   end
 
-  # Lowercase, keep alphanumerics, collapse every other run to `_`, trim
-  # leading/trailing `_`, cap length so a long sentence doesn't become a
-  # 200-char attribute. Returns nil when nothing alphanumeric survives.
-  @slug_max_chars 40
-  defp slugify(value) do
-    slug =
-      value
-      |> String.downcase()
-      |> String.replace(~r/[^a-z0-9]+/u, "_")
-      |> String.trim("_")
-      |> String.slice(0, @slug_max_chars)
-      |> String.trim("_")
-
-    if slug == "" or not String.match?(slug, ~r/[a-z]/), do: nil, else: slug
+  # A generic key gains the value as a qualifier when the value is a short
+  # single-word identifier (`as` + `collection` → `as_collection`); a
+  # multi-word or punctuation value leaves the key to stand alone.
+  defp enrich_generic_key(key, value) do
+    case LiteralNaming.sanitize_subtoken(value) do
+      [token] -> "#{key}_#{token}"
+      _ -> key
+    end
   end
 
-  defp key_for(hits), do: Enum.find_value(hits, fn %{key: key} -> key end)
+  # Name a content string by its leading words: lowercase, split on
+  # non-alphanumerics, drop stopwords (keeping negations), take the first
+  # `name_max_words`. A string that is mostly punctuation — an SQL
+  # fragment, an operator template, a header — is not a label: it returns
+  # nil and is left inline.
+  defp content_name(value, settings) do
+    if wordlike?(value) do
+      value
+      |> String.downcase()
+      |> String.split(~r/[^a-z0-9]+/u, trim: true)
+      |> Enum.reject(&(&1 in @name_stopwords))
+      |> Enum.take(settings.name_max_words)
+      |> case do
+        [] -> nil
+        words -> Enum.join(words, "_")
+      end
+    end
+  end
+
+  # A string reads as a label/message when letters and spaces dominate it.
+  # An SQL fragment (`"COALESCE(? || '.', '') || ?"`), a CSP/header
+  # (`"connect-src 'self' wss: ws:; "`) or a strftime template
+  # (`"%B %d, %Y"`) is heavy with operators, quotes and `%`-directives and
+  # falls below the floor — it is config, not a label, and carries no name.
+  @wordlike_floor 0.8
+  defp wordlike?(value) do
+    graphemes = String.graphemes(value)
+    wordish = Enum.count(graphemes, &String.match?(&1, ~r/[\p{L}\p{N}\s]/u))
+    graphemes != [] and wordish / length(graphemes) >= @wordlike_floor
+  end
 
   defp emit_patches([], _exprs), do: []
 
