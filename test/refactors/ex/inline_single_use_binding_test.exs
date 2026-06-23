@@ -5,38 +5,9 @@ defmodule Number42.Refactors.Ex.InlineSingleUseBindingTest do
 
   @subject InlineSingleUseBinding
 
-  # The refactor is default-OFF; every behavioural test opts in with
-  # `enabled: true`. The default-off test below asserts that without it
-  # the refactor is a no-op.
-  @on [enabled: true]
-
-  describe "default-off" do
-    test "is a no-op without enabled: true" do
-      source = """
-      defmodule M do
-        def f(x) do
-          result = Map.get(x, :a)
-          use_it(result)
-        end
-      end
-      """
-
-      assert_unchanged(@subject, source)
-    end
-
-    test "still a no-op with enabled: false" do
-      source = """
-      defmodule M do
-        def f(x) do
-          result = Map.get(x, :a)
-          use_it(result)
-        end
-      end
-      """
-
-      assert_unchanged(@subject, source, enabled: false)
-    end
-  end
+  # The refactor is enabled by default and takes no opts; `@on` is the
+  # empty opts list, passed where a test wants to be explicit about it.
+  @on []
 
   describe "rewrites — canonical inline" do
     test "inlines a use-once, read-never-after binding into its single use" do

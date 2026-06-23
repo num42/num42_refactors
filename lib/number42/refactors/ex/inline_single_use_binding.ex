@@ -14,19 +14,17 @@ defmodule Number42.Refactors.Ex.InlineSingleUseBinding do
   expression so operator precedence is preserved (`(a + b) * 2`, not
   `a + b * 2`).
 
-  ## Default-OFF (opt-in only)
+  ## Enabled by default
 
-  This refactor is **disabled by default**. Splicing an RHS across the
-  many shapes a use site can take (Ecto pins, macro keyword args,
-  control-flow bodies) has produced enough invalid output that it is not
-  safe to run unattended. Enable it deliberately, per project, via
-  `.refactor.exs`:
-
-      configured_modules: [
-        {Number42.Refactors.Ex.InlineSingleUseBinding, enabled: true}
-      ]
-
-  Without `enabled: true` in its own opts, `transform/2` is a no-op.
+  This refactor runs unattended. Splicing an RHS across the many shapes
+  a use site can take (Ecto pins, macro keyword args, control-flow
+  bodies, operator operands) once produced invalid or meaning-changing
+  output; each such shape is now a guard in `patches_for_binding/3`
+  (pattern LHS, impure/raising RHS, control-flow RHS, fallback/guard
+  RHS, multi-line literal RHS, non-adjacent or multi-read use, pin use)
+  plus use-site-aware paren-wrapping. With those guards a full-suite
+  dogfood run on a real codebase is green, so the conservative opt-in
+  gate was removed.
 
   ## When we inline
 
@@ -102,13 +100,8 @@ defmodule Number42.Refactors.Ex.InlineSingleUseBinding do
   def reformat_after?, do: true
 
   @impl Number42.Refactors.Refactor
-  def transform(source, opts) do
-    if Keyword.get(opts, :enabled, false) do
-      Sourceror.parse_string(source) |> apply_to_parse_result(source)
-    else
-      source
-    end
-  end
+  def transform(source, _opts),
+    do: Sourceror.parse_string(source) |> apply_to_parse_result(source)
 
   defp apply_to_parse_result({:ok, ast}, source),
     do: ast |> first_block_patches() |> patch_or_passthrough(source)
