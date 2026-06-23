@@ -62,6 +62,13 @@ defmodule Number42.Refactors.Ex.InlineSingleUseBinding do
     `UnusedVariable`/dead-code territory, not an inline).
   - Single-expression bodies — there is no following statement to
     inline into.
+  - A **fallback/guard RHS** — a short-circuit operator at the root
+    (`x = lookup(k) || []`, `x = a && b`). The name marks a deliberate
+    "value-or-its-fallback"; inlining buries it in a call argument.
+  - A **multi-line literal RHS** — a map/struct/list spanning more than
+    one source line. Inlined it gets crammed into a call argument and
+    reads worse than the named binding; a binding is the right tool to
+    name such a literal.
 
   ## Idempotence & determinism
 
@@ -135,6 +142,8 @@ defmodule Number42.Refactors.Ex.InlineSingleUseBinding do
     with {:ok, var} <- bare_lhs_var(lhs),
          true <- pure?(rhs),
          false <- control_flow_rhs?(rhs),
+         false <- fallback_rhs?(rhs),
+         false <- multiline_rhs?(rhs),
          {:ok, use_expr} <- next_statement(exprs, idx),
          1 <- read_count(use_expr, var),
          false <- read_after?(var, exprs, idx + 1),
@@ -156,6 +165,27 @@ defmodule Number42.Refactors.Ex.InlineSingleUseBinding do
   @control_flow_heads [:if, :unless, :case, :cond, :with, :fn]
   defp control_flow_rhs?({head, _, _}) when head in @control_flow_heads, do: true
   defp control_flow_rhs?(_), do: false
+
+  # A short-circuit operator at the RHS root (`x = lookup(k) || []`,
+  # `x = a && b`) is a deliberate default/guard: the binding name marks
+  # "this is the value-or-its-fallback". Splicing it into the use site —
+  # paren-wrapped — buries that intent inside a call's argument list
+  # (`use((lookup(k) || []))`). The named form reads better, so skip.
+  @fallback_ops [:||, :&&, :or, :and]
+  defp fallback_rhs?({op, _, args}) when op in @fallback_ops and is_list(args), do: true
+  defp fallback_rhs?(_), do: false
+
+  # The RHS is a literal that spans more than one source line — a
+  # multi-line map / struct / list. Inlined, it gets crammed into a
+  # call argument (`Map.get(%{...8 lines...}, k, default)`), which reads
+  # worse than the named binding it replaces. A binding is exactly the
+  # right tool to give such a literal a name, so leave it.
+  defp multiline_rhs?(rhs) do
+    case Sourceror.get_range(rhs) do
+      %{start: start, end: end_} -> end_[:line] > start[:line]
+      _ -> false
+    end
+  end
 
   # The sole read sits behind a `^` pin (Ecto query / match pin). The
   # inline would land an expression at a pin position (`^(if …)`), which
@@ -206,20 +236,42 @@ defmodule Number42.Refactors.Ex.InlineSingleUseBinding do
   defp inline_patch(use_expr, var, rhs) do
     {:ok, var_node} = find_var_node(use_expr, var)
     rendered = Sourceror.to_string(rhs)
-    text = if needs_paren?(rhs), do: "(" <> rendered <> ")", else: rendered
+    text = if needs_paren?(rhs, use_expr, var_node), do: "(" <> rendered <> ")", else: rendered
     %{change: text, range: Sourceror.get_range(var_node)}
   end
 
-  # An operator at the RHS root (binary or unary) can bind incorrectly
-  # against the surrounding expression once spliced in, so wrap it.
-  # Pipes are operators too but read fine unparenthesised; everything
-  # else (calls, vars, literals, tuples/maps/lists) is self-delimiting.
-  defp needs_paren?({op, _, args}) when is_atom(op) and is_list(args) do
-    arity = length(args)
-    op != :|> and (Macro.operator?(op, arity) and arity in [1, 2])
+  # Whether the spliced RHS must be parenthesised to preserve meaning.
+  #
+  # Parens matter only when an **operator at the RHS root** lands in a
+  # slot that itself is an **operand of an operator** at the use site:
+  # there the two operators re-associate by precedence and can change
+  # the parse (`brand_ids ++ variants |> Enum.map(f)` binds the map over
+  # the whole concat, not just `variants`). The pipe is no exception —
+  # `++` binds tighter than `|>`, so an inlined pipe needs the wrap too.
+  #
+  # Every other slot is self-delimiting — a call argument, a data-
+  # structure element, the function side of a pipe — bounded by a comma
+  # or bracket. There no operator RHS can capture its neighbours, so no
+  # parens are added regardless of the RHS shape.
+  defp needs_paren?(rhs, use_expr, var_node) do
+    operator_root?(rhs) and operand_of_operator?(use_expr, var_node)
   end
 
-  defp needs_paren?(_), do: false
+  defp operator_root?({op, _, args}) when is_atom(op) and is_list(args) do
+    Macro.operator?(op, length(args)) and length(args) in [1, 2]
+  end
+
+  defp operator_root?(_), do: false
+
+  # The splice slot sits directly under an operator node — i.e. the
+  # inlined expression becomes one of that operator's operands. Walks
+  # the ancestor path to `var_node` and inspects its immediate parent.
+  defp operand_of_operator?(use_expr, var_node) do
+    case Macro.path(use_expr, &(&1 == var_node)) do
+      [_self, parent | _] -> operator_root?(parent)
+      _ -> false
+    end
+  end
 
   defp find_var_node(expr, var) do
     bound = collect_bound_vars(expr)
