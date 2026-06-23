@@ -23,6 +23,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `ExtractErrorVocabulary` is now **enabled by default** — the opt-in gate is
+  removed. A dogfood run surfaced one correctness bug, fixed at the root: a
+  `{:error, atom}` tuple sitting inside a `@spec`/`@type`/`@callback` attribute
+  is a *type literal*, not a constructed value, so rewriting it to
+  `error_<atom>()` raised a `TypespecError` (`type error_unauthorized/0
+  undefined`). The construction walk now skips typespec attribute subtrees
+  wholesale — the same invariant already applied to match positions, where a
+  function call can never stand. Regression tests cover the `@spec` and `@type`
+  cases. Full-suite dogfood on position-db (5 files) is green and matches the
+  baseline (2513/0).
 - `PushParamIntoCallee` is now **enabled by default** — the opt-in gate is
   removed. A dogfood run surfaced three correctness bugs, all fixed at the root:
   substituting the pushed expression for a param is only sound when the param is
