@@ -93,6 +93,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     sanitizes to nothing (a bare `:` / all-punctuation) is rejected and the
     value falls through to a valid name.
 
+### Fixed
+
+- `ExtractStringLiteral` could emit code that did not compile. Five guards
+  added so an in-place run on a real codebase compiles and `mix format`
+  succeeds:
+  - a generated stem must start with a letter — `"24h"` no longer yields
+    the uncompilable `@24h` (leading digit-subtokens are dropped; `"3 day
+    window"` → `@day_window`);
+  - a stem that is a reserved word (`@true`, `@when`, `@end`) or a special
+    module attribute (`@type`, `@spec`, `@behaviour`, `@impl`, …) is
+    rejected — overwriting those is a syntax or compile error. The check
+    lives in `IdentifierExpansion.reserved_attribute_name?/1`, shared with
+    `LiteralNaming.valid_stem/1`;
+  - string literals inside an Ecto `from/1` query are left inline — query
+    macros (`ago`, `fragment`, `field`) read them at compile time, so
+    `ago(n, @day)` fails with `invalid interval`;
+  - string options to compile-time macro calls (`use P, token: "X"`) are
+    left inline — `use` hands `__using__/1` raw AST, so `@token` there is a
+    `String.Chars`-on-Tuple crash (`use` joins `import`/`alias`/`require`
+    in the directive exclusion, which the string refactor now applies).
+
 ### Removed
 
 - `ExtractRepeatedGuardToDefguard`: removed. Measured against a real codebase

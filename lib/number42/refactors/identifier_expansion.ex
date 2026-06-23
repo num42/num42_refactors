@@ -880,10 +880,36 @@ defmodule Number42.Refactors.IdentifierExpansion do
     end
   end
 
+  # Names that cannot be a generated `@module_attribute`. Reserved words
+  # (`@true`, `@when`, `@end` are syntax errors) and Elixir's special
+  # module attributes (`@type "x"` is read as a typespec; `@behaviour`,
+  # `@impl`, `@spec`, … carry compiler semantics) — overwriting any of
+  # them breaks compilation, so a key reducing to one is rejected.
+  @reserved_words ~w(
+    true false nil when and or in fn do end catch rescue after else not
+    type typep opaque spec callback macrocallback behaviour impl dialyzer
+    moduledoc doc typedoc deprecated after_compile before_compile on_load
+    optional_callbacks derive enforce_keys
+  )
+
   defp sanitize_stem(str) do
     cleaned = str |> String.downcase() |> String.replace(~r/[^a-z0-9]+/, "_") |> String.trim("_")
-    if String.match?(cleaned, ~r/[a-z]/), do: cleaned, else: ""
+
+    cond do
+      not String.match?(cleaned, ~r/^[a-z]/) -> ""
+      reserved_attribute_name?(cleaned) -> ""
+      true -> cleaned
+    end
   end
+
+  @doc """
+  Whether `name` cannot be used as a generated `@module_attribute` —
+  an Elixir reserved word (`true`, `when`, `end`) or a special module
+  attribute (`type`, `spec`, `behaviour`, `impl`, …). Generated naming
+  must reject these; overwriting them is a syntax or compile error.
+  """
+  @spec reserved_attribute_name?(String.t()) :: boolean()
+  def reserved_attribute_name?(name), do: name in @reserved_words
 
   # Whether the enclosing key/context licenses a temporal or relative
   # reading of a value (`max_age_seconds`, `retry_timeout_ms`,

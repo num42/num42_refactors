@@ -46,11 +46,13 @@ defmodule Number42.Refactors.LiteralNaming do
       }
   """
 
+  alias Number42.Refactors.IdentifierExpansion
+
   @type literal_pred :: (term() -> boolean())
 
   @block_keywords ~w(do else after catch rescue)a
   @call_verbs ~w(validate put set cast get fetch assign update build make)
-  @directive_calls [:import, :alias, :require, :attr, :slot]
+  @directive_calls [:import, :alias, :require, :use, :attr, :slot]
 
   # --- context maps --------------------------------------------------
 
@@ -304,10 +306,12 @@ defmodule Number42.Refactors.LiteralNaming do
   # --- exclusions ----------------------------------------------------
 
   @doc """
-  Every literal node under a directive or declaration call whose numbers
-  are not repeated data: `import`/`alias`/`require` (arities in
-  `only:`/`except:` lists) and `attr`/`slot` (component declaration
-  defaults). These literals are neither candidate nor counted.
+  Every literal node under a directive or declaration call whose literals
+  are not repeated data: `import`/`alias`/`require`/`use` (arities and
+  compile-time macro options — `use P, token: "X"` hands `__using__/1`
+  raw AST, so a `@attr` there breaks expansion) and `attr`/`slot`
+  (component declaration defaults). These literals are neither candidate
+  nor counted.
   """
   @spec directive_nodes([Macro.t()], literal_pred) :: MapSet.t()
   def directive_nodes(exprs, literal?) do
@@ -379,8 +383,26 @@ defmodule Number42.Refactors.LiteralNaming do
     |> Enum.flat_map(&sanitize_subtoken/1)
     |> Enum.dedup()
     |> Enum.uniq()
-    |> Enum.join("_")
+    |> valid_stem()
   end
+
+  @doc """
+  Join sanitized subtokens into an attribute stem that is a *valid*
+  identifier. It must start with a letter (`@24h` does not compile), so
+  leading subtokens that begin with a digit (`["3", "day"]`, `["24h"]`)
+  are dropped until one starts with a letter; a digit-leading subtoken in
+  a later position is kept (`["padding", "2xl"]` → `"padding_2xl"`). A
+  stem that lands on a reserved word or a special module attribute
+  (`@true`, `@type`, `@end`) is rejected. When nothing valid survives, the
+  stem is `""`.
+  """
+  @spec valid_stem([String.t()]) :: String.t()
+  def valid_stem(subtokens) do
+    stem = subtokens |> Enum.drop_while(&starts_with_digit?/1) |> Enum.join("_")
+    if IdentifierExpansion.reserved_attribute_name?(stem), do: "", else: stem
+  end
+
+  defp starts_with_digit?(token), do: String.match?(token, ~r/^[0-9]/)
 
   @doc """
   Fold one token to a valid attribute subtoken (`[a-z0-9_]`), or `[]`
