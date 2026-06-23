@@ -44,20 +44,20 @@ defmodule Number42.Refactors.Ex.ExtractStringLiteralTest do
       )
     end
 
-    test "uses the key as the constant name when the literal sat at key: value" do
+    test "uses the key (enriched with a short value) when the literal sat at key: value" do
       assert_rewrites(
         @subject,
         ~S'''
         defmodule M do
-          def a, do: build(status: "active")
-          def b, do: build(status: "active")
+          def a, do: build(timeout_message: "active")
+          def b, do: build(timeout_message: "active")
         end
         ''',
         ~S'''
         defmodule M do
-          @status "active"
-          def a, do: build(status: @status)
-          def b, do: build(status: @status)
+          @timeout_message "active"
+          def a, do: build(timeout_message: @timeout_message)
+          def b, do: build(timeout_message: @timeout_message)
         end
         ''',
         @on
@@ -109,15 +109,17 @@ defmodule Number42.Refactors.Ex.ExtractStringLiteralTest do
   end
 
   describe "thresholds" do
-    test "default min_occurrences >= 2: a string used once is left alone" do
+    test "an explicit min_occurrences overrides the per-role defaults" do
+      # A plain call-arg defaults to min 1, but an explicit min_occurrences
+      # of 2 raises every class — so a single use is left alone.
       assert_unchanged(
         @subject,
         ~S'''
         defmodule M do
-          def a, do: "connection refused"
+          def a, do: render("connection refused")
         end
         ''',
-        @on
+        [min_occurrences: 2] ++ @on
       )
     end
 
@@ -144,6 +146,117 @@ defmodule Number42.Refactors.Ex.ExtractStringLiteralTest do
         end
         ''',
         [min_length: 5] ++ @on
+      )
+    end
+  end
+
+  describe "context-dependent default thresholds" do
+    test "a plain call-arg string hoists at one occurrence" do
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def a, do: render_status("pending review")
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          @pending_review "pending review"
+          def a, do: render_status(@pending_review)
+        end
+        ''',
+        @on
+      )
+    end
+
+    test "a keyword-arg value needs two occurrences" do
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          def a, do: to_form(%{}, as: "collection_form")
+        end
+        ''',
+        @on
+      )
+    end
+
+    test "a log-call string needs two occurrences" do
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          def a, do: Logger.info("starting up sequence")
+        end
+        ''',
+        @on
+      )
+    end
+
+    test "a dbg-call string needs two occurrences" do
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          def a, do: dbg("trace marker here")
+        end
+        ''',
+        @on
+      )
+    end
+  end
+
+  describe "naming: enriched names over content slugify" do
+    test "a generic key plus a short identifier value combine" do
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def a, do: to_form(%{}, as: "collection")
+          def b, do: to_form(%{}, as: "collection")
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          @as_collection "collection"
+          def a, do: to_form(%{}, as: @as_collection)
+          def b, do: to_form(%{}, as: @as_collection)
+        end
+        ''',
+        @on
+      )
+    end
+
+    test "a sentence is named by its first content words, stopwords filtered" do
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def a, do: err("Your account has not been unlocked yet")
+          def b, do: err("Your account has not been unlocked yet")
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          @account_not_unlocked_yet "Your account has not been unlocked yet"
+          def a, do: err(@account_not_unlocked_yet)
+          def b, do: err(@account_not_unlocked_yet)
+        end
+        ''',
+        @on
+      )
+    end
+
+    test "a punctuation-heavy string (SQL fragment) is left inline" do
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          def a, do: fragment("COALESCE(? || '.', '') || ?", x, y)
+          def b, do: fragment("COALESCE(? || '.', '') || ?", x, y)
+        end
+        ''',
+        @on
       )
     end
   end
@@ -271,18 +384,18 @@ defmodule Number42.Refactors.Ex.ExtractStringLiteralTest do
 
   describe "cross-module isolation" do
     test "a string shared across two modules in one file is not merged" do
-      # Each module sees the string once → below threshold in both → no
-      # hoist. Proves the per-module walk never counts across module
-      # boundaries.
+      # The string is a keyword value (per-role threshold 2) seen once in
+      # each module → below threshold in both → no hoist. Proves the
+      # per-module walk never counts across module boundaries.
       assert_unchanged(
         @subject,
         ~S'''
         defmodule A do
-          def a, do: "connection refused"
+          def a, do: form(label: "connection refused")
         end
 
         defmodule B do
-          def b, do: "connection refused"
+          def b, do: form(label: "connection refused")
         end
         ''',
         @on
@@ -327,17 +440,17 @@ defmodule Number42.Refactors.Ex.ExtractStringLiteralTest do
         @subject,
         ~S'''
         defmodule M do
-          @status :existing
-          def a, do: build(status: "active")
-          def b, do: build(status: "active")
+          @pending_review :existing
+          def a, do: render("pending review")
+          def b, do: render("pending review")
         end
         ''',
         ~S'''
         defmodule M do
-          @status_2 "active"
-          @status :existing
-          def a, do: build(status: @status_2)
-          def b, do: build(status: @status_2)
+          @pending_review_2 "pending review"
+          @pending_review :existing
+          def a, do: render(@pending_review_2)
+          def b, do: render(@pending_review_2)
         end
         ''',
         @on

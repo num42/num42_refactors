@@ -23,6 +23,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `ExtractStringLiteral` now shares `ExtractMagicNumber`'s naming quality via a
+  new `Number42.Refactors.LiteralNaming` module (the enriched keyword-key +
+  call-param + call-noun derivation, clause-head names, call-context names,
+  ambiguity detection, and valid-stem sanitizing are extracted there and called
+  by both refactors). On top of the shared axes, the string refactor gained:
+  - **Context-dependent thresholds** — a string's default `min_occurrences`
+    depends on where it sits: keyword-argument values and `Logger.*`/`dbg`/
+    `IO.inspect` arguments need 2 occurrences (config-ish, churns less); plain
+    call args, clause bodies and bindings need 1. An explicit `:min_occurrences`
+    overrides every class.
+  - **Function over content naming** — a generic key is enriched with a short
+    identifier value (`as: "collection"` → `@as_collection`); a sentence is
+    named by its first `:name_max_words` (default 5) content words with
+    stopwords filtered but negations kept (`"Your account has not been unlocked
+    yet"` → `@account_not_unlocked_yet`); a punctuation-heavy string (SQL
+    fragment, CSP header, strftime template) is left inline rather than named
+    after a meaningless first token.
+  - New `:name_max_words` config key (default 5).
+  - Follow-up #356 tracks a configurable never-hoist call-list (e.g. `gettext`).
+
 - `ExtractMagicNumber` naming, a series of fixes that together removed every
   garbage/lying/coincidental name produced on position-db:
   - **Clause-head axis** — derive a name from the enclosing function clause

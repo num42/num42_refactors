@@ -75,6 +75,7 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
   use Number42.Refactors.Refactor
 
   alias Number42.Refactors.IdentifierExpansion
+  alias Number42.Refactors.LiteralNaming
   alias Sourceror.Patch
 
   @idiomatic [0, 1, 2, 0.0, 1.0, 0.5]
@@ -143,7 +144,7 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
         attribute_value_nodes(exprs),
         pattern_literal_nodes(exprs),
         capture_arity_nodes(exprs),
-        directive_nodes(exprs)
+        LiteralNaming.directive_nodes(exprs, &is_number/1)
       ]
       |> Enum.reduce(&MapSet.union/2)
 
@@ -185,20 +186,19 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
     exprs
     |> Enum.flat_map(&Macro.prewalker/1)
     |> Enum.flat_map(&pattern_subtrees/1)
-    |> Enum.flat_map(&numeric_literal_nodes/1)
+    |> Enum.flat_map(fn ast -> LiteralNaming.literal_value_nodes(ast, &is_number/1) end)
     |> MapSet.new()
   end
 
   defp pattern_subtrees({kind, _, [head | _]}) when kind in [:def, :defp, :defmacro, :defmacrop],
-    do: head |> strip_when() |> head_args()
+    do: head |> LiteralNaming.strip_when() |> head_args()
 
-  defp pattern_subtrees({:->, _, [lhs, _body]}), do: lhs |> List.wrap() |> Enum.map(&strip_when/1)
+  defp pattern_subtrees({:->, _, [lhs, _body]}),
+    do: lhs |> List.wrap() |> Enum.map(&LiteralNaming.strip_when/1)
+
   defp pattern_subtrees({:=, _, [lhs, _rhs]}), do: [lhs]
   defp pattern_subtrees({:<-, _, [lhs, _rhs]}), do: [lhs]
   defp pattern_subtrees(_), do: []
-
-  defp strip_when({:when, _, [pat | _]}), do: pat
-  defp strip_when(other), do: other
 
   defp head_args({name, _, args}) when is_atom(name) and is_list(args), do: args
   defp head_args(_), do: []
@@ -220,41 +220,6 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
     |> MapSet.new()
   end
 
-  # Every numeric literal under a directive or declaration call whose
-  # numbers are not repeated data:
-  #
-  #   * `import`/`alias`/`require` — the only number is a function arity
-  #     in an `only:`/`except:` list (`import M, only: [foo: 4]`); an
-  #     arity must stay a literal, `only: [foo: @attr]` would not compile.
-  #   * `attr`/`slot` — a component declaration's `default:` is a spec,
-  #     not a recurring magic value; `attr :gap, default: 4` reads as the
-  #     declaration it is, and hoisting `4` into `@gap_default` only adds
-  #     indirection.
-  #
-  # These literals are neither candidate nor counted.
-  @directive_calls [:import, :alias, :require, :attr, :slot]
-  defp directive_nodes(exprs) do
-    exprs
-    |> Enum.flat_map(&Macro.prewalker/1)
-    |> Enum.flat_map(fn
-      {directive, _, _} = node when directive in @directive_calls ->
-        numeric_literal_nodes(node)
-
-      _ ->
-        []
-    end)
-    |> MapSet.new()
-  end
-
-  defp numeric_literal_nodes(ast) do
-    ast
-    |> Macro.prewalker()
-    |> Enum.flat_map(fn
-      {:__block__, _, [value]} = node when is_number(value) -> [node]
-      _ -> []
-    end)
-  end
-
   # Every numeric literal anywhere in the body of an `@attr value`
   # definition. The body is already a named constant (`@one_mb`,
   # `@gap_map`); a literal inside it — an arithmetic operand
@@ -268,7 +233,7 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
     |> Enum.flat_map(&Macro.prewalker/1)
     |> Enum.flat_map(fn
       {:@, _, [{name, _, [value_node]}]} when is_atom(name) ->
-        numeric_literal_nodes(value_node)
+        LiteralNaming.literal_value_nodes(value_node, &is_number/1)
 
       _ ->
         []
@@ -276,14 +241,13 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
     |> MapSet.new()
   end
 
-  # %{value => [%{node, value, key, context}]} — every hoistable
+  # %{value => [%{node, value, key, context, clause}]} — every hoistable
   # numeric-literal node, grouped by value, in source order, tagged with
-  # the keyword key it sat under (or nil) and the name of the call that
-  # took it as an argument (or nil).
+  # the shared naming axes (keyword key / call context / clause head).
   defp collect_occurrences(exprs, excluded) do
-    keys = keyword_value_keys(exprs)
-    contexts = call_contexts(exprs)
-    clauses = clause_contexts(exprs)
+    keys = LiteralNaming.keyword_value_keys(exprs, &is_number/1)
+    contexts = LiteralNaming.call_contexts(exprs, &is_number/1)
+    clauses = LiteralNaming.clause_contexts(exprs, &is_number/1)
 
     exprs
     |> Enum.flat_map(&literal_hits(&1, excluded, keys, contexts, clauses))
@@ -323,207 +287,6 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
 
   defp prepend_hit(_node, acc, _excluded, _keys, _contexts, _clauses), do: acc
 
-  # Map a literal value-node to the `{function_name, pattern}` of the
-  # guard-free function clause whose body it *is* — `def image_width("md"),
-  # do: 80` ↦ `80 ↦ {"image_width", "md"}`. Only a clause whose entire
-  # body is the bare literal qualifies; a multi-statement body or a
-  # literal nested deeper carries no single discriminating pattern.
-  defp clause_contexts(exprs) do
-    exprs
-    |> Enum.flat_map(&Macro.prewalker/1)
-    |> Enum.flat_map(&clause_body_context/1)
-    |> Map.new()
-  end
-
-  defp clause_body_context({kind, _, [head, [{{:__block__, _, [:do]}, body_node}]]})
-       when kind in [:def, :defp] do
-    with {fun, pattern} <- clause_name_and_pattern(head),
-         {:__block__, _, [value]} = node when is_number(value) <- body_node do
-      [{node, {fun, pattern}}]
-    else
-      _ -> []
-    end
-  end
-
-  defp clause_body_context(_), do: []
-
-  defp clause_name_and_pattern(head) do
-    case strip_when(head) do
-      {fun, _, [first | _]} when is_atom(fun) -> {Atom.to_string(fun), literal_pattern(first)}
-      _ -> :error
-    end
-  end
-
-  # The discriminating token of a clause's first argument. A `nil`
-  # literal and the `_` wildcard both name their clause — `nil` and
-  # `default` — so a `f(nil)`/`f(_)` pair yields `@f_nil`/`@f_default`
-  # rather than a `@f`/`@f_2` collision. Other non-literal patterns carry
-  # no token (the function name stands alone).
-  defp literal_pattern({:__block__, _, [nil]}), do: "nil"
-  defp literal_pattern(nil), do: "nil"
-  defp literal_pattern({:_, _, ctx}) when is_atom(ctx), do: "default"
-
-  defp literal_pattern({:__block__, _, [value]}) when is_binary(value) or is_atom(value),
-    do: value
-
-  defp literal_pattern(value) when is_binary(value) or is_atom(value), do: value
-  defp literal_pattern(_), do: nil
-
-  # Map a literal value-node to the name of the call that took it as a
-  # positional argument (`String.slice(x, 0, 200)` → `200 ↦ "slice"`).
-  # Names the constant by its bound when no keyword key applies.
-  defp call_contexts(exprs) do
-    exprs
-    |> Enum.flat_map(&Macro.prewalker/1)
-    |> Enum.flat_map(&call_arg_contexts/1)
-    |> Map.new()
-  end
-
-  defp call_arg_contexts({{:., _, [_mod, fun]}, _, args}) when is_atom(fun) and is_list(args),
-    do: tag_literal_args(fun, args)
-
-  defp call_arg_contexts({fun, _, args}) when is_atom(fun) and is_list(args),
-    do: tag_literal_args(fun, args)
-
-  defp call_arg_contexts(_), do: []
-
-  defp tag_literal_args(fun, args) do
-    args
-    |> Enum.filter(&match?({:__block__, _, [value]} when is_number(value), &1))
-    |> Enum.map(&{&1, Atom.to_string(fun)})
-  end
-
-  # Map a literal value-node to the name derived from the keyword key it
-  # sat under, enriched with the surrounding call: the call's first
-  # literal param and the call's noun (its name with a leading verb like
-  # `validate_`/`put_`/`set_` stripped) join the key, deduped and ordered
-  # `param_key_noun` — `validate_length(:email, max: 160)` → `email_max_length`.
-  # A bare keyword arg with no enriching call keeps just its key
-  # (`connect(timeout: 5000)` → `timeout`). Block keywords (`do:`/`else:`/…)
-  # are structural, not data, and excluded — their key would name the
-  # attribute `do`.
-  @block_keywords ~w(do else after catch rescue)a
-  @call_verbs ~w(validate put set cast get fetch assign update build make)
-  defp keyword_value_keys(exprs) do
-    exprs
-    |> Enum.flat_map(&keyword_names_in_scope(&1, nil))
-    |> Map.new()
-  end
-
-  # Walk carrying the nearest enclosing function name as scope, so a call
-  # with no literal param of its own can borrow the function as the
-  # subject (`def show, do: JS.show(time: 300)` → `show_time`). A `def`
-  # sets the scope for its whole body; the walk recurses with that scope
-  # instead of re-descending scope-less, so each call is named exactly
-  # once.
-  defp keyword_names_in_scope({kind, _, [head | rest]}, _scope)
-       when kind in [:def, :defp] do
-    fun = enclosing_function_name(head)
-    Enum.flat_map(rest, &keyword_names_in_scope(&1, fun))
-  end
-
-  defp keyword_names_in_scope({_, _, args} = node, scope) when is_list(args) do
-    call_keyword_names(node, scope) ++ Enum.flat_map(args, &keyword_names_in_scope(&1, scope))
-  end
-
-  defp keyword_names_in_scope({left, right}, scope) do
-    keyword_names_in_scope(left, scope) ++ keyword_names_in_scope(right, scope)
-  end
-
-  defp keyword_names_in_scope(list, scope) when is_list(list) do
-    Enum.flat_map(list, &keyword_names_in_scope(&1, scope))
-  end
-
-  defp keyword_names_in_scope(_node, _scope), do: []
-
-  defp enclosing_function_name(head) do
-    case strip_when(head) do
-      {fun, _, _} when is_atom(fun) -> Atom.to_string(fun)
-      _ -> nil
-    end
-  end
-
-  defp call_keyword_names({{:., _, [_mod, fun]}, _, args}, scope)
-       when is_atom(fun) and is_list(args),
-       do: keyword_names_in_call(fun, args, scope)
-
-  defp call_keyword_names({fun, _, args}, scope) when is_atom(fun) and is_list(args),
-    do: keyword_names_in_call(fun, args, scope)
-
-  defp call_keyword_names(_, _scope), do: []
-
-  defp keyword_names_in_call(fun, args, scope) do
-    subject = first_literal_param(args) || scope_subject(scope, fun)
-    noun = call_noun(fun)
-
-    for kw_list <- args,
-        is_list(kw_list),
-        {{:__block__, _, [key]}, {:__block__, _, [value]} = value_node} <- kw_list,
-        is_atom(key) and is_number(value) and key not in @block_keywords,
-        name = enriched_name([subject, Atom.to_string(key), noun]),
-        name != "" do
-      {value_node, name}
-    end
-  end
-
-  # The enclosing function names the value only when the function is a
-  # thin wrapper around the like-named call — `def show, do: JS.show(time:
-  # 300)` (`show` == call `show`). A function whose name differs from the
-  # call it makes (`def a, do: connect(timeout: 5000)`) is not the
-  # subject; using it would split one constant across unrelated clause
-  # names (`a_timeout`/`b_timeout`).
-  defp scope_subject(nil, _fun), do: nil
-  defp scope_subject(scope, fun), do: if(scope == Atom.to_string(fun), do: scope, else: nil)
-
-  # The first positional argument that is a plain atom/string literal —
-  # `validate_length(:email, max: 160)` → `"email"`. Names the subject the
-  # call acts on. nil when no such param precedes the keywords.
-  defp first_literal_param(args) do
-    Enum.find_value(args, fn
-      {:__block__, _, [value]} when is_atom(value) and not is_nil(value) -> Atom.to_string(value)
-      {:__block__, _, [value]} when is_binary(value) -> value
-      _ -> nil
-    end)
-  end
-
-  # The call's noun: its name with a leading domain verb stripped
-  # (`validate_length` → `length`, `put_resp` → `resp`). nil when the name
-  # is a bare verb or carries no recognized verb prefix, so a plain call
-  # like `connect`/`reconnect` contributes nothing.
-  defp call_noun(fun) do
-    str = Atom.to_string(fun)
-
-    Enum.find_value(@call_verbs, fn verb ->
-      case String.split(str, verb <> "_", parts: 2) do
-        ["", noun] when noun != "" -> noun
-        _ -> nil
-      end
-    end)
-  end
-
-  # Join the available tokens into one snake_case name: drop nils, split
-  # on `_`, sanitize each subtoken to `[a-z0-9_]` and drop any that keep
-  # no letter (a delimiter like `":"` carries no name), then dedup in
-  # order (`["email", "max", "length"]` → `"email_max_length"`,
-  # `[":", "parts", nil]` → `"parts"`). Always a valid attribute stem, or
-  # `""` when nothing nameable survives — callers treat `""` as "no key".
-  defp enriched_name(tokens) do
-    tokens
-    |> Enum.reject(&(&1 in [nil, ""]))
-    |> Enum.flat_map(&String.split(&1, "_", trim: true))
-    |> Enum.flat_map(&sanitize_subtoken/1)
-    |> Enum.dedup()
-    |> Enum.uniq()
-    |> Enum.join("_")
-  end
-
-  defp sanitize_subtoken(token) do
-    cleaned =
-      token |> String.downcase() |> String.replace(~r/[^a-z0-9]+/, "_") |> String.trim("_")
-
-    if cleaned == "" or not String.match?(cleaned, ~r/[a-z]/), do: [], else: [cleaned]
-  end
-
   # [{value, hits}] → [{name, value, hits}] with collision-suffixed
   # names. Sorted by source position so name ordering is deterministic.
   # Two groups are dropped before naming:
@@ -539,7 +302,8 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
     groups
     |> Enum.sort_by(fn {_value, hits} -> hit_position(hd(hits)) end)
     |> Enum.filter(fn {value, hits} ->
-      unambiguous?(hits) and IdentifierExpansion.nameable?(value, name_opts(hits))
+      LiteralNaming.unambiguous?(hits) and
+        IdentifierExpansion.nameable?(value, LiteralNaming.name_opts(hits))
     end)
     |> Enum.reduce({[], MapSet.new()}, fn {value, hits}, {named, taken} ->
       name = unique_name(value, hits, taken)
@@ -549,24 +313,12 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
     |> Enum.reverse()
   end
 
-  # Occurrences agree on meaning when they carry at most one distinct
-  # keyword key — `nil` (no key) is compatible with any single named key,
-  # but two different keys are a coincidental value clash, not one
-  # constant.
-  defp unambiguous?(hits) do
-    hits |> Enum.map(& &1.key) |> Enum.reject(&is_nil/1) |> Enum.uniq() |> length() <= 1
-  end
-
   defp unique_name(value, hits, taken) do
-    base = IdentifierExpansion.derive_constant_name(value, name_opts(hits))
+    base = IdentifierExpansion.derive_constant_name(value, LiteralNaming.name_opts(hits))
 
     base
     |> Stream.iterate(&next_name(&1, base))
     |> Enum.find(&(not MapSet.member?(taken, &1)))
-  end
-
-  defp name_opts(hits) do
-    %{key: key_for(hits), context: context_for(hits), clause: clause_for(hits)}
   end
 
   defp next_name(current, base) do
@@ -578,12 +330,6 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
 
     "#{base}_#{suffix}"
   end
-
-  defp key_for(hits), do: Enum.find_value(hits, fn %{key: key} -> key end)
-
-  defp context_for(hits), do: Enum.find_value(hits, fn %{context: context} -> context end)
-
-  defp clause_for(hits), do: Enum.find_value(hits, fn %{clause: clause} -> clause end)
 
   defp emit_patches([], _exprs), do: []
 
