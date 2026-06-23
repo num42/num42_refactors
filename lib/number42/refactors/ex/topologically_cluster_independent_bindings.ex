@@ -58,17 +58,13 @@ defmodule Number42.Refactors.Ex.TopologicallyClusterIndependentBindings do
   order, so a second pass rebuilds the same graph and emits the same
   sequence. Already-clustered windows stay untouched (no patch emitted).
 
-  ## Default-OFF (opt-in only)
+  ## Enabled by default
 
-  Disabled by default — `transform/2` is a no-op unless its own opts
-  carry `enabled: true`. Statement reordering is a heavyweight,
-  judgement-laden transform: even gated on strong purity it relies on
-  the outer-call family being a trustworthy semantic proxy. Opt in per
-  project where the trade is wanted:
-
-      configured_modules: [
-        {Number42.Refactors.Ex.TopologicallyClusterIndependentBindings, enabled: true}
-      ]
+  The reorder is gated on strong purity and a dependency DAG: a binding
+  never crosses one it depends on, and only pure, total, exception-free
+  right-hand sides participate, so the clustering preserves evaluation
+  semantics. A full-suite dogfood run on position-db (14 files) is green
+  and matches the unrefactored baseline at the same seed.
   """
 
   use Number42.Refactors.Refactor
@@ -77,7 +73,7 @@ defmodule Number42.Refactors.Ex.TopologicallyClusterIndependentBindings do
 
   @impl Number42.Refactors.Refactor
   def description,
-    do: "Topologically cluster pure independent bindings by operation family (default-OFF)"
+    do: "Topologically cluster pure independent bindings by operation family"
 
   @impl Number42.Refactors.Refactor
   def explanation do
@@ -100,12 +96,8 @@ defmodule Number42.Refactors.Ex.TopologicallyClusterIndependentBindings do
   def priority, do: 120
 
   @impl Number42.Refactors.Refactor
-  def transform(source, opts) do
-    if Keyword.get(opts, :enabled, false) do
-      Sourceror.parse_string(source) |> apply_to_parse_result(source)
-    else
-      source
-    end
+  def transform(source, _opts) do
+    Sourceror.parse_string(source) |> apply_to_parse_result(source)
   end
 
   defp apply_to_parse_result({:ok, ast}, source),

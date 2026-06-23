@@ -5,8 +5,8 @@ defmodule Number42.Refactors.Ex.TopologicallyClusterIndependentBindingsTest do
 
   @subject TopologicallyClusterIndependentBindings
 
-  # Opt-in default-OFF refactor — every assertion threads `enabled: true`.
-  @on [enabled: true]
+  # Enabled by default and takes no opts; `@on` is the empty opts list.
+  @on []
 
   describe "rewrites — clustering independent bindings by family" do
     test "reorders two independent siblings so same-family ops cluster (issue example)" do
@@ -247,8 +247,8 @@ defmodule Number42.Refactors.Ex.TopologicallyClusterIndependentBindingsTest do
       assert_unchanged(@subject, source, @on)
     end
 
-    test "is a no-op unless enabled (default-OFF)" do
-      source = """
+    test "runs by default (no enable opt needed)" do
+      before_source = """
       defmodule M do
         def bla() do
           bind1 = Map.put(%{}, 2, 3)
@@ -260,7 +260,19 @@ defmodule Number42.Refactors.Ex.TopologicallyClusterIndependentBindingsTest do
       end
       """
 
-      assert_unchanged(@subject, source, [])
+      after_source = """
+      defmodule M do
+        def bla() do
+          bind1 = Map.put(%{}, 2, 3)
+          bind3 = Map.put(bind1, 3, 4)
+          bind2 = Map.get(bind1, 1)
+
+          {bind2, bind3}
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, after_source, [])
     end
   end
 

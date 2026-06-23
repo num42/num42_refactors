@@ -5,10 +5,10 @@ defmodule Number42.Refactors.Ex.PushParamIntoCalleeTest do
 
   @subject PushParamIntoCallee
 
-  # PushParamIntoCallee is opt-in / default-off. Every test that exercises
-  # the rewrite passes `enabled: true`; a dedicated test asserts the
-  # default-off behaviour.
-  @on [enabled: true]
+  # PushParamIntoCallee is enabled by default and takes no enable gate.
+  # `@on` is the empty opts list; the rewrite is driven by opts[:prepared]
+  # (the cross-file plan), not by an `enabled` flag.
+  @on []
 
   # Cross-file context: prepare/1 scans every input source, finds every
   # call site of each private callee, and proves every caller passes the
@@ -19,8 +19,8 @@ defmodule Number42.Refactors.Ex.PushParamIntoCalleeTest do
   defp prepared(sources), do: PushParamIntoCallee.build_plan(sources)
   defp prepared_public(sources), do: PushParamIntoCallee.build_plan(sources, public: true)
 
-  describe "default-off" do
-    test "without enabled: true the source is left untouched" do
+  describe "enabled by default" do
+    test "rewrites with a plan and no enable opt" do
       src = """
       defmodule MyApp.Worker do
         def run(a), do: process(a, 42)
@@ -30,8 +30,28 @@ defmodule Number42.Refactors.Ex.PushParamIntoCalleeTest do
       end
       """
 
+      expected = """
+      defmodule MyApp.Worker do
+        def run(a), do: process(a)
+        def run_other(b), do: process(b)
+
+        defp process(data), do: data * 42
+      end
+      """
+
       plan = prepared([{"worker.ex", src}])
-      assert_unchanged(@subject, src, prepared: plan)
+      assert_rewrites(@subject, src, expected, prepared: plan)
+    end
+
+    test "with no plan it is a no-op (nothing prepared)" do
+      src = """
+      defmodule MyApp.Worker do
+        def run(a), do: process(a, 42)
+        defp process(data, factor), do: data * factor
+      end
+      """
+
+      assert_unchanged(@subject, src, [])
     end
   end
 
@@ -56,6 +76,35 @@ defmodule Number42.Refactors.Ex.PushParamIntoCalleeTest do
       """
 
       plan = prepared([{"worker.ex", src}])
+      assert_rewrites(@subject, src, expected, @on ++ [prepared: plan])
+    end
+
+    # Regression (position-db dogfood): a leading comment on the callee
+    # was duplicated — `render/1` re-emitted the comment that the patch
+    # range (get_range/1) already leaves in place. The comment must
+    # survive exactly once.
+    test "a leading comment on the callee is not duplicated" do
+      src = """
+      defmodule MyApp.Commented do
+        def a(p), do: build(p, :original)
+        def b(p), do: build(p, :original)
+
+        # Builds the storage path for an asset.
+        defp build(path, version), do: "\#{path}/\#{version}"
+      end
+      """
+
+      expected = """
+      defmodule MyApp.Commented do
+        def a(p), do: build(p)
+        def b(p), do: build(p)
+
+        # Builds the storage path for an asset.
+        defp build(path), do: "\#{path}/\#{:original}"
+      end
+      """
+
+      plan = prepared([{"commented.ex", src}])
       assert_rewrites(@subject, src, expected, @on ++ [prepared: plan])
     end
 
@@ -231,6 +280,47 @@ defmodule Number42.Refactors.Ex.PushParamIntoCalleeTest do
       """
 
       plan = prepared([{"localvar.ex", src}])
+      assert_unchanged(@subject, src, @on ++ [prepared: plan])
+    end
+
+    # Regression (position-db dogfood): the callee rebinds the param
+    # (`s = s / 100`). Substituting the pushed literal for every `s`
+    # produced `55 = 55 / 100` (a MatchError) and `c = ... * 55` instead
+    # of the divided value. A rebound param is a write target, not a pure
+    # read — decline the whole candidate.
+    test "param rebound inside the callee body is left untouched" do
+      src = """
+      defmodule MyApp.Rebind do
+        def a(h), do: hsl(h, 55)
+        def b(h), do: hsl(h, 55)
+
+        defp hsl(h, s) do
+          s = s / 100
+          h * s
+        end
+      end
+      """
+
+      plan = prepared([{"rebind.ex", src}])
+      assert_unchanged(@subject, src, @on ++ [prepared: plan])
+    end
+
+    # Regression (position-db dogfood): the param is used as a pin target
+    # (`^left`). Substituting a literal yields `^:i` — pinning a literal,
+    # which is invalid. Decline.
+    test "param used as a pin target inside the callee is left untouched" do
+      src = """
+      defmodule MyApp.Pin do
+        def a, do: build(:i, [1])
+        def b, do: build(:i, [2])
+
+        defp build(left, xs) do
+          Enum.map(xs, fn x -> match?(^left, x) end)
+        end
+      end
+      """
+
+      plan = prepared([{"pin.ex", src}])
       assert_unchanged(@subject, src, @on ++ [prepared: plan])
     end
 

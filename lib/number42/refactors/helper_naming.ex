@@ -121,7 +121,18 @@ defmodule Number42.Refactors.HelperNaming do
     object = object_part(naming_live_out)
     source = source_object(stmts, naming_live_out)
     attribute = infer_attribute(stmts)
-    fallback = Keyword.get(opts, :fallback, suffixed(host, "_block"))
+
+    # `fallback: :none` opts out of any placeholder name: when no
+    # *meaningful* candidate survives, return `:skip` and let the caller
+    # decline the extraction. A `<host>_block` / `<host>` name only
+    # restates the host — extracting under it adds an indirection hop
+    # without a name that pays for it. Callers that still want the
+    # placeholder pass nothing (default `<host>_block`) or their own.
+    {fallback, host_candidates} =
+      case Keyword.get(opts, :fallback, suffixed(host, "_block")) do
+        :none -> {nil, []}
+        fb -> {fb, [strip_suffix(host)]}
+      end
 
     # `object` may be a single name (`filters`) or a join (`a_and_b`).
     # As a *standalone* name a single object always equals its live-out
@@ -131,16 +142,15 @@ defmodule Number42.Refactors.HelperNaming do
     # verb and object (`delete_active_items`); it is preferred over the plain
     # `verb_object` but both are offered so a shadow falls back cleanly.
     derived =
-      [
-        compose(verb, attribute, object),
-        compose(verb, object),
-        standalone(object),
-        compose(verb, source),
-        strip_suffix(host)
-      ]
+      ([
+         compose(verb, attribute, object),
+         compose(verb, object),
+         standalone(object),
+         compose(verb, source)
+       ] ++ host_candidates)
       |> Enum.reject(&(is_nil(&1) or MapSet.member?(in_scope, &1)))
 
-    first_free(derived ++ [fallback], existing)
+    first_free(derived ++ List.wrap(fallback), existing)
   end
 
   @doc """

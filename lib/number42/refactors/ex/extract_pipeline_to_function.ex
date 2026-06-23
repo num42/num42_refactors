@@ -67,15 +67,20 @@ defmodule Number42.Refactors.Ex.ExtractPipelineToFunction do
 
   ## Helper naming
 
-  Derived from the pipeline's **terminal call**, never a placeholder: a
-  verb inferred from the last stage's function (`Repo.all` → `load`,
-  `Enum.map` → `map`, `Enum.reduce` → `reduce`) joined to the head-seed
-  variable as the object (`load_records`, `map_params`). When the verb
-  or object is missing the host-derived `<fn>_pipeline` fallback is used
-  (bang-safe: `build!` → `build_pipeline!`). A candidate that would
-  shadow a parameter or the bound result variable is rejected; if even
-  the fallback collides with an existing definition the extraction is
-  skipped.
+  Derived from the pipeline's **terminal call**: a verb inferred from the
+  last stage's function (`Repo.all` → `load`, `Enum.into` → `build`,
+  `assign_new` → `assign`) joined to the head-seed variable as the object
+  (`load_records`, `build_entries`), or the seed object alone. A
+  candidate that would shadow a parameter or the bound result variable is
+  rejected.
+
+  There is **no placeholder fallback**. The old `<host>_pipeline` name
+  carried no information — extracting `assign_building_currency` into
+  `assign_building_currency_pipeline` added an indirection hop without a
+  name that paid for it. When no meaningful name can be derived (a
+  terminal call with no verb mapping and a seed that does not name a
+  result) the extraction is **declined**: a long pipeline with no
+  nameable result reads better left where it is.
 
   ## Idempotence & determinism
 
@@ -105,22 +110,19 @@ defmodule Number42.Refactors.Ex.ExtractPipelineToFunction do
   - A pipeline with no free variables in scope — nothing to seed the
     helper with (a chain off a literal or a module-only expression).
 
-  ## Default-OFF (opt-in only)
+  ## Enabled by default
 
-  Disabled by default — `transform/2` is a no-op unless its own opts
-  carry `enabled: true`. Pulling a pipeline into a `defp` is a judgement
-  call: a long chain is sometimes the clearest expression of a transform
-  right where it sits, and a name does not always pay for the
-  indirection. Opt in per project:
-
-      configured_modules: [
-        {Number42.Refactors.Ex.ExtractPipelineToFunction, enabled: true}
-      ]
+  Pulling a pipeline into a `defp` only pays when a meaningful name
+  results, so the rewrite is gated on naming (no placeholder fallback —
+  see above) on top of the structural gates: at least five stages, an
+  in-scope seed, no module-attribute dependency, a single-clause host,
+  and the host body is more than the pipeline alone. A full-suite
+  dogfood run on position-db is green and matches the unrefactored
+  baseline; the naming gate dropped the hit from 14 files of mostly
+  placeholder-named noise to 2 meaningfully-named extractions.
   """
 
   use Number42.Refactors.Refactor
-
-  alias Number42.Refactors.HelperNaming
 
   @min_stages 5
 
@@ -136,6 +138,7 @@ defmodule Number42.Refactors.Ex.ExtractPipelineToFunction do
     load: "load",
     fetch: "load",
     fetch!: "load",
+    preload: "load",
     map: "map",
     flat_map: "map",
     reduce: "reduce",
@@ -147,7 +150,9 @@ defmodule Number42.Refactors.Ex.ExtractPipelineToFunction do
     reject: "filter",
     group_by: "group",
     to_string: "format",
-    join: "format"
+    join: "format",
+    assign: "assign",
+    assign_new: "assign"
   }
 
   @impl Number42.Refactors.Refactor
@@ -172,12 +177,8 @@ defmodule Number42.Refactors.Ex.ExtractPipelineToFunction do
   def reformat_after?, do: true
 
   @impl Number42.Refactors.Refactor
-  def transform(source, opts) do
-    if Keyword.get(opts, :enabled, false) do
-      source |> Sourceror.parse_string() |> apply_to_parse_result(source)
-    else
-      source
-    end
+  def transform(source, _opts) do
+    source |> Sourceror.parse_string() |> apply_to_parse_result(source)
   end
 
   defp apply_to_parse_result({:ok, ast}, source), do: apply_to_ast(ast, source)
@@ -371,19 +372,23 @@ defmodule Number42.Refactors.Ex.ExtractPipelineToFunction do
 
   # --- helper naming ---
 
-  defp helper_name(fn_name, seed, pipeline, params, target, existing_names) do
+  # A helper name must say something the host does not. We derive only
+  # *meaningful* names — a terminal verb + seed object (`load_records`),
+  # or the seed object alone (`records`). The old `<host>_pipeline`
+  # fallback (and the bare host name) carried no information: extracting
+  # `assign_building_currency` into `assign_building_currency_pipeline`
+  # added a hop without a name that paid for it. When no meaningful name
+  # exists we return `:skip` and the extraction is declined — a long
+  # pipeline with no nameable result reads better left inline.
+  defp helper_name(_fn_name, seed, pipeline, params, target, existing_names) do
     in_scope = MapSet.new(params ++ target_names(target))
-    fallback = HelperNaming.suffixed(fn_name, "_pipeline")
 
-    derived =
-      [
-        compose(terminal_verb(pipeline), seed_object(seed)),
-        seed_object(seed),
-        strip_suffix(fn_name)
-      ]
-      |> Enum.reject(&(is_nil(&1) or MapSet.member?(in_scope, &1)))
-
-    first_free(derived ++ [fallback], existing_names)
+    [
+      compose(terminal_verb(pipeline), seed_object(seed)),
+      seed_object(seed)
+    ]
+    |> Enum.reject(&(is_nil(&1) or MapSet.member?(in_scope, &1)))
+    |> first_free(existing_names)
   end
 
   defp target_names({:bound, var}), do: [var]
@@ -409,11 +414,6 @@ defmodule Number42.Refactors.Ex.ExtractPipelineToFunction do
   defp compose(nil, _object), do: nil
   defp compose(_verb, nil), do: nil
   defp compose(verb, object), do: :"#{verb}_#{object}"
-
-  defp strip_suffix(host) do
-    name = Atom.to_string(host)
-    if String.contains?(name, "_"), do: host, else: nil
-  end
 
   defp meaningful_name?(name) do
     str = Atom.to_string(name)
