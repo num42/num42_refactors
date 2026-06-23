@@ -259,6 +259,116 @@ defmodule Number42.Refactors.Ex.ExtractStringLiteralTest do
         @on
       )
     end
+
+    test "a string naming a special module attribute is left inline" do
+      # `"type"` would name `@type`, which Elixir reads as a typespec —
+      # `@type "type"` fails to compile. Special attributes (type, spec,
+      # behaviour, impl, …) are off-limits as generated names.
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          def a, do: field("type")
+          def b, do: field("type")
+        end
+        ''',
+        @on
+      )
+    end
+
+    test "a reserved-word content string is left inline (illegal attribute name)" do
+      # `"true"` would name `@true`, but `true` is a reserved word and
+      # `@true` does not compile. No valid stem → leave it inline.
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          def a, do: flag("true")
+          def b, do: flag("true")
+        end
+        ''',
+        @on
+      )
+    end
+
+    test "a digit-leading content string is left inline (illegal attribute stem)" do
+      # `"24h"` would slugify to `24h`, but `@24h` is not a valid attribute
+      # name (identifiers can't start with a digit) and would crash the
+      # formatter. With no leading-letter stem available, leave it inline.
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          def a, do: label("24h")
+          def b, do: label("24h")
+        end
+        ''',
+        @on
+      )
+    end
+
+    test "a value whose stem starts with digits drops the leading digits when a letter follows" do
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          def a, do: tag("3 day window")
+          def b, do: tag("3 day window")
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          @day_window "3 day window"
+          def a, do: tag(@day_window)
+          def b, do: tag(@day_window)
+        end
+        ''',
+        @on
+      )
+    end
+  end
+
+  describe "compile-time macro arguments" do
+    test "string options to `use` are never hoisted" do
+      # `use Foo, token: "X"` is a compile-time macro call; the option is
+      # passed to `__using__/1` as raw AST. Replacing it with `@token`
+      # hands the macro `{:@, …}` instead of the string and breaks compile
+      # (`String.Chars not implemented for Tuple`).
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          use SomeProvider, api_token_env: "OPENAI_API_TOKEN"
+          use OtherProvider, api_token_env: "OPENAI_API_TOKEN"
+        end
+        ''',
+        @on
+      )
+    end
+  end
+
+  describe "Ecto query macros" do
+    test "string literals inside a from/1 query are never hoisted" do
+      # Ecto query macros (`ago`, `fragment`, `field`, `type`) evaluate
+      # their string arguments at compile time; a `@attr` there is not a
+      # literal and breaks compilation (`invalid interval: @day`). The whole
+      # query subtree is off-limits, like a quote body.
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          def a do
+            from(t in "tokens", where: t.at > ago(7, "day"))
+          end
+
+          def b do
+            from(t in "tokens", where: t.at > ago(30, "day"))
+          end
+        end
+        ''',
+        @on
+      )
+    end
   end
 
   describe "skip conditions" do

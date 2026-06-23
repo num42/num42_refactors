@@ -163,12 +163,21 @@ defmodule Number42.Refactors.Ex.ExtractStringLiteral do
 
   defp module_patches(body, settings) do
     exprs =
-      body |> body_to_exprs() |> Enum.map(&prune_nested_modules/1) |> Enum.map(&prune_quotes/1)
+      body
+      |> body_to_exprs()
+      |> Enum.map(&prune_nested_modules/1)
+      |> Enum.map(&prune_quotes/1)
+      |> Enum.map(&prune_queries/1)
 
     existing = existing_attr_names(exprs)
 
     excluded =
-      [attribute_value_nodes(exprs), doc_value_nodes(exprs), pattern_literal_nodes(exprs)]
+      [
+        attribute_value_nodes(exprs),
+        doc_value_nodes(exprs),
+        pattern_literal_nodes(exprs),
+        LiteralNaming.directive_nodes(exprs, &is_binary/1)
+      ]
       |> Enum.reduce(&MapSet.union/2)
 
     exprs
@@ -211,6 +220,28 @@ defmodule Number42.Refactors.Ex.ExtractStringLiteral do
       node -> node
     end)
   end
+
+  # Replace an Ecto `from(...)` query subtree with an inert marker. Query
+  # macros nested in it (`ago`, `fragment`, `field`, `type`) read their
+  # string arguments at compile time — `ago(n, "day")` needs a literal
+  # `"day"`, not `ago(n, @day)`, which fails with `invalid interval`. So
+  # strings inside a query are structural, not data, like a quote body.
+  # Only the `from` macro is pruned; it wraps the whole query expression,
+  # including pipe-chained `where`/`select` keyword clauses.
+  defp prune_queries(expr) do
+    Macro.prewalk(expr, fn
+      {:from, _, args} = node when is_list(args) -> if query_from?(args), do: pruned(), else: node
+      node -> node
+    end)
+  end
+
+  # `Ecto.Query.from/2` takes `binding in source` as its first argument
+  # (`from t in "tokens", …`); distinguish it from an unrelated local
+  # `from(...)` by that `in` shape.
+  defp query_from?([{:in, _, [_binding, _source]} | _]), do: true
+  defp query_from?(_), do: false
+
+  defp pruned, do: {:__pruned__, [], nil}
 
   # String literals sitting in a *pattern* position. A module attribute is
   # an expression and is illegal in a match pattern — `def f(@attr)` against
@@ -404,9 +435,10 @@ defmodule Number42.Refactors.Ex.ExtractStringLiteral do
       |> String.split(~r/[^a-z0-9]+/u, trim: true)
       |> Enum.reject(&(&1 in @name_stopwords))
       |> Enum.take(settings.name_max_words)
+      |> LiteralNaming.valid_stem()
       |> case do
-        [] -> nil
-        words -> Enum.join(words, "_")
+        "" -> nil
+        stem -> stem
       end
     end
   end
