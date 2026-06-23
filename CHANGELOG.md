@@ -36,6 +36,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   observes tie order can opt the refactor out via `skipped_modules` /
   `disable_for_glob`; the `{SortReverseToDesc, enabled: true}` opt is now
   redundant (ignored) but harmless.
+- `CaseToFunctionClauses` is now **enabled by default** — the conservative
+  opt-in gate (`enabled: true`) is removed; `transform/2` always runs. The
+  documented binding-loss trap is now fixed: the lift is binding-preserving.
+  When a branch body or guard still references the scrutinee, the emitted
+  clause rebinds it (`%User{confirmed_at: nil} = user`), a `_` catch-all that
+  reuses the scrutinee takes the scrutinee's name, and an extra param a branch
+  never touches is `_`-prefixed on that clause (no injected unused-variable
+  warnings). A full-suite dogfood run on position-db is green and matches the
+  un-refactored baseline at the same seed. The
+  `{CaseToFunctionClauses, enabled: true}` entry in a project's `.refactor.exs`
+  is now redundant (the opt is ignored) but harmless.
 
 - `InlineSingleUseBinding` is now **enabled by default** — the conservative
   opt-in gate (`enabled: true`) is removed; `transform/2` always runs. With its
