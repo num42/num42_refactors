@@ -140,7 +140,8 @@ defmodule Number42.Refactors.Ex.ExtractStringLiteral do
     %{
       min_override: Keyword.get(opts, :min_occurrences),
       min_length: Keyword.get(opts, :min_length, @default_min_length),
-      name_max_words: Keyword.get(opts, :name_max_words, @default_name_max_words)
+      name_max_words: Keyword.get(opts, :name_max_words, @default_name_max_words),
+      hoist_in_attr_bodies: Keyword.get(opts, :hoist_in_attr_bodies, false)
     }
   end
 
@@ -168,12 +169,13 @@ defmodule Number42.Refactors.Ex.ExtractStringLiteral do
       |> Enum.map(&prune_nested_modules/1)
       |> Enum.map(&prune_quotes/1)
       |> Enum.map(&prune_queries/1)
+      |> Enum.map(&prune_schema_dsl/1)
 
     existing = existing_attr_names(exprs)
 
     excluded =
       [
-        attribute_value_nodes(exprs),
+        attribute_value_nodes(exprs, settings),
         doc_value_nodes(exprs),
         pattern_literal_nodes(exprs),
         LiteralNaming.directive_nodes(exprs, &is_binary/1)
@@ -235,6 +237,22 @@ defmodule Number42.Refactors.Ex.ExtractStringLiteral do
     end)
   end
 
+  # Replace Ecto/Phoenix schema-DSL subtrees with an inert marker. The
+  # table name in `schema "items" do … end` must stay a literal — `schema
+  # @items do` does not expand — and the field declarations inside
+  # (`field`, `belongs_to`, `embeds_many`, …) are compile-time DSL, not
+  # data. The whole call (including its `do` block) is off-limits.
+  @schema_dsl ~w(
+    schema embedded_schema field belongs_to has_many has_one many_to_many
+    embeds_one embeds_many timestamps
+  )a
+  defp prune_schema_dsl(expr) do
+    Macro.prewalk(expr, fn
+      {call, _, _} when call in @schema_dsl -> pruned()
+      node -> node
+    end)
+  end
+
   # `Ecto.Query.from/2` takes `binding in source` as its first argument
   # (`from t in "tokens", …`); distinguish it from an unrelated local
   # `from(...)` by that `in` shape.
@@ -274,14 +292,32 @@ defmodule Number42.Refactors.Ex.ExtractStringLiteral do
     |> Enum.filter(&plain_string_node?/1)
   end
 
-  # String literals that ARE the value of an `@attr value` definition. They
-  # are already named constants — neither candidates nor counted.
-  defp attribute_value_nodes(exprs) do
+  # String literals belonging to an `@attr value` definition — already
+  # named constants, neither candidate nor counted. By default the *whole*
+  # attribute body is excluded, so a string nested in a map/list value
+  # (`@routes %{home: "/home"}`) is left intact rather than splicing a
+  # symbolic key into a literal table. With `hoist_in_attr_bodies: true`
+  # only the directly-assigned string (`@msg "hi"`) is excluded and nested
+  # body strings become candidates.
+  defp attribute_value_nodes(exprs, %{hoist_in_attr_bodies: true}) do
     exprs
     |> Enum.flat_map(&Macro.prewalker/1)
     |> Enum.flat_map(fn
       {:@, _, [{name, _, [value_node]}]} when is_atom(name) -> [value_node]
       _ -> []
+    end)
+    |> MapSet.new()
+  end
+
+  defp attribute_value_nodes(exprs, _settings) do
+    exprs
+    |> Enum.flat_map(&Macro.prewalker/1)
+    |> Enum.flat_map(fn
+      {:@, _, [{name, _, [value_node]}]} when is_atom(name) ->
+        LiteralNaming.literal_value_nodes(value_node, &is_binary/1)
+
+      _ ->
+        []
     end)
     |> MapSet.new()
   end
@@ -470,7 +506,7 @@ defmodule Number42.Refactors.Ex.ExtractStringLiteral do
   # One line-anchored insertion carrying every `@name value` line, placed at
   # the first top-level expression's line, column 1.
   defp attribute_block_patch(named, exprs) do
-    line = exprs |> hd() |> line_of()
+    line = attribute_block_line(named, exprs)
 
     text =
       Enum.map_join(named, "\n", fn %{name: name, value: value} ->
@@ -479,6 +515,21 @@ defmodule Number42.Refactors.Ex.ExtractStringLiteral do
 
     range = %{start: [line: line, column: 1], end: [line: line, column: 1]}
     Patch.new(range, text <> "\n\n", false)
+  end
+
+  # Anchor the attribute block at the first top-level expression that
+  # carries a real source line. Pruned subtrees (nested modules, quotes,
+  # queries, schema DSL) collapse to a line-less marker; if the first
+  # expression was pruned, anchoring on it would fall back to `line: 1` and
+  # place the block *before* `defmodule`. Skip pruned markers and take the
+  # first surviving line.
+  defp attribute_block_line(_named, exprs) do
+    exprs
+    |> Enum.reject(&match?({:__pruned__, _, _}, &1))
+    |> case do
+      [first | _] -> line_of(first)
+      [] -> 1
+    end
   end
 
   defp hit_position(%{node: node}) do

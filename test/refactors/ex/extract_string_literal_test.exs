@@ -371,6 +371,119 @@ defmodule Number42.Refactors.Ex.ExtractStringLiteralTest do
     end
   end
 
+  describe "module-attribute bodies (hoist_in_attr_bodies)" do
+    test "by default, strings inside a module-attribute body are left intact" do
+      # `@routes %{home: "/home"}` is already a named lookup table; by
+      # default its inner strings are off-limits, even when repeated.
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          @routes %{home: "/home", away: "/home"}
+        end
+        ''',
+        @on
+      )
+    end
+
+    test "the attribute body is not rewritten even when the string hoists elsewhere" do
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          @routes %{home: "/home"}
+          def a, do: link("/home")
+          def b, do: link("/home")
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          @home_path "/home"
+          @routes %{home: "/home"}
+          def a, do: link(@home_path)
+          def b, do: link(@home_path)
+        end
+        ''',
+        @on
+      )
+    end
+
+    test "with hoist_in_attr_bodies: true, body strings are hoisted" do
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          @routes %{home: "/home", away: "/home"}
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          @home_path "/home"
+          @routes %{home: @home_path, away: @home_path}
+        end
+        ''',
+        [hoist_in_attr_bodies: true, min_occurrences: 1] ++ @on
+      )
+    end
+  end
+
+  describe "schema DSL macros" do
+    test "a schema table name and its field block are never hoisted" do
+      # `schema "items" do … end` is a compile-time DSL macro; the table
+      # name must stay a literal (`schema @items do` does not expand) and
+      # the block must not be rewritten. The whole schema subtree is
+      # off-limits.
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule M do
+          use Ecto.Schema
+
+          schema "items" do
+            field :name, :string
+          end
+
+          schema "items" do
+            field :name, :string
+          end
+        end
+        ''',
+        @on
+      )
+    end
+
+    test "a plain (non-DSL) call with the same string still hoists" do
+      # The schema block is excluded, so only the two `query_table` uses
+      # count → `@items` is hoisted. The attribute anchors at the first
+      # surviving (non-pruned) expression, here the `def a` clause.
+      assert_rewrites(
+        @subject,
+        ~S'''
+        defmodule M do
+          schema "items" do
+            field :n, :string
+          end
+
+          def a, do: query_table("items")
+          def b, do: query_table("items")
+        end
+        ''',
+        ~S'''
+        defmodule M do
+          schema "items" do
+            field :n, :string
+          end
+
+          @items "items"
+          def a, do: query_table(@items)
+          def b, do: query_table(@items)
+        end
+        ''',
+        @on
+      )
+    end
+  end
+
   describe "skip conditions" do
     test "trivial strings (empty, blank, single-char) are never hoisted" do
       assert_unchanged(
