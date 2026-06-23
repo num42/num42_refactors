@@ -23,6 +23,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `InlineSingleUseBinding` is now **enabled by default** — the conservative
+  opt-in gate (`enabled: true`) is removed; `transform/2` always runs. With its
+  guards now covering the shapes that once produced invalid or meaning-changing
+  output (pattern LHS, impure/raising RHS, control-flow RHS, fallback/guard RHS,
+  multi-line literal RHS, non-adjacent/multi-read use, pin use, plus use-site-
+  aware paren-wrapping), a full-suite dogfood run on position-db is green. The
+  `{InlineSingleUseBinding, enabled: true}` entry in a project's `.refactor.exs`
+  is now redundant (the opt is ignored) but harmless.
+
 - `ExtractStringLiteral` now shares `ExtractMagicNumber`'s naming quality via a
   new `Number42.Refactors.LiteralNaming` module (the enriched keyword-key +
   call-param + call-noun derivation, clause-head names, call-context names,
