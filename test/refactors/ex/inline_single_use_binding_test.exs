@@ -81,6 +81,55 @@ defmodule Number42.Refactors.Ex.InlineSingleUseBindingTest do
       assert_rewrites(@subject, before_source, after_source, @on)
     end
 
+    # Regression: an inlined pipe spliced into an operator operand must
+    # be parenthesised. `++` binds tighter than `|>`, so without parens
+    # `ids ++ items |> Enum.map(f)` re-associates as
+    # `(ids ++ items) |> Enum.map(f)` — the map captures the whole
+    # concatenation instead of just `items`, changing the result.
+    test "wraps an inlined pipe RHS spliced into an operator operand" do
+      before_source = """
+      defmodule M do
+        def f(ids, items) do
+          mapped = items |> Enum.map(fn {_, id} -> id end)
+          ids ++ mapped
+        end
+      end
+      """
+
+      after_source = """
+      defmodule M do
+        def f(ids, items) do
+          ids ++ (items |> Enum.map(fn {_, id} -> id end))
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, after_source, @on)
+    end
+
+    # The same pipe RHS spliced into a *call argument* (self-delimiting)
+    # needs no parens — the comma/bracket bounds it.
+    test "leaves an inlined pipe RHS unparenthesised in a call argument" do
+      before_source = """
+      defmodule M do
+        def f(items, map) do
+          key = items |> Enum.join(".")
+          Map.get(map, key)
+        end
+      end
+      """
+
+      after_source = """
+      defmodule M do
+        def f(items, map) do
+          Map.get(map, items |> Enum.join("."))
+        end
+      end
+      """
+
+      assert_rewrites(@subject, before_source, after_source, @on)
+    end
+
     test "inlines from the middle of a block, leaving surrounding statements" do
       before_source = """
       defmodule M do
@@ -258,6 +307,60 @@ defmodule Number42.Refactors.Ex.InlineSingleUseBindingTest do
               end
 
             use_it(v)
+          end
+        end
+        """,
+        @on
+      )
+    end
+
+    # A short-circuit operator at the RHS root is a deliberate
+    # default/guard pattern — the name marks "value-or-its-fallback".
+    # Inlining buries that intent in a call argument, so skip.
+    test "skips a fallback-operator RHS (||)" do
+      assert_unchanged(
+        @subject,
+        """
+        defmodule M do
+          def f(x) do
+            tags = Map.get(x, :tags) || []
+            render(tags)
+          end
+        end
+        """,
+        @on
+      )
+    end
+
+    test "skips an and/&&-guard RHS" do
+      assert_unchanged(
+        @subject,
+        """
+        defmodule M do
+          def f(x) do
+            ok = Map.get(x, :ready) && Map.get(x, :enabled)
+            use_it(ok)
+          end
+        end
+        """,
+        @on
+      )
+    end
+
+    # A multi-line map/struct/list RHS, inlined, gets crammed into a
+    # call argument and reads worse than the named binding. Leave it.
+    test "skips a multi-line literal RHS" do
+      assert_unchanged(
+        @subject,
+        """
+        defmodule M do
+          def f(x) do
+            labels = %{
+              a: "alpha",
+              b: "beta"
+            }
+
+            Map.get(labels, x, "?")
           end
         end
         """,

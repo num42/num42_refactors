@@ -95,6 +95,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `InlineSingleUseBinding` could change a program's meaning when it inlined a
+  pipe whose RHS landed in an operator operand. The old paren rule treated `|>`
+  as always-safe-unparenthesised, but `++` (and other operators) bind tighter
+  than `|>`: inlining `mapped = items |> Enum.map(f)` into `ids ++ mapped`
+  produced `ids ++ items |> Enum.map(f)`, which re-associates as
+  `(ids ++ items) |> Enum.map(f)` — the map then ran over the whole
+  concatenation. The fix drops the pipe special case: paren-wrapping now depends
+  on the **use-site slot**, not the RHS alone. An operator-root RHS (pipe
+  included) is wrapped iff its splice slot is itself an operand of an operator
+  (checked via the parent on `Macro.path/2`); self-delimiting slots — call
+  arguments, data-structure elements, the function side of a pipe — never get
+  parens. Caught by a full-suite dogfood run on position-db (an `ItemImport`
+  availability path crashed with a `FunctionClauseError`).
+- `InlineSingleUseBinding` now skips two readability-hostile RHS shapes it used
+  to inline: a **fallback/guard operator at the root** (`x = lookup(k) || []`,
+  `x = a && b`) — the name marks a deliberate value-or-its-fallback that an
+  inline buries inside a call argument; and a **multi-line map/struct/list
+  literal** — inlined it gets crammed into a call argument and reads worse than
+  the named binding. Both surfaced on a position-db dogfood run.
+
 - `ExtractStringLiteral` could emit code that did not compile. Five guards
   added so an in-place run on a real codebase compiles and `mix format`
   succeeds:
