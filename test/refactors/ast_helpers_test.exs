@@ -1402,4 +1402,281 @@ defmodule Number42.Refactors.AstHelpersTest do
       refute AstHelpers.live_in_single_branch?(:y, branches)
     end
   end
+
+  describe "prune_dead_directives/1" do
+    test "drops an alias used nowhere else" do
+      source = """
+      defmodule M do
+        alias Foo.Cursor
+
+        def go, do: :ok
+      end
+      """
+
+      pruned = AstHelpers.prune_dead_directives(source)
+      refute pruned =~ "alias Foo.Cursor"
+      assert pruned =~ "def go, do: :ok"
+    end
+
+    test "keeps an alias still referenced elsewhere" do
+      source = """
+      defmodule M do
+        alias Foo.Cursor
+
+        def go, do: Cursor.new()
+      end
+      """
+
+      assert AstHelpers.prune_dead_directives(source) =~ "alias Foo.Cursor"
+    end
+
+    test "drops a renamed alias whose `as:` name is unused" do
+      source = """
+      defmodule M do
+        alias Foo.Bar, as: Baz
+
+        def go, do: :ok
+      end
+      """
+
+      refute AstHelpers.prune_dead_directives(source) =~ "alias Foo.Bar"
+    end
+
+    test "keeps a renamed alias whose `as:` name is used" do
+      source = """
+      defmodule M do
+        alias Foo.Bar, as: Baz
+
+        def go, do: Baz.run()
+      end
+      """
+
+      assert AstHelpers.prune_dead_directives(source) =~ "as: Baz"
+    end
+
+    test "leaves a multi-name group alias alone (can't prove the group dead)" do
+      source = """
+      defmodule M do
+        alias Foo.{Bar, Baz}
+
+        def go, do: Bar.run()
+      end
+      """
+
+      assert AstHelpers.prune_dead_directives(source) =~ "alias Foo.{Bar, Baz}"
+    end
+
+    test "drops an `import only:` whose named functions are all unused" do
+      source = """
+      defmodule M do
+        import Foo.Bar, only: [run: 1, walk: 0]
+
+        def go, do: :ok
+      end
+      """
+
+      refute AstHelpers.prune_dead_directives(source) =~ "import Foo.Bar"
+    end
+
+    test "keeps an `import only:` when one named function is called" do
+      source = """
+      defmodule M do
+        import Foo.Bar, only: [run: 1, walk: 0]
+
+        def go, do: run(1)
+      end
+      """
+
+      assert AstHelpers.prune_dead_directives(source) =~ "import Foo.Bar"
+    end
+
+    test "leaves a plain `import Mod` alone (functions can't be enumerated)" do
+      source = """
+      defmodule M do
+        import Foo.Bar
+
+        def go, do: :ok
+      end
+      """
+
+      assert AstHelpers.prune_dead_directives(source) =~ "import Foo.Bar"
+    end
+
+    test "word-boundary: a longer name sharing the alias prefix does not keep it" do
+      source = """
+      defmodule M do
+        alias Foo.Cursor
+
+        def go, do: CursorHelper.new()
+      end
+      """
+
+      refute AstHelpers.prune_dead_directives(source) =~ "alias Foo.Cursor\n"
+    end
+
+    test "drops several dead aliases at once" do
+      source = """
+      defmodule M do
+        alias Foo.Cursor
+        alias Foo.Pricing
+        alias Foo.Path
+
+        def go, do: :ok
+      end
+      """
+
+      pruned = AstHelpers.prune_dead_directives(source)
+      refute pruned =~ "Cursor"
+      refute pruned =~ "Pricing"
+      refute pruned =~ "alias Foo.Path"
+    end
+
+    test "drops an alias whose name survives only in a comment" do
+      # The relocated body is gone; the delegate uses the fully-qualified
+      # module, and the word `Path` lingers only in a section comment. The
+      # alias is dead — a text scan would wrongly keep it (#381 root cause).
+      source = """
+      defmodule M do
+        alias Foo.AST.Path
+
+        defdelegate resolve(root, p), to: Foo.AST.Path
+
+        # ── Path encoding ──
+        def other, do: :ok
+      end
+      """
+
+      pruned = AstHelpers.prune_dead_directives(source)
+      refute pruned =~ "alias Foo.AST.Path"
+      assert pruned =~ "defdelegate resolve(root, p), to: Foo.AST.Path"
+      assert pruned =~ "# ── Path encoding ──"
+    end
+
+    test "keeps an alias used in code even if it also appears qualified" do
+      source = """
+      defmodule M do
+        alias Foo.AST.Path
+
+        def resolve(root, p), do: Path.get_in(root, p)
+      end
+      """
+
+      assert AstHelpers.prune_dead_directives(source) =~ "alias Foo.AST.Path"
+    end
+
+    test "drops an alias whose name survives only inside a string literal" do
+      source = """
+      defmodule M do
+        alias Foo.Cursor
+
+        def doc, do: "see Cursor docs"
+      end
+      """
+
+      refute AstHelpers.prune_dead_directives(source) =~ "alias Foo.Cursor"
+    end
+
+    test "never prunes a directive nested inside a `quote` block" do
+      # The `_web.ex` pattern: an import injected into the use-expansion. Its
+      # names are unused in THIS file by design — must NOT be flagged dead.
+      source = """
+      defmodule MWeb do
+        def html do
+          quote do
+            import Phoenix.Controller,
+              only: [get_csrf_token: 0, view_module: 1]
+
+            unquote(helpers())
+          end
+        end
+      end
+      """
+
+      assert AstHelpers.prune_dead_directives(source) =~ "import Phoenix.Controller"
+    end
+
+    test "drops a multi-line `import only:` across its whole line span" do
+      source = """
+      defmodule M do
+        import Foo.Bar,
+          only: [run: 1, walk: 0]
+
+        def go, do: :ok
+      end
+      """
+
+      pruned = AstHelpers.prune_dead_directives(source)
+      refute pruned =~ "import Foo.Bar"
+      # the `only:` continuation must go too — no orphaned syntax left
+      refute pruned =~ "only: [run: 1, walk: 0]"
+      assert pruned =~ "def go, do: :ok"
+    end
+
+    test "keeps an `import only:` whose function is used only as a HEEx tag" do
+      # The component is called as `<.item_thumbnail>` inside a ~H sigil — the
+      # sigil body is opaque to the AST, so a structural-only scan would
+      # false-prune the import and break compilation (#381 sigil trap).
+      source = """
+      defmodule M do
+        import Foo.Bar, only: [item_thumbnail: 1]
+
+        def render(assigns) do
+          ~H"<div><.item_thumbnail item={@i} /></div>"
+        end
+      end
+      """
+
+      assert AstHelpers.prune_dead_directives(source) =~ "import Foo.Bar"
+    end
+
+    test "keeps an alias that another directive (`import`) references" do
+      # `import AssetPreview, only: …` is a real use of `alias …AssetPreview` —
+      # pruning the alias would leave the import referencing an unknown module
+      # and break compilation (#381 cross-directive trap).
+      source = """
+      defmodule M do
+        alias PositionDbWeb.Components.AssetPreview
+
+        import AssetPreview, only: [asset_preview: 1]
+
+        def render(assigns) do
+          ~H"<.asset_preview a={@a} />"
+        end
+      end
+      """
+
+      assert AstHelpers.prune_dead_directives(source) =~
+               "alias PositionDbWeb.Components.AssetPreview"
+    end
+
+    test "keeps an alias used only inside a ~H sigil body" do
+      source = """
+      defmodule M do
+        alias Foo.Cursor
+
+        def render(assigns) do
+          ~H"<span>{Cursor.label(@c)}</span>"
+        end
+      end
+      """
+
+      assert AstHelpers.prune_dead_directives(source) =~ "alias Foo.Cursor"
+    end
+
+    test "the pruned multi-line directive leaves compilable source" do
+      source = """
+      defmodule M do
+        alias Foo.Cursor
+
+        import Foo.Bar,
+          only: [run: 1]
+
+        def go, do: :ok
+      end
+      """
+
+      pruned = AstHelpers.prune_dead_directives(source)
+      assert {:ok, _} = Code.string_to_quoted(pruned)
+    end
+  end
 end

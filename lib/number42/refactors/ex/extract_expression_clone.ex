@@ -253,6 +253,7 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
       source
       |> Sourceror.parse_string()
       |> apply_to_parse_result(config(opts), source)
+      |> AstHelpers.prune_dead_directives()
     else
       source
     end

@@ -269,7 +269,9 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunction do
   @impl Number42.Refactors.Refactor
   def transform(source, opts) do
     if Keyword.get(opts, :enabled, false) do
-      Keyword.get(opts, :prepared) |> rewrite_with_plan_or_passthrough(source)
+      Keyword.get(opts, :prepared)
+      |> rewrite_with_plan_or_passthrough(source)
+      |> prune_dead_directives()
     else
       source
     end
