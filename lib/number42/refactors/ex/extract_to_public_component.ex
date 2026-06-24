@@ -22,11 +22,22 @@ defmodule Number42.Refactors.Ex.ExtractToPublicComponent do
 
   ## Stateless vs stateful
 
-  A motif whose body carries a `phx-` event binding (`phx-click`/`phx-submit`/…)
-  reacts to interaction and is lifted to a **`:live_component`** file (its own
-  `update/2` + `render/1`, called `<.live_component module={Mod} id="…" …/>`).
-  A purely presentational motif is lifted to a stateless **`:html` function
-  component** (`def name(assigns)`, called `<Mod.name …/>`).
+  Only **purely presentational** motifs are lifted — to a stateless `:html`
+  function component (`def name(assigns)`, called `<Mod.name …/>`). A motif
+  whose body carries a `phx-` event binding is *recognised* as stateful but
+  **declined**: auto-generating a public `:live_component` is unsafe, because
+  Phoenix requires it to have a single static root element, a guaranteed-unique
+  `id` per instance, and a correct `update/2` assign flow — none of which a
+  motif cut can synthesize. A dogfood run produced live_components with
+  conditional (`:if`) roots and duplicated static `id`s that raised at render
+  (#374), so stateful motifs stay where they are.
+
+  ## Reusability safety: no literal `id=`
+
+  A motif whose body carries a **literal** `id="…"` attribute is declined: a
+  reusable component invoked more than once would render that hardcoded DOM id
+  twice (LiveView "Duplicate id found", #374). A dynamic `id={@x}` is fine — its
+  value varies per call site.
 
   ## Compile-safety: carry the caller's imports
 
@@ -253,9 +264,29 @@ defmodule Number42.Refactors.Ex.ExtractToPublicComponent do
       {fn -> called_local(node, gates.context.locals) != nil end,
        "body calls caller-local function #{called_local(node, gates.context.locals)}/n"},
       {fn -> collapses_stateful_root?(node, sigil, gates) end,
-       "would leave a non-static stateful root"}
+       "would leave a non-static stateful root"},
+      {fn -> component_kind(node) == :live_component end,
+       "stateful (phx-event) motif — a lifted live_component can't be auto-generated safely"},
+      {fn -> static_id?(node) end,
+       "body carries a literal id= — a reusable component called more than once would duplicate it"}
     ]
     |> Enum.find_value(fn {predicate, reason} -> if predicate.(), do: reason end)
+  end
+
+  # A body carrying a *literal* `id="…"` attribute can't be lifted into a
+  # reusable component: a component invoked more than once would render the
+  # same hardcoded DOM id twice (LiveView "Duplicate id found", #374). We
+  # can't tell at lift time whether the new component is called once or in a
+  # `:for`, so a static id is declined wholesale. A dynamic `id={@x}` /
+  # `id={expr}` is fine — its value varies per call site.
+  defp static_id?(node) do
+    Tree.walk(node, false, fn
+      {:element, _tag, attrs, _ch, _}, acc ->
+        acc or Enum.any?(attrs, &match?({"id", {:string, _}}, &1))
+
+      _o, acc ->
+        acc
+    end)
   end
 
   # The first caller-local function the body invokes, or nil. A bare call

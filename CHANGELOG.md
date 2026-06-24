@@ -247,6 +247,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Six default-OFF refactors had correctness bugs surfaced by a position-db
+  dogfood (#370–#375); each fixed at the root, with regression tests. All stay
+  default-OFF — the fixes make them sound (or sound-but-inert), not safe to run
+  unattended.
+  - **`GenerateHeexAssignContracts`** (#371) inserted the `attr`/`slot` block
+    before a *later* clause of a multi-clause component (Phoenix rejects it).
+    The anchor is now the first clause of the `{name, arity}` group across *all*
+    clauses — including a leading dispatcher clause with no `~H` sigil — and head
+    detection accepts a pattern-bound `assigns` (`name(%{..} = assigns)`).
+  - **`PromoteRepeatedPrivateHelpers`** (#370) deleted a promoted `defp` but left
+    a call to it inside a `~H` sigil (invisible to the AST walk) dangling as an
+    undefined function; it also left a now-dead `alias` behind. Helpers named
+    inside any sigil are declined; aliases used only by a promoted clause are
+    pruned.
+  - **`RelocateMisplacedFunction`** (#373) emitted a `defdelegate` to a target
+    that never defined the function. Four root causes fixed: framework callbacks
+    (`mount`/`handle_event`/`render`/…) and infra targets (`use Ecto.Repo`/
+    `GenServer`/…) are declined; a body using a host-only imported macro
+    (`from(e in …)`) is declined; the moved def is appended to the target's
+    *actual* on-disk path (not a name-guessed one), and the relocation is dropped
+    entirely if that file can't be reached. Multi-clause functions relocate as
+    one whole block, guards intact.
+  - **`ExtractToPublicComponent`** (#374) dropped caller-passed assigns and
+    generated `:live_component`s with conditional roots / duplicated static
+    `id`s (222 render failures under the full suite, clean compile). Stateful
+    motifs and motifs carrying a literal `id="…"` are now declined; only
+    presentational function components with a complete attr contract are lifted.
+  - **`ExtractPrimitiveToStruct`** (#372) rewrote bare-map patterns `%{k: v}`
+    into struct patterns `%Struct{k: v}`, silently breaking every plain-map
+    caller at runtime. Map shapes are never extracted (a subset-match is no
+    proof of type); only positionally-proven tuple shapes are.
+  - **Placeholder naming** (#375) in `IntroduceContextObjectForParameterTrain`,
+    `SplitPipeableResponsibilities`, and `ExtractExpressionClone`: they minted
+    `Context<N>` / `<fn>_phase_n` / `extracted_clone` (+ `# TODO: rename`) when
+    no name could be derived. Following `ExtractPipelineToFunction`, all three
+    now **derive a meaningful name or decline** — no placeholder is ever emitted.
 - `InlineSingleUseBinding` could change a program's meaning when it inlined a
   pipe whose RHS landed in an operator operand. The old paren rule treated `|>`
   as always-safe-unparenthesised, but `++` (and other operators) bind tighter

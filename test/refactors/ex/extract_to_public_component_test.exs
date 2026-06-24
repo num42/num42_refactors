@@ -94,14 +94,62 @@ defmodule Number42.Refactors.Ex.ExtractToPublicComponentTest do
       assert table.free_vars == []
     end
 
-    test "classifies a motif with phx-events as a live_component" do
+    test "a motif with phx-events is classified live_component but DECLINED (#374)" do
+      # A stateful (phx-event) motif can't be auto-lifted into a public
+      # live_component safely: Phoenix needs a single static root, a
+      # guaranteed-unique `id`, and correct `update/2` assign flow, none of
+      # which a motif cut can synthesize. It is recognised as a
+      # live_component kind but declined.
       group =
         page_with_buttons()
         |> ExtractToPublicComponent.find_candidates()
         |> Enum.find(&(&1.component_kind == :live_component))
 
       assert group
-      assert group.accepted
+      refute group.accepted
+      assert group.decline =~ "live_component"
+    end
+
+    test "declines a motif whose body carries a literal id= (would duplicate on reuse, #374)" do
+      # A reusable component invoked more than once would render the same
+      # hardcoded DOM id twice → LiveView "Duplicate id found". A literal
+      # `id="…"` in the lifted body is declined; a dynamic `id={@x}` is fine.
+      src = """
+      defmodule MyAppWeb.UserListLive do
+        use MyAppWeb, :live_view
+
+        def render(assigns) do
+          ~H\"\"\"
+          <section class="page">
+            <h1>Users</h1>
+            <table id="user-table" class="data">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Email</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr :for={row <- @rows}>
+                  <td>{row.name}</td>
+                  <td>{row.email}</td>
+                </tr>
+              </tbody>
+            </table>
+          </section>
+          \"\"\"
+        end
+      end
+      """
+
+      table =
+        src
+        |> ExtractToPublicComponent.find_candidates()
+        |> Enum.find(&(&1.tag == "table"))
+
+      assert table
+      refute table.accepted
+      assert table.decline =~ "literal id"
     end
 
     test "declines a subtree with no recognised motif" do
@@ -324,7 +372,7 @@ defmodule Number42.Refactors.Ex.ExtractToPublicComponentTest do
       assert out =~ "alias MyAppWeb.Components.DataTable"
     end
 
-    test "rewrites a stateful occurrence to a <.live_component …/> call" do
+    test "a stateful (phx-event) occurrence is left unchanged — live_components are declined (#374)" do
       src = page_with_buttons()
       sources = %{"lib/a.ex" => src}
       plans = build(sources)
@@ -338,8 +386,9 @@ defmodule Number42.Refactors.Ex.ExtractToPublicComponentTest do
           project_config: @config
         )
 
-      assert out =~ "<.live_component module={MyAppWeb.Components.ButtonGroup}"
-      assert out =~ "id="
+      # No live_component plan survives, so the stateful motif stays put.
+      refute out =~ "<.live_component"
+      refute Enum.any?(plans, &(&1.component_kind == :live_component))
     end
 
     test "is a no-op without enabled: true" do
@@ -470,7 +519,7 @@ defmodule Number42.Refactors.Ex.ExtractToPublicComponentTest do
       refute module =~ "import MyAppWeb.TextComponents"
     end
 
-    test "writes a stateful live_component module with update/2 + render/1" do
+    test "no live_component module is written — stateful motifs are declined (#374)" do
       src = page_with_buttons()
       root = unique_tmp_dir()
       caller = "lib/my_app_web/live/toolbar_live.ex"
@@ -486,13 +535,9 @@ defmodule Number42.Refactors.Ex.ExtractToPublicComponentTest do
         project_config: @config
       )
 
-      path = Path.join(root, "lib/my_app_web/components/button_group.ex")
-      assert File.exists?(path)
-      module = File.read!(path)
-
-      assert module =~ "use MyAppWeb, :live_component"
-      assert module =~ "def update(assigns, socket)"
-      assert module =~ "def render(assigns)"
+      # No live_component plan survives, so no module file is generated.
+      refute File.exists?(Path.join(root, "lib/my_app_web/components/button_group.ex"))
+      refute Enum.any?(plans, &(&1.component_kind == :live_component))
     end
   end
 

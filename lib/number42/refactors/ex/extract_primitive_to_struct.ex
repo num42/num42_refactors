@@ -47,14 +47,19 @@ defmodule Number42.Refactors.Ex.ExtractPrimitiveToStruct do
   stronger flow analysis; v1 only fires where the head **names** the
   positions and thereby proves their semantics.
 
-  ## Map-shape rule: exact key-set match (v1)
+  ## Map shapes are never extracted (#372)
 
-  Two map shapes are the same type iff their key sets are **exactly
-  equal**. `%{name: _, age: _}` is NOT the same type as
-  `%{name: _, age: _, email: _}` — subset/superset relationships are
-  explicitly out of scope for v1 (a "dominant subset" rule is a follow-up
-  slice). Keys are already named, so there is no positional-swap hazard;
-  the field name is the key.
+  A bare-map pattern `%{k: v}` is a **subset match** — it matches any map
+  carrying those keys. Rewriting it to a struct pattern `%Struct{k: v}`
+  turns it into a **type assertion** that matches only that exact struct,
+  so any plain map (a query-option map, a `params` map) flowing into that
+  head silently stops matching at runtime — a `FunctionClauseError`, worse
+  than a compile error. The key set is no proof the value is the struct,
+  and proving it would need whole-program construction analysis this
+  refactor does not do. Unlike the tuple side — where head bindings prove
+  each position's semantics — the map side has no soundness proof, so every
+  map shape is **declined** (recorded in the plan's `declined` list for
+  `--log` review). Only positionally-proven tuple shapes are extracted.
 
   ## Threshold K
 
@@ -65,22 +70,18 @@ defmodule Number42.Refactors.Ex.ExtractPrimitiveToStruct do
   *recurring* structural convention rather than a coincidence. Configure
   via `min_occurrences:`.
 
-  ## Naming policy (and its known weakness)
+  ## Naming policy: derive or decline (#372/#375)
 
-  There is **no signal in the code** for what to call the struct. Policy,
-  first match wins:
-
-    1. **Dictionary derivation** from the field-name set — `lat`+`lng` →
-       `Coord`, `x`+`y` → `Point`, `lon`/`lng`/`longitude` normalised.
-       Small and fragile by construction.
-    2. **Fallback:** `ExtractedStruct<N>` plus an inline rename
-       reminder. Generic names are a known smell (cf. #13); they are the
-       lesser evil only when the dictionary misses, and the reminder
-       marks them for a human.
-
-  The weakness is real: the dictionary is tiny and English-biased, and a
-  generic fallback name carries no domain meaning. Default-off + manual
-  review is the mitigation.
+  There is **no signal in the code** for what to call the struct, so the
+  name is derived from the field-name set via a small dictionary
+  (`lat`+`lng` → `Coord`, `x`+`y` → `Point`, `lon`/`lng`/`longitude`
+  normalised). There is **no `ExtractedStruct<N>` placeholder fallback**: a
+  generic struct name carries no domain meaning and shipping
+  `# TODO: rename` into user code is worse than leaving the raw tuple in
+  place. When the dictionary has no entry the shape is **declined**
+  (`finalize_shape` records `:no_meaningful_name`). The dictionary is tiny
+  and English-biased by design — that is the cost of refusing to guess a
+  type name.
 
   ## False-positive guards (hard exclusions)
 
@@ -514,41 +515,58 @@ defmodule Number42.Refactors.Ex.ExtractPrimitiveToStruct do
     end
   end
 
-  # Maps group by exact key set (v1 rule). Each distinct key set is its
-  # own type; subset/superset are different types and never merged.
-  defp resolve_maps(maps, structs, min) do
-    maps
-    |> Enum.group_by(& &1.fields)
-    |> Enum.filter(fn {_fields, group} -> length(group) >= min end)
-    |> Enum.reduce({[], []}, fn {fields, group}, {ext, dec} ->
-      collect_decision(
-        finalize_shape(:map, MapSet.to_list(fields), length(group), structs),
-        ext,
-        dec
-      )
-    end)
+  # Map shapes are **never extracted** (#372). A bare-map pattern `%{k: v}`
+  # is a *subset* match: it matches any map carrying those keys. Rewriting
+  # it to a struct pattern `%Struct{k: v}` turns it into a *type assertion*
+  # that only matches that exact struct — so any plain map (a query-option
+  # map, a params map) flowing into that head silently stops matching at
+  # runtime (a `FunctionClauseError`, worse than a compile error). The key
+  # set is no proof the value is the struct, and proving it would need
+  # whole-program construction analysis this refactor does not do. The tuple
+  # side is sound because head bindings prove each position's semantics; the
+  # map side has no equivalent proof, so every map group is declined
+  # (recorded for `--log` visibility).
+  defp resolve_maps(maps, _structs, min) do
+    declined =
+      maps
+      |> Enum.group_by(& &1.fields)
+      |> Enum.filter(fn {_fields, group} -> length(group) >= min end)
+      |> Enum.map(fn {fields, _group} ->
+        decline(:map, :bare_map_pattern_unprovable, %{fields: MapSet.to_list(fields)})
+      end)
+
+    {[], declined}
   end
 
   defp collect_decision({:extract, record}, ext, dec), do: {[record | ext], dec}
   defp collect_decision({:decline, record}, ext, dec), do: {ext, [record | dec]}
   defp collect_decision(:skip, ext, dec), do: {ext, dec}
 
-  # Shared tail for tuple and map: already-a-struct and name-collision
-  # guards, then name the struct.
+  # Tuple tail: already-a-struct guard, then a *meaningful* name from the
+  # field set — or decline. There is no `ExtractedStruct<N>` placeholder
+  # (#372/#375): a generic struct name + `# TODO: rename` ships meaningless
+  # type names into user code. When the dictionary has no entry the shape
+  # is declined; a domain type no one can name reads better as the raw
+  # tuple it already is.
   defp finalize_shape(kind, field_atoms, count, structs) do
     field_set = MapSet.new(field_atoms)
 
-    if already_struct?(field_set, structs) do
-      {:decline, decline(kind, :already_a_struct, %{fields: field_atoms})}
-    else
-      {:extract,
-       %{
-         kind: kind,
-         name: struct_name(field_atoms, structs),
-         fields: field_set,
-         ordered_fields: field_atoms,
-         count: count
-       }}
+    cond do
+      already_struct?(field_set, structs) ->
+        {:decline, decline(kind, :already_a_struct, %{fields: field_atoms})}
+
+      struct_name(field_atoms, structs) == nil ->
+        {:decline, decline(kind, :no_meaningful_name, %{fields: field_atoms})}
+
+      true ->
+        {:extract,
+         %{
+           kind: kind,
+           name: struct_name(field_atoms, structs),
+           fields: field_set,
+           ordered_fields: field_atoms,
+           count: count
+         }}
     end
   end
 
@@ -559,32 +577,20 @@ defmodule Number42.Refactors.Ex.ExtractPrimitiveToStruct do
   defp decline(kind, reason, detail),
     do: %{kind: kind, reason: reason, detail: detail}
 
-  # --- naming policy ---
+  # --- naming policy (derive or decline) ---
 
-  defp struct_name(fields, structs) do
-    sorted = Enum.sort(fields)
-    dict_name(sorted) || fallback_name(structs)
-  end
+  # A meaningful name from the field set, or `nil` to decline. There is no
+  # `ExtractedStruct<N>` placeholder (#372/#375): a generic name carries no
+  # domain meaning and shipping `# TODO: rename` into user code is worse
+  # than leaving the raw tuple in place. `_structs` is unused now that the
+  # numbered fallback is gone; kept in the signature for call-site symmetry.
+  defp struct_name(fields, _structs), do: dict_name(Enum.sort(fields))
 
   defp dict_name(sorted_fields) do
     Enum.find_value(@name_dictionary, fn {keys, name} ->
       if Enum.sort(keys) == sorted_fields, do: name
     end)
   end
-
-  # `ExtractedStruct<N>` — first N not already a project module. The
-  # caller appends a rename reminder when this path is taken (signalled
-  # by the name prefix at rewrite time).
-  defp fallback_name(structs) do
-    taken = MapSet.new(structs, fn {mod, _} -> module_suffix(mod) end)
-
-    1
-    |> Stream.iterate(&(&1 + 1))
-    |> Stream.map(&"ExtractedStruct#{&1}")
-    |> Enum.find(&(not MapSet.member?(taken, &1)))
-  end
-
-  defp module_suffix(mod), do: mod |> Module.split() |> Enum.join(".")
 
   # --- rewriting ---
 
@@ -813,8 +819,9 @@ defmodule Number42.Refactors.Ex.ExtractPrimitiveToStruct do
   # --- synthesised defstruct block ---
 
   # One `defmodule Name do defstruct […] end` per extraction, prepended
-  # above the first top-level expression. A fallback (generic) name gets
-  # an inline rename reminder.
+  # above the first top-level expression. The name is always dictionary-
+  # derived (an unnameable shape is declined upstream), so no placeholder
+  # rename reminder is ever emitted.
   defp defstruct_patch(ast, extractions) do
     line = first_expr_line(ast)
     text = Enum.map_join(extractions, "\n\n", &struct_module_text/1)
@@ -822,15 +829,10 @@ defmodule Number42.Refactors.Ex.ExtractPrimitiveToStruct do
     Patch.new(range, text <> "\n\n", false)
   end
 
-  @rename_reminder "# " <> "TODO: rename — generic extracted name"
-
   defp struct_module_text(ext) do
     fields = Enum.map_join(ext.ordered_fields, ", ", &":#{&1}")
-    reminder = if fallback?(ext.name), do: "  #{@rename_reminder}\n", else: ""
-    "defmodule #{ext.name} do\n#{reminder}  defstruct [#{fields}]\nend"
+    "defmodule #{ext.name} do\n  defstruct [#{fields}]\nend"
   end
-
-  defp fallback?(name), do: String.starts_with?(name, "ExtractedStruct")
 
   defp first_expr_line(ast) do
     ast

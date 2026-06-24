@@ -112,40 +112,33 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
       und werden nie zusammen extrahiert (sonst würde ein bare-Return-Fall
       ein Tupel destrukturieren o.ä.).
 
-  ## Helper-Naming + Kollisions-Sicherheit (Slice 2)
+  ## Helper-Naming: ableiten oder ablehnen (kein Platzhalter)
 
-  Der Helper heißt nicht mehr fest `:extracted_clone`, sondern wird über
-  `Number42.Refactors.HelperNaming` aus dem Block selbst benannt: ein Verb
-  aus dem dominanten Call des Blocks (`Enum.sum` → `compute`) plus dem
-  live-out-Objekt → `compute_subtotal_and_taxed`. Da ein Klon über mehrere
-  Funktionen läuft, gibt es keinen einzelnen Host-Namen — Naming-Basis ist
-  der Block (Statements → Verb, live-out → Objekt), nicht eine Host-Funktion.
-  `host` ist daher `nil`; lässt sich kein Name ableiten, bleibt
-  `:extracted_clone` als ehrlicher Fallback.
+  Der Helper wird über `Number42.Refactors.HelperNaming` aus dem Block
+  selbst benannt: ein Verb aus dem dominanten Call (`Enum.sum` → `compute`)
+  plus dem live-out-Objekt → `compute_subtotal_and_taxed`. Da ein Klon über
+  mehrere Funktionen läuft, gibt es keinen einzelnen Host-Namen — Naming-
+  Basis ist der Block (Statements → Verb, live-out → Objekt). `host` ist
+  daher `nil`.
+
+  Es gibt **keinen `extracted_clone`-Platzhalter mehr** (#375, analog
+  `ExtractPipelineToFunction`): ein Helper namens `extracted_clone` benennt
+  nichts und liest sich schlechter als der duplizierte Block, den er
+  ersetzt. Lässt sich kein bedeutungsvoller Name ableiten — kein
+  Verb-erkennbarer terminaler Call, kein benennbares live-out-Objekt (eine
+  reine Arithmetik-Tail, ein 3+-Tupel jenseits des Zwei-Namen-Joins) —
+  liefert `HelperNaming` `:skip` und die Klon-Gruppe wird **abgelehnt**.
+  Eine kleinere, benennbare Sub-Gruppe innerhalb desselben Bodies kann
+  dennoch gehoben werden; nur der unbenennbare Block bleibt stehen.
 
   Der Name wird **einmal pro Klon-Gruppe** abgeleitet (aus der ersten
   Occurrence) und für **alle** Occurrences verwendet — es ist EIN
-  gemeinsamer Helper. Da alle Occurrences strukturell gleich sind, stimmen
-  Verb und Objekt über alle überein.
-
-  Kollisions-Sicherheit (via `HelperNaming`): der Name kollidiert nie mit
-  einem existierenden `def`/`defp` im Modul und schattet keinen live-out-
-  oder Parameter-Namen. Ist ein abgeleiteter Name belegt, weicht der
-  Refactor auf den nächsten freien Kandidaten aus
-  (`compute_subtotal_and_taxed` belegt → `subtotal_and_taxed`).
-
-  **Diversifizierter Fallback**: Lässt sich kein Name ableiten, hieße der
-  Helper `:extracted_clone`. Wollen aber *zwei verschiedene* unbenennbare
-  Gruppen in einem Pass diesen einen Namen, bekam früher die erste ihn und
-  die zweite wurde **übersprungen** — und ein Re-Run leitet denselben
-  belegten Namen erneut ab und überspringt wieder: die Gruppe ist
-  *verloren*, nicht aufgeschoben. Der Fallback ist daher der erste freie
-  `extracted_clone` / `extracted_clone_2` / `extracted_clone_3` … gegen die
-  im Pass wachsende `existing_names`-Menge — jede unbenennbare Gruppe bekommt
-  ihren eigenen ehrlichen Platzhalter und wird extrahiert. Idempotent: sind
-  die Klone erst gehoben, findet ein Re-Run keine mehr, also keine
-  `extracted_clone_N`-Inflation. Nur wenn *gar kein* nummerierter Fallback
-  frei wäre (praktisch nie), bliebe die Extraktion aus.
+  gemeinsamer Helper. Kollisions-Sicherheit (via `HelperNaming`): der Name
+  kollidiert nie mit einem existierenden `def`/`defp` und schattet keinen
+  live-out- oder Parameter-Namen; ist der abgeleitete Name belegt, weicht
+  der Refactor auf den nächsten freien Kandidaten aus
+  (`compute_subtotal_and_taxed` belegt → `subtotal_and_taxed`), und gibt es
+  keinen, wird abgelehnt.
 
   ## SICHERHEITS-FALLEN (siehe auch Bericht)
 
@@ -709,52 +702,25 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
   # `HelperNaming` — a verb inferred from the block's dominant call joined
   # to the live-out object (`compute_subtotal_and_taxed`). A clone spans
   # several functions, so there is no single host name to derive from: the
-  # naming basis is the block itself (its statements feed verb inference,
-  # its live-out feeds the object). `host` is therefore `nil` (the
-  # host-derived `strip_suffix` candidate is suppressed) and `:extracted_clone`
-  # is the honest last-resort fallback when nothing nameable surfaces —
-  # preserving the pre-Slice-2 name for the unnameable case.
+  # naming basis is the block itself (statements → verb, live-out → object),
+  # so `host` is `nil`. One name is derived per clone group (from the first
+  # occurrence) and shared by all — the occurrences are structurally equal,
+  # so verb and object agree.
   #
-  # One name is derived per clone group (shared by every occurrence), not
-  # per occurrence. The first occurrence's stmts/free-vars/live-out stand
-  # in for the group — all occurrences are structurally equal, so verb and
-  # object agree across them.
+  # Collision safety (via `HelperNaming`): the candidate misses every
+  # existing `def`/`defp` and shadows no live-out/param name; a taken
+  # derived name falls to the next free candidate.
   #
-  # Collision safety: the candidate must miss every existing `def`/`defp`
-  # name and not shadow a live-out or free-var (param) name. `HelperNaming`
-  # enforces both and returns `:skip` if even the fallback collides with an
-  # existing definition — in which case the whole extraction is skipped
-  # rather than emit a confusing or clashing name (mirrors
-  # `ExtractFunctionFromBlock`).
-  #
-  # The fallback is *diversified*, not single-slot: when nothing nameable
-  # surfaces, the helper would be `extracted_clone` — but two distinct
-  # unnameable groups in one pass both want that one name. The single-slot
-  # version handed it to the first and let `HelperNaming` `:skip` the rest,
-  # silently dropping genuine clones (a re-run re-derives the same taken
-  # name and skips again — they are lost, not deferred). Instead the
-  # fallback is the first free `extracted_clone` / `extracted_clone_2` /
-  # `extracted_clone_3` … against the pass's growing `existing_names`, so
-  # each unnameable group gets its own honest placeholder and is extracted.
-  # Idempotent: once the clones are lifted, a re-run finds none, so no
-  # `extracted_clone_N` inflation occurs.
+  # Derive a name from what the block does and produces (a verb from its
+  # dominant call + the live-out object). There is **no `extracted_clone`
+  # placeholder fallback**: a shared helper named `extracted_clone` says
+  # nothing about what it computes and reads worse than the duplicated
+  # block it replaces (#375, mirrors `ExtractPipelineToFunction`). When no
+  # meaningful name surfaces, `HelperNaming` returns `:skip` and the clone
+  # group is declined — duplication no one can name is left in place.
   defp synth_name(%{stmts: stmts, free_vars: free, live_out: live}, existing_names) do
-    fallback = free_fallback(existing_names)
-    HelperNaming.name(nil, live, stmts, free, existing_names, fallback: fallback)
+    HelperNaming.name(nil, live, stmts, free, existing_names, fallback: :none)
   end
-
-  # The first `extracted_clone` / `extracted_clone_2` / … not already taken
-  # this pass. `extracted_clone` (no suffix) stays the first choice so the
-  # common single-clone case keeps its established name; numbering only
-  # kicks in for a second unnameable group sharing the pass.
-  defp free_fallback(existing_names) do
-    Stream.iterate(1, &(&1 + 1))
-    |> Stream.map(&fallback_name/1)
-    |> Enum.find(&(not MapSet.member?(existing_names, &1)))
-  end
-
-  defp fallback_name(1), do: :extracted_clone
-  defp fallback_name(n), do: :"extracted_clone_#{n}"
 
   # Replace the occurrence's source range with the helper call. The free
   # vars of THIS occurrence (in fingerprint-canonical order) are the call

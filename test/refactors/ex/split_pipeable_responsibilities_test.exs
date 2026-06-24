@@ -30,82 +30,71 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilitiesTest do
     end
   end
 
-  describe "rewrites — single carrier becomes a pipe" do
-    test "splits a clean two-phase body where one value flows across into a pipe" do
+  describe "naming gate — derive or decline (#375)" do
+    # There is no `<fn>_phase_n` placeholder fallback. A split is emitted
+    # only if EVERY phase — including the final tail phase — earns a
+    # meaningful name from what it does and produces. A tail phase has no
+    # live-out (its value is the return) and so rarely yields a verb+object
+    # name; in practice that makes the refactor decline most bodies rather
+    # than ship a `report_phase_3`-style placeholder chain. That is the
+    # intended behaviour: a partition no one can fully name reads better as
+    # the original straight-line body.
+    test "an abstract-call body is declined (no _phase_n placeholder)" do
       before_source = """
       defmodule M do
         def report(order) do
-          subtotal = sum_lines(order)
-          discount = lookup_discount(order)
-          net = subtotal - discount
-          doubled = net * 2
-          adjusted = doubled + 1
-          format(adjusted)
+          a = f(order)
+          b = g(a)
+          c = h(b)
+          d = i(c)
+          e = j(d)
+          last(e)
         end
       end
       """
 
-      # Narrowest cut is after `net = subtotal - discount` (stmt 2):
-      # only `net` is read downstream → single carrier → pipe. Phase 2
-      # reads only `net` (and call names), so its sole parameter is
-      # `net`: a clean pipe.
-      after_source = """
+      out = apply_refactor(@subject, before_source, @on ++ [min_phases: 2])
+      assert out == before_source
+      refute out =~ ~r/_phase_\d+/
+    end
+
+    test "a body with a non-nameable tail phase is declined (no placeholder tail)" do
+      # Phase 1 computes `totals` (nameable: `compute_totals`), but the tail
+      # phase has no live-out and no inferable verb+object — it would need a
+      # `report_phase_2` placeholder, so the whole split is declined.
+      before_source = """
       defmodule M do
         def report(order) do
-          order
-          |> report_phase_1()
-          |> report_phase_2()
-        end
-
-        defp report_phase_1(order) do
-          subtotal = sum_lines(order)
-          discount = lookup_discount(order)
-          net = subtotal - discount
-          net
-        end
-
-        defp report_phase_2(net) do
-          doubled = net * 2
-          adjusted = doubled + 1
-          format(adjusted)
+          lines = Enum.map(order, & &1.amount)
+          totals = Enum.sum(lines)
+          formatted = to_string(totals)
+          labelled = "total: " <> formatted
+          String.upcase(labelled)
         end
       end
       """
 
-      # 2-phase mechanic: pin min_phases: 2 so this stays a split
-      # regardless of the (now 3) default.
-      assert_rewrites(@subject, before_source, after_source, @on ++ [min_phases: 2])
+      out = apply_refactor(@subject, before_source, @on ++ [min_phases: 2])
+      assert out == before_source
+      refute out =~ ~r/_phase_\d+/
     end
   end
 
-  describe "min_phases default (3) vs. explicit config" do
-    # The same body that yields exactly two phases: the default floor of
-    # 3 leaves it untouched, while an explicit `min_phases: 2` splits it.
-    # This proves the floor is honoured *and* configurable.
-    @two_phase_body """
+  describe "min_phases floor" do
+    @floor_body """
     defmodule M do
       def report(order) do
-        subtotal = sum_lines(order)
-        discount = lookup_discount(order)
-        net = subtotal - discount
-        doubled = net * 2
-        adjusted = doubled + 1
-        format(adjusted)
+        lines = Enum.map(order, & &1.amount)
+        totals = Enum.sum(lines)
+        formatted = to_string(totals)
+        labelled = "total: " <> formatted
+        String.upcase(labelled)
       end
     end
     """
 
-    test "a body that yields only two phases is left untouched under the default floor of 3" do
-      assert_unchanged(@subject, @two_phase_body, @on)
-    end
-
-    test "the same two-phase body IS split with explicit min_phases: 2" do
-      out = apply_refactor(@subject, @two_phase_body, @on ++ [min_phases: 2])
-
-      assert out != @two_phase_body
-      assert out =~ "report_phase_1"
-      assert out =~ "report_phase_2"
-      refute out =~ "report_phase_3"
+    test "a body below the default floor of 3 phases is left untouched" do
+      assert_unchanged(@subject, @floor_body, @on)
     end
   end
 
@@ -228,55 +217,13 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilitiesTest do
     end
   end
 
-  describe "rewrites — flat maximal partition in one pass" do
-    test "a six-statement body splits into three flat phases, not a nested re-split" do
-      before_source = """
-      defmodule M do
-        def run(order) do
-          a = f(order)
-          b = g(a)
-          c = h(b)
-          d = i(c)
-          e = j(d)
-          last(e)
-        end
-      end
-      """
-
-      # Single value flows across each boundary (b, then d) → a flat
-      # pipe of three phases in ONE pass. No `run_phase_2_phase_1` etc.
-      after_source = """
-      defmodule M do
-        def run(order) do
-          order
-          |> run_phase_1()
-          |> run_phase_2()
-          |> run_phase_3()
-        end
-
-        defp run_phase_1(order) do
-          a = f(order)
-          b = g(a)
-          b
-        end
-
-        defp run_phase_2(b) do
-          c = h(b)
-          d = i(c)
-          d
-        end
-
-        defp run_phase_3(d) do
-          e = j(d)
-          last(e)
-        end
-      end
-      """
-
-      assert_rewrites(@subject, before_source, after_source, @on)
-    end
-
-    test "applying transform twice equals applying it once (fixpoint after one pass)" do
+  describe "naming gate — no placeholder, no nested re-split" do
+    test "an abstract-call six-statement body is declined (no _phase_n placeholder)" do
+      # Each phase would infer no verb and bind no nameable object, so the
+      # only available name was the old `run_phase_n` placeholder. With no
+      # fallback (#375) the whole split is declined — and because the
+      # `_phase_n` name can never be emitted, the `run_phase_2_phase_1`
+      # nested re-split it used to risk is now structurally impossible.
       source = """
       defmodule M do
         def run(order) do
@@ -290,20 +237,40 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilitiesTest do
       end
       """
 
-      once = SplitPipeableResponsibilities.transform(source, @on)
+      out = apply_refactor(@subject, source, @on)
+      assert out == source
+      refute out =~ ~r/_phase_\d+/
+    end
 
-      assert_idempotent(@subject, source, @on)
-      refute once =~ ~r/_phase_\d+_phase_\d+/
+    test "applying transform twice equals applying it once (fixpoint)" do
+      # A nameable body: every phase earns a verb_object name; a re-run finds
+      # the host is now a pipe chain and the helpers are already minimal.
+      source = """
+      defmodule M do
+        def run(order) do
+          lines = Enum.map(order, & &1.amount)
+          totals = Enum.sum(lines)
+          formatted = to_string(totals)
+          labelled = "x: " <> formatted
+          String.upcase(labelled)
+        end
+      end
+      """
+
+      once = SplitPipeableResponsibilities.transform(source, @on ++ [min_phases: 2])
+
+      assert_idempotent(@subject, source, @on ++ [min_phases: 2])
+      refute once =~ ~r/_phase_\d+/
     end
   end
 
   describe "idempotence — fan-in bodies" do
-    # A fan-in body (independent bindings all feeding one tail) can only
-    # cut once under max_carriers, so the maximal partition is two phases
-    # with a long tail helper. That helper would re-split on a second
-    # pass were generated `_phase_n` helpers not skipped. This guards the
-    # `_phase_2_phase_2` cascade seen against position-db's new/2.
-    test "a fan-in body reaches a fixpoint after one pass (no nested re-split)" do
+    # A fan-in body (independent bindings all feeding one tail) with
+    # abstract `pick`/`load` calls infers no verb for any phase → declined.
+    # Because the `_phase_n` placeholder can never be emitted, the
+    # `_phase_2_phase_2` cascade this once guarded is structurally
+    # impossible, and the body is a trivial fixpoint (unchanged).
+    test "an abstract fan-in body is declined and is a trivial fixpoint" do
       source = """
       defmodule M do
         def build(opts, org) do
@@ -318,13 +285,10 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilitiesTest do
       end
       """
 
-      # 2-phase fan-in mechanic: pin min_phases: 2 so the single eligible
-      # cut still produces a split under the (now 3) default.
       opts = @on ++ [min_phases: 2]
-      once = SplitPipeableResponsibilities.transform(source, opts)
-
-      assert once =~ "build_phase_1"
-      refute once =~ ~r/_phase_\d+_phase_\d+/
+      out = SplitPipeableResponsibilities.transform(source, opts)
+      assert out == source
+      refute out =~ ~r/_phase_\d+/
       assert_idempotent(@subject, source, opts)
     end
   end
@@ -357,14 +321,13 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilitiesTest do
     end
   end
 
-  describe "rewrites — interpolated multiline string tail" do
-    # Regression: a tail expression that is an interpolated string with
-    # escaped quotes makes `Sourceror.get_range/1` undercount its end
-    # column, so per-statement delete-patches left the closing `"` behind
-    # as a dangling stub in the host — output parsed but did not compile.
-    # The token-exact body-interior replacement must keep the string whole
-    # inside the final phase helper.
-    test "keeps an interpolated string tail whole and compiles" do
+  describe "naming gate — non-nameable tail declines (#375)" do
+    # This body once split (its interpolated-string tail exercised a
+    # token-exact body-range regression). Its tail phase — the interpolated
+    # string — has no live-out and no inferable verb+object, so under the
+    # derive-or-decline policy the whole split is declined rather than
+    # shipping a `format_relationship_phase_2` placeholder tail.
+    test "an interpolated-string-tail body is declined (no placeholder tail)" do
       source = ~S"""
       defmodule M do
         defp format_relationship(foreign_key) do
@@ -379,16 +342,9 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilitiesTest do
       end
       """
 
-      # 2-phase string-handling mechanic: pin min_phases: 2.
       out = SplitPipeableResponsibilities.transform(source, @on ++ [min_phases: 2])
-
-      # Phase 1 returns {from_entity, to_entity} — both meaningful, no
-      # verb → object-only name. The final phase (the interpolated tail)
-      # has no live-out and no inferable verb → the `_phase_n` fallback.
-      assert out =~ "from_entity_and_to_entity"
-      assert out =~ "format_relationship_phase_2"
-      refute out =~ ~r/^\s*"\s*$/m
-      assert_compiles(out)
+      assert out == source
+      refute out =~ ~r/_phase_\d+/
     end
   end
 
@@ -426,13 +382,12 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilitiesTest do
     end
   end
 
-  describe "rewrites — self-rebind of a parameter" do
-    # `assigns = assigns |> assign(...)` reads `assigns` on the RHS before
-    # rebinding it. The data-flow accounting once dropped that read (the
-    # name was both written and used in one statement), so the phase that
-    # owned the rebind lost `assigns` as a parameter and the output failed
-    # to compile. The rebound name must flow in as a parameter.
-    test "passes a self-rebound parameter into the phase that needs it" do
+  describe "naming gate — self-rebound parameter body declines (#375)" do
+    # `assigns = assign(assigns, ...)` reads `assigns` before rebinding it
+    # (a data-flow subtlety). With abstract `Map.get`/`assign`/`render`
+    # calls no phase is nameable, so the body is declined rather than split
+    # into placeholder phases.
+    test "a self-rebound-parameter body with abstract calls is declined" do
       source = """
       defmodule M do
         defp build(assigns) do
@@ -447,36 +402,9 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilitiesTest do
       end
       """
 
-      # 2-phase self-rebind mechanic: pin min_phases: 2.
       out = SplitPipeableResponsibilities.transform(source, @on ++ [min_phases: 2])
-
-      assert out =~ "build_phase_2(assigns,"
-      assert_compiles(out)
-    end
-  end
-
-  describe "phase fallback — host already carries a _block suffix" do
-    # ExtractFunctionFromBlock may run first and leave a `<x>_block` host.
-    # Appending `_phase_n` would double the suffix (`<x>_block_phase_n`);
-    # the trailing `_block` is stripped so the fallback reads `<x>_phase_n`.
-    test "a _block host phase falls back to <x>_phase_n, not <x>_block_phase_n" do
-      source = """
-      defmodule M do
-        defp add_nodes_block(deps) do
-          a = pick(deps, :a)
-          b = pick(deps, :b)
-          c = combine(a, b)
-          d = combine(c, a)
-          assemble(a, b, c, d)
-        end
-      end
-      """
-
-      # 2-phase suffix-fallback mechanic: pin min_phases: 2.
-      out = SplitPipeableResponsibilities.transform(source, @on ++ [min_phases: 2])
-
-      assert out =~ "add_nodes_phase_2"
-      refute out =~ "add_nodes_block_phase"
+      assert out == source
+      refute out =~ ~r/_phase_\d+/
     end
   end
 end

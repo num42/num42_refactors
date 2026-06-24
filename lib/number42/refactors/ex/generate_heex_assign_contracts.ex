@@ -120,15 +120,28 @@ defmodule Number42.Refactors.Ex.GenerateHeexAssignContracts do
 
   # For each function-component, the list of missing declarations and
   # the source line its `def`/`defp` starts on (the insertion anchor).
+  #
+  # A multi-clause component shares one `attr`/`slot` block: Phoenix
+  # requires every declaration to precede the FIRST clause of the
+  # `{name, arity}` group, and rejects an `attr` sitting before a later
+  # clause. So clauses are grouped by component name, the missing-assign
+  # analysis is unioned across the whole group (`used_assigns/2` already
+  # scans every sigil enclosed by that name), and the block is anchored
+  # at the earliest clause's line — across *all* clauses of that name,
+  # including a leading dispatcher clause with no `~H` sigil of its own.
   defp components_with_missing(ast, source) do
     declared = declared_names(ast)
+    first_lines = first_clause_lines(ast)
 
     ast
     |> component_defs()
-    |> Enum.flat_map(&missing_for_component(&1, declared, source))
+    |> Enum.group_by(fn {_def_node, fn_name} -> fn_name end)
+    |> Enum.flat_map(fn {fn_name, _clauses} ->
+      missing_for_component(fn_name, first_lines, declared, source)
+    end)
   end
 
-  defp missing_for_component({def_node, fn_name}, declared, source) do
+  defp missing_for_component(fn_name, first_lines, declared, source) do
     used = used_assigns(fn_name, source)
 
     missing =
@@ -138,11 +151,36 @@ defmodule Number42.Refactors.Ex.GenerateHeexAssignContracts do
 
     case missing do
       [] -> []
-      decls -> [%{anchor_line: anchor_line(def_node), decls: decls}]
+      decls -> [%{anchor_line: Map.fetch!(first_lines, fn_name), decls: decls}]
     end
   end
 
-  defp anchor_line(def_node), do: Sourceror.get_range(def_node).start[:line]
+  # `fn_name => line of its earliest clause`, over every arity-1 `def`/`defp`
+  # in the module. The anchor must precede the FIRST clause of the component's
+  # clause group; a leading clause may transform assigns and delegate without
+  # an `~H` sigil of its own (so `component_defs/1`, which requires a sigil,
+  # never sees it) yet Phoenix still demands the `attr` block sit before it.
+  defp first_clause_lines(ast) do
+    ast
+    |> Macro.prewalker()
+    |> Enum.flat_map(fn
+      {def_kind, _, [head, [{_do, _body}]]} = node when def_kind in [:def, :defp] ->
+        case arity_one_name(head) do
+          {:ok, name} -> [{name, Sourceror.get_range(node).start[:line]}]
+          :error -> []
+        end
+
+      _ ->
+        []
+    end)
+    |> Enum.reduce(%{}, fn {name, line}, acc -> Map.update(acc, name, line, &min(&1, line)) end)
+  end
+
+  # The function name of an arity-1 `def`/`defp` head, regardless of how the
+  # single parameter is shaped. Used only to find the earliest clause line.
+  defp arity_one_name({:when, _, [inner | _]}), do: arity_one_name(inner)
+  defp arity_one_name({name, _, [_arg]}) when is_atom(name), do: {:ok, name}
+  defp arity_one_name(_), do: :error
 
   # Insert generated declarations above each component, bottom-up so
   # earlier insertions don't shift the line numbers of later anchors.
@@ -221,14 +259,22 @@ defmodule Number42.Refactors.Ex.GenerateHeexAssignContracts do
     end
   end
 
-  # Head must be `name(assigns)` — exactly one param, literally `assigns`.
+  # Head must be `name(<arg>)` where the single arg binds `assigns` — bare
+  # (`name(assigns)`) or pattern-matched (`name(%{type: t} = assigns)`).
+  # A multi-clause component routinely pattern-matches in the head, so a
+  # bare-only check misses every clause but the catch-all and anchors the
+  # `attr` block before a later clause (Phoenix compile error, #371).
   defp assigns_component_name({:when, _, [inner | _]}), do: assigns_component_name(inner)
 
-  defp assigns_component_name({name, _, [{:assigns, _, ctx}]})
-       when is_atom(name) and is_atom(ctx),
-       do: {:ok, name}
+  defp assigns_component_name({name, _, [arg]}) when is_atom(name) do
+    if binds_assigns?(arg), do: {:ok, name}, else: :error
+  end
 
   defp assigns_component_name(_), do: :error
+
+  defp binds_assigns?({:assigns, _, ctx}) when is_atom(ctx), do: true
+  defp binds_assigns?({:=, _, [lhs, rhs]}), do: binds_assigns?(lhs) or binds_assigns?(rhs)
+  defp binds_assigns?(_), do: false
 
   defp has_h_sigil?(node) do
     node

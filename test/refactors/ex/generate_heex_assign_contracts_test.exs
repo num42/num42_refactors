@@ -186,6 +186,50 @@ defmodule Number42.Refactors.Ex.GenerateHeexAssignContractsTest do
 
       assert_rewrites(@subject, before_source, after_source, @enabled)
     end
+
+    test "multi-clause component: attrs anchored before the FIRST clause, unioned across clauses" do
+      # Phoenix requires every `attr`/`slot` to precede the first clause of a
+      # multi-clause component; an `attr` before a later clause is a compile
+      # error. The block must be hoisted to the first clause and the missing
+      # assigns unioned across every clause (`@type` is only read by the
+      # second clause, `@label` only by the first).
+      before_source = ~S'''
+      defmodule MyView do
+        def input(%{kind: :select} = assigns) do
+          ~H"""
+          <label>{@label}</label>
+          """
+        end
+
+        def input(assigns) do
+          ~H"""
+          <input type={@type} />
+          """
+        end
+      end
+      '''
+
+      after_source = ~S'''
+      defmodule MyView do
+        attr :label, :any, required: true
+        attr :type, :any, required: true
+
+        def input(%{kind: :select} = assigns) do
+          ~H"""
+          <label>{@label}</label>
+          """
+        end
+
+        def input(assigns) do
+          ~H"""
+          <input type={@type} />
+          """
+        end
+      end
+      '''
+
+      assert_rewrites(@subject, before_source, after_source, @enabled)
+    end
   end
 
   describe "leaves alone" do

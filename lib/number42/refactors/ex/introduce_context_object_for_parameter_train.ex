@@ -107,13 +107,17 @@ defmodule Number42.Refactors.Ex.IntroduceContextObjectForParameterTrain do
   - **Name collision** — if the chosen context-struct name already exists
     as a module, decline rather than clash.
 
-  ## Naming policy (and its known weakness)
+  ## Naming policy (derive or decline)
 
-  There is no signal in the code for what to call the context struct.
-  Policy: a dictionary derivation from the parameter-name set
-  (`conn`+`params`+`session` → `Request`, …), else the generic
-  `Context<N>` with an inline rename reminder. Generic names are a known
-  smell; default-off + manual review is the mitigation.
+  There is no signal in the code for what to call the context struct, so
+  the name is derived from the parameter-name set via a small dictionary
+  (`conn`+`params`+`session` → `Request`, …). There is **no placeholder
+  fallback**: the old `Context<N>` + `# TODO: rename` minted a struct
+  whose name said nothing about the clump it bundled, adding a type and a
+  per-call-site construction without a name that paid for it. When the
+  dictionary has no entry — or the derived name already names a module —
+  the train is **declined** (`struct_name/3` returns `nil`). A data clump
+  no one can name reads better as positional parameters.
 
   ## Default-OFF (opt-in only)
 
@@ -137,8 +141,6 @@ defmodule Number42.Refactors.Ex.IntroduceContextObjectForParameterTrain do
   @default_min_train_size 3
 
   @excluded_path_prefixes ["test/", "dev/"]
-
-  @rename_reminder "# " <> "TODO: rename — generic context name"
 
   # parameter-name set -> context struct name. Tiny and English-biased by
   # design; first match wins. Sets are compared sorted.
@@ -653,11 +655,19 @@ defmodule Number42.Refactors.Ex.IntroduceContextObjectForParameterTrain do
     end
   end
 
+  # A context struct must carry a *meaningful* name derived from its
+  # parameter set (`conn`+`params` → `Request`). There is no placeholder
+  # fallback: the old `Context<N>` + `# TODO: rename` minted a struct whose
+  # name said nothing about the clump it bundled, adding a type and a struct
+  # construction at every call site without paying for it (#375, mirrors
+  # `ExtractPipelineToFunction`). When the dictionary has no entry — or the
+  # derived name already names a module — the train is **declined**: a data
+  # clump no one can name is better left as positional parameters.
   defp struct_name(params, module, existing) do
-    sorted = Enum.sort(params)
-    base = dict_name(sorted) || fallback_name(module, existing)
-    full = Module.concat(module, base)
-    if MapSet.member?(existing, full), do: distinct_name(module, existing), else: base
+    case dict_name(Enum.sort(params)) do
+      nil -> nil
+      base -> if MapSet.member?(existing, Module.concat(module, base)), do: nil, else: base
+    end
   end
 
   defp dict_name(sorted_params) do
@@ -665,15 +675,6 @@ defmodule Number42.Refactors.Ex.IntroduceContextObjectForParameterTrain do
       if Enum.sort(keys) == sorted_params, do: name
     end)
   end
-
-  defp fallback_name(module, existing) do
-    1
-    |> Stream.iterate(&(&1 + 1))
-    |> Stream.map(&"Context#{&1}")
-    |> Enum.find(&(not MapSet.member?(existing, Module.concat(module, &1))))
-  end
-
-  defp distinct_name(module, existing), do: fallback_name(module, existing)
 
   # --- rewrite ---
 
@@ -818,20 +819,16 @@ defmodule Number42.Refactors.Ex.IntroduceContextObjectForParameterTrain do
   defp call_site_patch(_node, _spec), do: []
 
   # One `defmodule Name do defstruct […] end` prepended inside the module
-  # body, above the first definition.
+  # body, above the first definition. The struct name is always
+  # dictionary-derived (an unnameable train is declined upstream), so no
+  # placeholder rename reminder is ever emitted.
   defp defstruct_patch({:defmodule, _, [_name, [{_do, body}]]}, spec) do
     line = first_def_line(body)
     fields = Enum.map_join(spec.fields, ", ", &":#{&1}")
-    reminder = if fallback?(spec.struct_name), do: "  #{@rename_reminder}\n", else: ""
-
-    text =
-      "defmodule #{spec.struct_name} do\n#{reminder}  defstruct [#{fields}]\nend\n\n"
-
+    text = "defmodule #{spec.struct_name} do\n  defstruct [#{fields}]\nend\n\n"
     range = %{start: [line: line, column: 3], end: [line: line, column: 3]}
     Patch.new(range, text, false)
   end
-
-  defp fallback?(name), do: String.starts_with?(name, "Context")
 
   defp first_def_line(body) do
     body

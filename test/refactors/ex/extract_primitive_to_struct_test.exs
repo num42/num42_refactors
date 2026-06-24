@@ -103,8 +103,13 @@ defmodule Number42.Refactors.Ex.ExtractPrimitiveToStructTest do
     end
   end
 
-  describe "map extraction (exact key-set match)" do
-    test "three heads with the same key set extract a struct" do
+  describe "map shapes are never extracted (#372)" do
+    # A bare-map pattern `%{k: v}` is a SUBSET match — it matches any map
+    # with those keys. Rewriting it to `%Struct{k: v}` makes it a type
+    # assertion that only matches that struct, silently breaking every
+    # plain-map caller at runtime. The key set proves nothing about the
+    # value's type, so map shapes are declined wholesale.
+    test "three heads with the same key set are left untouched" do
       src = """
       defmodule People do
         def greet(%{name: n, age: a}), do: [n, a]
@@ -113,44 +118,37 @@ defmodule Number42.Refactors.Ex.ExtractPrimitiveToStructTest do
       end
       """
 
-      out = Subject.transform(src, opts())
-
-      assert out =~ "defmodule Person do"
-      assert out =~ "defstruct [:name, :age]" or out =~ "defstruct [:age, :name]"
-      assert out =~ "%Person{name: n, age: a}"
-      assert_compiles(out)
-    end
-
-    test "subset/superset key sets are DIFFERENT types — no merge in v1" do
-      # {name, age} appears 2x, {name, age, email} appears 2x; neither
-      # reaches K=3 on its own, and they are never merged.
-      src = """
-      defmodule People do
-        def a(%{name: n, age: g}), do: [n, g]
-        def b(%{name: n, age: g}), do: [n, g]
-        def c(%{name: n, age: g, email: e}), do: [n, g, e]
-        def d(%{name: n, age: g, email: e}), do: [n, g, e]
-      end
-      """
-
       assert_unchanged(Subject, src, opts())
     end
 
-    test "exact superset reaching K extracts only that exact set" do
+    test "the plan records the map shape as declined, never extracted" do
+      src = """
+      defmodule People do
+        def greet(%{name: n, age: a}), do: [n, a]
+        def label(%{name: n, age: a}), do: [n, a]
+        def show(%{name: n, age: a}), do: [n, a]
+      end
+      """
+
+      p = plan(src)
+      refute Enum.any?(p.extractions, &(&1.kind == :map))
+
+      assert Enum.any?(
+               p.declined,
+               &(&1.kind == :map and &1.reason == :bare_map_pattern_unprovable)
+             )
+    end
+
+    test "even a key set reaching K is declined" do
       src = """
       defmodule People do
         def a(%{name: n, age: g, email: e}), do: [n, g, e]
         def b(%{name: n, age: g, email: e}), do: [n, g, e]
         def c(%{name: n, age: g, email: e}), do: [n, g, e]
-        def d(%{name: n, age: g}), do: [n, g]
       end
       """
 
-      p = plan(src)
-      ext = Enum.find(p.extractions, &(&1.kind == :map))
-      assert MapSet.equal?(ext.fields, MapSet.new([:name, :age, :email]))
-      # the 2-field {name, age} (1x) never extracted
-      assert Enum.count(p.extractions, &(&1.kind == :map)) == 1
+      assert_unchanged(Subject, src, opts())
     end
   end
 
@@ -168,7 +166,10 @@ defmodule Number42.Refactors.Ex.ExtractPrimitiveToStructTest do
       assert Subject.transform(src, opts()) =~ "defmodule Point do"
     end
 
-    test "fallback name + TODO when the dictionary misses" do
+    test "declines when the dictionary misses — no ExtractedStruct placeholder (#372/#375)" do
+      # `{foo, bar}` matches no dictionary entry. With no placeholder
+      # fallback the tuple shape is declined rather than minted as
+      # `ExtractedStruct1` + `# TODO: rename`.
       src = """
       defmodule G do
         def a({foo, bar}), do: [foo, bar]
@@ -178,14 +179,12 @@ defmodule Number42.Refactors.Ex.ExtractPrimitiveToStructTest do
       """
 
       out = Subject.transform(src, opts())
-
-      assert out =~ "defmodule ExtractedStruct1 do"
-      assert out =~ "# TODO: rename"
-      assert out =~ "%ExtractedStruct1{foo: foo, bar: bar}"
-      assert_compiles(out)
+      assert out == src
+      refute out =~ "ExtractedStruct"
+      refute out =~ "TODO: rename"
     end
 
-    test "fallback skips a name already taken by a project module" do
+    test "the plan records an unnameable tuple shape as declined" do
       src = """
       defmodule G do
         def a({foo, bar}), do: [foo, bar]
@@ -194,9 +193,9 @@ defmodule Number42.Refactors.Ex.ExtractPrimitiveToStructTest do
       end
       """
 
-      structs = %{ExtractedStruct1 => MapSet.new([:other])}
-      out = Subject.transform(src, opts(structs: structs))
-      assert out =~ "defmodule ExtractedStruct2 do"
+      p = plan(src)
+      assert p.extractions == []
+      assert Enum.any?(p.declined, &(&1.reason == :no_meaningful_name))
     end
   end
 

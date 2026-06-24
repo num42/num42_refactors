@@ -78,26 +78,30 @@ defmodule Number42.Refactors.Ex.ExtractExpressionCloneTest do
       assert_idempotent(@subject, source, @on ++ [min_mass: 8])
     end
 
-    test "a PARTIAL sub-block (tail only) is extracted even when prefixes differ" do
+    test "a PARTIAL sub-block (tail only) is extracted when it is nameable" do
       # The key expression-level capability: the shared clone is only the
-      # last two statements; the leading statements differ between a and b.
-      # The function-level finders would never see this.
+      # last statements; the leading statements differ between a and b. The
+      # function-level finders would never see this. The shared tail
+      # produces a nameable tuple result (`Enum.sum` → verb `compute`, the
+      # returned tuple `{subtotal, taxed}` → object), so it is named — never
+      # a placeholder (#375).
       source = """
       defmodule M do
         def log(_), do: :ok
         def audit(_, _), do: :ok
-        def shipping(o), do: o.ship
 
         def a(order) do
           log(order)
-          base = order.amount
-          base * 1.19 + shipping(order)
+          subtotal = Enum.sum(order.amounts)
+          taxed = subtotal * 1.19
+          {subtotal, taxed}
         end
 
         def b(cart, note) do
           audit(cart, note)
-          base = cart.amount
-          base * 1.19 + shipping(cart)
+          subtotal = Enum.sum(cart.amounts)
+          taxed = subtotal * 1.19
+          {subtotal, taxed}
         end
       end
       """
@@ -108,9 +112,8 @@ defmodule Number42.Refactors.Ex.ExtractExpressionCloneTest do
       # (log/audit) stay put.
       assert out =~ "log(order)"
       assert out =~ "audit(cart, note)"
-      assert out =~ "defp extracted_clone(order) do"
-      assert out =~ "base = order.amount"
-      refute out =~ "defp extracted_clone(cart)"
+      assert out =~ "defp compute_subtotal_and_taxed(order) do"
+      refute out =~ "extracted_clone"
 
       assert_compiles(out)
       assert_idempotent(@subject, source, @on ++ [min_mass: 6])
@@ -154,11 +157,13 @@ defmodule Number42.Refactors.Ex.ExtractExpressionCloneTest do
   end
 
   describe "live-out via value return (slice 1)" do
-    test "a shared block binding ONE live-out var returns it bare and destructures at each call" do
-      # The shared block is the first two statements; the tails differ
-      # (log_invoice vs store_total) so the clone is the prefix only, and
-      # the bound `taxed` is read by each differing tail — a single
-      # live-out, returned bare.
+    test "a single-live-out block with a non-nameable tail is declined (no placeholder)" do
+      # The shared block binds one live-out `taxed`, read by each differing
+      # tail. Its terminal is arithmetic (`subtotal * 1.19`) — no verb, and
+      # a lone object can't stand alone — so no meaningful name surfaces and
+      # the clone is declined rather than extracted under `extracted_clone`
+      # (#375). The bare-return-of-one-live-out *mechanic* itself is covered
+      # by the named tuple-return tests below and the position-db dogfood.
       source = """
       defmodule M do
         def log_invoice(_), do: :ok
@@ -179,18 +184,8 @@ defmodule Number42.Refactors.Ex.ExtractExpressionCloneTest do
       """
 
       out = apply_refactor(@subject, source, @on ++ [min_mass: 6])
-
-      # Bare return, not a tuple — one live-out var.
-      assert out =~ "taxed = extracted_clone(order)"
-      assert out =~ "taxed = extracted_clone(cart)"
-      assert out =~ "defp extracted_clone(order) do"
-      refute out =~ "{taxed} = extracted_clone"
-      # Differing tails stay put; the helper hands `taxed` back to them.
-      assert out =~ "log_invoice(taxed)"
-      assert out =~ "store_total(taxed)"
-
-      assert_compiles(out)
-      assert_idempotent(@subject, source, @on ++ [min_mass: 6])
+      assert out == source
+      refute out =~ "extracted_clone"
     end
 
     test "a shared block binding TWO live-out vars returns a tuple and destructures at each call" do
@@ -283,12 +278,15 @@ defmodule Number42.Refactors.Ex.ExtractExpressionCloneTest do
   end
 
   describe "self-rebound free variable (use-before-rebind)" do
-    test "a block that rebinds a param from its own value passes it as a helper parameter and compiles" do
-      # The Phoenix idiom `socket = socket |> call(arg)` reads `socket` on
-      # the RHS *before* rebinding it. Set-based `used - bound` drops that
-      # read (bound_in sees `socket` as written), so the helper would
-      # reference an undefined `socket`. Flow-sensitive free-var detection
-      # keeps the use-before-rebind read free → `socket` becomes a param.
+    # These blocks exercise flow-sensitive free-var detection — `socket =
+    # socket |> call(c)` reads `socket` before rebinding it, so `socket`
+    # must thread in as a parameter. Their terminals (`{:noreply, socket}`,
+    # `assigns.x`) yield no meaningful name, so under derive-or-decline
+    # (#375) they are declined rather than minted as `extracted_clone`. The
+    # free-var-threading mechanic itself is exercised by the named
+    # tuple-return tests and proven on position-db (`maybe_filter_*`,
+    # `*_subquery` helpers all thread free vars).
+    test "a self-rebound block with a non-nameable tail is declined (no placeholder)" do
       source = """
       defmodule M do
         def put_node_at_path(s, _c), do: s
@@ -306,18 +304,11 @@ defmodule Number42.Refactors.Ex.ExtractExpressionCloneTest do
       """
 
       out = apply_refactor(@subject, source, @on ++ [min_mass: 4])
-
-      # `socket` is threaded as a parameter at the helper and both calls.
-      assert out =~ "defp extracted_clone(c, socket) do"
-      assert out =~ "extracted_clone(c, socket)"
-      assert out =~ "socket = socket |> put_node_at_path(c)"
-
-      # Without the fix this fails with `undefined variable "socket"`.
-      assert_compiles(out)
-      assert_idempotent(@subject, source, @on ++ [min_mass: 4])
+      assert out == source
+      refute out =~ "extracted_clone"
     end
 
-    test "the same idiom with `assigns` rebound via assign/2 threads `assigns` and compiles" do
+    test "the same idiom with `assigns` rebound via assign/2 is also declined when unnameable" do
       source = """
       defmodule M do
         def assign(a, _k, _v), do: a
@@ -335,12 +326,8 @@ defmodule Number42.Refactors.Ex.ExtractExpressionCloneTest do
       """
 
       out = apply_refactor(@subject, source, @on ++ [min_mass: 4])
-
-      assert out =~ "defp extracted_clone(assigns, val) do"
-      assert out =~ "extracted_clone(assigns, val)"
-
-      assert_compiles(out)
-      assert_idempotent(@subject, source, @on ++ [min_mass: 4])
+      assert out == source
+      refute out =~ "extracted_clone"
     end
   end
 
@@ -386,21 +373,18 @@ defmodule Number42.Refactors.Ex.ExtractExpressionCloneTest do
       # falls to the next collision-free candidate (`subtotal_and_taxed`).
       source = """
       defmodule M do
-        def log_invoice(_, _), do: :ok
-        def store_total(_, _), do: :ok
-
         def compute_subtotal_and_taxed(_), do: :preexisting
 
         def a(order) do
           subtotal = Enum.sum(order.lines)
           taxed = subtotal * 1.19
-          log_invoice(subtotal, taxed)
+          {subtotal, taxed}
         end
 
         def b(cart) do
           subtotal = Enum.sum(cart.lines)
           taxed = subtotal * 1.19
-          store_total(subtotal, taxed)
+          {subtotal, taxed}
         end
       end
       """
@@ -418,52 +402,12 @@ defmodule Number42.Refactors.Ex.ExtractExpressionCloneTest do
       assert_idempotent(@subject, source, @on ++ [min_mass: 6])
     end
 
-    test "diversifies the fallback when extracted_clone is already a def in the module" do
-      # Single arithmetic-bound live-out → no verb, a lone object can't stand
-      # alone, so the only candidate is the `:extracted_clone` fallback. A
-      # pre-existing `extracted_clone/1` occupies that name; rather than skip
-      # the extraction (the old single-slot behaviour, which silently dropped
-      # the clone), the refactor diversifies to the next free placeholder
-      # `extracted_clone_2` and extracts.
-      source = """
-      defmodule M do
-        def log_invoice(_), do: :ok
-        def store_total(_), do: :ok
-        def extracted_clone(_), do: :taken
-
-        def a(order) do
-          subtotal = Enum.sum(order.lines)
-          taxed = subtotal * 1.19
-          log_invoice(taxed)
-        end
-
-        def b(cart) do
-          subtotal = Enum.sum(cart.lines)
-          taxed = subtotal * 1.19
-          store_total(taxed)
-        end
-      end
-      """
-
-      out = apply_refactor(@subject, source, @on ++ [min_mass: 6])
-
-      # The pre-existing def is untouched; the helper takes the next slot.
-      assert out =~ "def extracted_clone(_), do: :taken"
-      assert out =~ "defp extracted_clone_2(order) do"
-      assert out =~ "taxed = extracted_clone_2(order)"
-      assert out =~ "taxed = extracted_clone_2(cart)"
-      assert_compiles(out)
-      assert_idempotent(@subject, source, @on ++ [min_mass: 6])
-    end
-
-    test "two distinct unnameable clone groups are both extracted in one pass" do
-      # The bug the diversified fallback fixes: two structurally DIFFERENT
-      # clone groups, each unnameable (arithmetic-only, no verb, single
-      # live-out). Both want `extracted_clone`. The single-slot fallback gave
-      # it to the first and skipped the second — a re-run re-derived the same
-      # taken name and skipped again, so the second clone was lost forever.
-      # Now the second group takes `extracted_clone_2`; both are lifted in one
-      # pass and the result is idempotent.
+    test "unnameable clone groups are declined, never given an extracted_clone placeholder" do
+      # Two structurally distinct clone groups, both arithmetic-only (no
+      # verb, single live-out) → neither is nameable. With no placeholder
+      # fallback (#375) both are declined rather than minted as
+      # `extracted_clone` / `extracted_clone_2`. Duplication no one can name
+      # is left in place.
       source = """
       defmodule M do
         def t1(_), do: :ok
@@ -498,15 +442,8 @@ defmodule Number42.Refactors.Ex.ExtractExpressionCloneTest do
       """
 
       out = apply_refactor(@subject, source, @on ++ [min_mass: 6])
-
-      # Both distinct groups got their own placeholder — neither was dropped.
-      assert out =~ "defp extracted_clone("
-      assert out =~ "defp extracted_clone_2("
-      # Each group's pair of call sites delegates to the same helper.
-      assert length(Regex.scan(~r/defp extracted_clone\(/, out)) == 1
-      assert length(Regex.scan(~r/defp extracted_clone_2\(/, out)) == 1
-      assert_compiles(out)
-      assert_idempotent(@subject, source, @on ++ [min_mass: 6])
+      assert out == source
+      refute out =~ "extracted_clone"
     end
   end
 
@@ -600,13 +537,16 @@ defmodule Number42.Refactors.Ex.ExtractExpressionCloneTest do
       assert_idempotent(@subject, @wide, enabled: true, min_savings: 0)
     end
 
-    test "raising max_live_out lets the full wide block through (knob is configurable)" do
+    test "raising max_live_out clears the cap, but a 4-tuple block stays unnameable → declined" do
+      # With the cap at 4 the wide block clears `:max_live_out`, but its
+      # four live-out vars exceed the two-name object join, so no meaningful
+      # name surfaces and it is declined under derive-or-decline (#375). The
+      # cap is no longer the limiter here — naming is — so the assertion is
+      # that the 4-tuple is never destructured under a placeholder name.
       out = apply_refactor(@subject, @wide, enabled: true, min_savings: 0, max_live_out: 4)
 
-      # With the cap at 4 the whole block now qualifies and the 4-tuple is
-      # what gets extracted — proving the cap, not an unrelated gate, was
-      # the limiter.
-      assert out =~ "{scope, item, brand, price} = extracted_clone(socket)"
+      refute out =~ "{scope, item, brand, price} = extracted_clone"
+      refute out =~ "extracted_clone"
       assert_compiles(out)
       assert_idempotent(@subject, @wide, enabled: true, min_savings: 0, max_live_out: 4)
     end
@@ -687,12 +627,13 @@ defmodule Number42.Refactors.Ex.ExtractExpressionCloneTest do
       assert_idempotent(@subject, source, @on ++ [min_mass: 8])
     end
 
-    test "a three-tuple return stays extracted_clone (object join caps at two)" do
-      # `{subtotal, tax, total}` — three product names. `object_part` joins at
-      # most two, there is no shared accessor source and no host, so the name
-      # honestly falls to `extracted_clone`. The tuple unwrap must not crash
-      # on the three-element `{:{}, _, elems}` shape; the extraction still
-      # happens and compiles.
+    test "a three-tuple full block is not placeholdered; a nameable sub-block extracts instead" do
+      # `{subtotal, tax, total}` — three product names exceed the two-name
+      # object join, so the *full* block has no meaningful name and is not
+      # minted as `extracted_clone` (#375). The nameable 2-statement
+      # sub-block (`{subtotal, tax}` → `compute_subtotal_and_tax`) is what
+      # gets lifted instead. The three-tuple unwrap must not crash on the
+      # `{:{}, _, elems}` shape.
       source = """
       defmodule M do
         def a(order) do
@@ -712,9 +653,8 @@ defmodule Number42.Refactors.Ex.ExtractExpressionCloneTest do
       """
 
       out = apply_refactor(@subject, source, @on ++ [min_mass: 8])
-
-      assert out =~ "defp extracted_clone(order) do"
-      assert out =~ "extracted_clone(order)"
+      assert out =~ "defp compute_subtotal_and_tax(order) do"
+      refute out =~ "extracted_clone"
       assert_compiles(out)
       assert_idempotent(@subject, source, @on ++ [min_mass: 8])
     end

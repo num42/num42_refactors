@@ -363,6 +363,98 @@ defmodule Number42.Refactors.Ex.PromoteRepeatedPrivateHelpersTest do
     end
   end
 
+  describe "dead alias pruning" do
+    # Regression for #370: a promoted helper carried `alias Asset` usage into
+    # the support module. With the only `Asset` reference gone from the origin,
+    # the `alias` line is dead — `mix compile --warnings-as-errors` rejects it.
+    # The origin's now-unused alias must be pruned.
+    test "prunes an alias used only by the promoted helper", %{tmp: tmp} do
+      a = """
+      defmodule MyApp.Items.A do
+        alias MyApp.Asset
+
+        def caller(x), do: glb?(x)
+
+        defp glb?(%Asset{original_filename: name}) do
+          name
+          |> Path.extname()
+          |> String.downcase()
+          |> Kernel.==(".glb")
+        end
+      end
+      """
+
+      b = """
+      defmodule MyApp.Items.B do
+        alias MyApp.Asset
+
+        def caller(x), do: glb?(x)
+
+        defp glb?(%Asset{original_filename: name}) do
+          name
+          |> Path.extname()
+          |> String.downcase()
+          |> Kernel.==(".glb")
+        end
+      end
+      """
+
+      plan = prepared([{"a.ex", a}, {"b.ex", b}], write_root: tmp)
+
+      result_a = apply_refactor(@subject, a, prepared: plan, enabled: true)
+
+      refute result_a =~ "defp glb?"
+      # The origin alias is gone — it was used only by the promoted clause.
+      refute result_a =~ "alias MyApp.Asset"
+      assert result_a =~ "MyApp.Items.Support.glb?(x)"
+
+      # The support module still resolves `Asset` (qualified on promotion).
+      support_source = File.read!(Path.join(tmp, "lib/my_app/items/support.ex"))
+      assert support_source =~ "%MyApp.Asset{"
+    end
+
+    test "keeps an alias still used by surviving code", %{tmp: tmp} do
+      a = """
+      defmodule MyApp.Items.A do
+        alias MyApp.Asset
+
+        def caller(x), do: glb?(x)
+        def other(%Asset{} = a), do: a.id
+
+        defp glb?(%Asset{original_filename: name}) do
+          name
+          |> Path.extname()
+          |> String.downcase()
+          |> Kernel.==(".glb")
+        end
+      end
+      """
+
+      b = """
+      defmodule MyApp.Items.B do
+        alias MyApp.Asset
+
+        def caller(x), do: glb?(x)
+
+        defp glb?(%Asset{original_filename: name}) do
+          name
+          |> Path.extname()
+          |> String.downcase()
+          |> Kernel.==(".glb")
+        end
+      end
+      """
+
+      plan = prepared([{"a.ex", a}, {"b.ex", b}], write_root: tmp)
+
+      result_a = apply_refactor(@subject, a, prepared: plan, enabled: true)
+
+      refute result_a =~ "defp glb?"
+      # `Asset` is still referenced by `other/1`, so the alias must stay.
+      assert result_a =~ "alias MyApp.Asset"
+    end
+  end
+
   describe "skips" do
     test "single occurrence is left alone (no clone to promote)", %{tmp: tmp} do
       only = """
@@ -525,6 +617,53 @@ defmodule Number42.Refactors.Ex.PromoteRepeatedPrivateHelpersTest do
       plan = prepared([{"a.ex", a}, {"b.ex", b}], write_root: tmp)
       assert plan == %{}
       assert_unchanged(@subject, a, prepared: plan, enabled: true)
+    end
+
+    # Regression for #370: the helper is called from inside a `~H` sigil
+    # (`{pricing_label(@x)}`). Promotion deletes the local `defp` and rewrites
+    # AST call sites, but a call embedded in a HEEx template lives in the
+    # sigil's string and is invisible to the Elixir-AST walk — it would dangle
+    # as an undefined function. A helper named inside any sigil is declined.
+    test "helper called from inside a ~H sigil is skipped (in-template call can't be rewritten)",
+         %{tmp: tmp} do
+      a = """
+      defmodule MyApp.Items.A do
+        def render(assigns) do
+          ~H"\""
+          <p>{pricing_label(@item.unit)}</p>
+          "\""
+        end
+
+        defp pricing_label(unit) do
+          unit
+          |> to_string()
+          |> String.upcase()
+          |> Kernel.<>("!")
+        end
+      end
+      """
+
+      b = """
+      defmodule MyApp.Items.B do
+        def render(assigns) do
+          ~H"\""
+          <span>{pricing_label(@item.unit)}</span>
+          "\""
+        end
+
+        defp pricing_label(unit) do
+          unit
+          |> to_string()
+          |> String.upcase()
+          |> Kernel.<>("!")
+        end
+      end
+      """
+
+      plan = prepared([{"a.ex", a}, {"b.ex", b}], write_root: tmp)
+      assert plan == %{}
+      assert_unchanged(@subject, a, prepared: plan, enabled: true)
+      refute File.exists?(Path.join(tmp, "lib/my_app/items/support.ex"))
     end
 
     test "trivial helper below min_mass is not promoted", %{tmp: tmp} do
