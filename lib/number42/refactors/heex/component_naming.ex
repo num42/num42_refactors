@@ -243,10 +243,11 @@ defmodule Number42.Refactors.Heex.ComponentNaming do
   end
 
   # `bia <- @brand_item.brand_item_assets` → "brand_item_assets";
-  # `row <- @rows` → "rows". Take the RHS of `<-`, then its last `@…path` member.
+  # `entry <- @preview.new` → "preview_new"; `row <- @rows` → "rows". Take the
+  # RHS of `<-`, then qualify its last path member with the parent member.
   defp for_member_from(code) when is_binary(code) do
     with [_, rhs] <- Regex.run(~r/<-\s*(.+)$/s, code),
-         member when is_binary(member) <- last_member(rhs),
+         member when is_binary(member) <- qualified_member(rhs),
          name = String.to_atom(member),
          false <- MapSet.member?(reserved(), name) or name in @non_naming_assigns do
       member
@@ -257,11 +258,30 @@ defmodule Number42.Refactors.Heex.ComponentNaming do
 
   defp for_member_from(_), do: nil
 
-  # last dotted member of a `@a.b.c` / `@xs` expression: "c" / "xs"
-  defp last_member(rhs) do
+  # The last path member of a `@a.b.c` expression, qualified by its immediate
+  # parent so a thin/adjective sub-field still names meaningfully:
+  # `@preview.new` → "preview_new", `@rows` → "rows". The parent is dropped when
+  # the member already carries it as a prefix (`@brand_item.brand_item_assets`
+  # stays "brand_item_assets", not "brand_item_brand_item_assets").
+  defp qualified_member(rhs) do
+    case path_segments(rhs) do
+      [] -> nil
+      [only] -> only
+      segs -> qualify_with_parent(Enum.at(segs, -2), List.last(segs))
+    end
+  end
+
+  defp qualify_with_parent(parent, member) do
+    if String.starts_with?(member, parent <> "_") or member == parent,
+      do: member,
+      else: "#{parent}_#{member}"
+  end
+
+  # dotted segments of a `@a.b.c` / `@xs` expression: ["a","b","c"] / ["xs"]
+  defp path_segments(rhs) do
     case Regex.run(~r/@?([a-z_][a-zA-Z0-9_.]*)\s*$/, rhs) do
-      [_, path] -> path |> String.split(".") |> List.last()
-      _ -> nil
+      [_, path] -> String.split(path, ".")
+      _ -> []
     end
   end
 

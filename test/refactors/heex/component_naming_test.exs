@@ -124,8 +124,9 @@ defmodule Number42.Refactors.Heex.ComponentNamingTest do
       assert ComponentNaming.derive(n, []) == :brand_items_list
     end
 
-    test "names by the :for source, not the wrapper assign" do
-      # the block is about @rows (the iterated collection), not the wrapper @page
+    test "names by the :for source, qualified by its parent, not the wrapper assign" do
+      # the block is about @page.rows (the iterated collection), not the dominant
+      # frequency assign; the parent qualifies the member → page_rows
       n =
         parse(~S"""
         <table>
@@ -134,7 +135,33 @@ defmodule Number42.Refactors.Heex.ComponentNamingTest do
         </table>
         """)
 
-      assert ComponentNaming.derive(n, []) == :rows_table
+      assert ComponentNaming.derive(n, []) == :page_rows_table
+    end
+
+    test "a thin/adjective :for sub-field is qualified by its parent noun" do
+      # `@preview.new` alone reads as `new_table`; the parent makes it preview_new
+      n =
+        parse(~S"""
+        <table>
+          <thead><tr><th>A</th></tr></thead>
+          <tbody><tr :for={entry <- @preview.new}><td>{entry.a}</td></tr></tbody>
+        </table>
+        """)
+
+      assert ComponentNaming.derive(n, []) == :preview_new_table
+    end
+
+    test "the parent is dropped when the member already carries it as a prefix" do
+      # @brand_item.brand_item_assets must not stutter into brand_item_brand_item_assets
+      n =
+        parse(~S"""
+        <ul>
+          <li :for={bia <- @brand_item.brand_item_assets}>{bia.name}</li>
+          <li :for={bia <- @brand_item.brand_item_assets}>{bia.name}</li>
+        </ul>
+        """)
+
+      assert ComponentNaming.derive(n, []) == :brand_item_assets_list
     end
 
     test "a wrapped list (root is a container, not the <ul>) is named _container" do
