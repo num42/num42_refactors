@@ -291,23 +291,54 @@ defmodule Number42.Refactors.Ex.PromoteRepeatedPrivateHelpers do
 
   defp helpers_in_module(module, body_exprs, cfg) do
     aliases = collect_aliases(body_exprs)
+    sigil_called = sigil_called_names(body_exprs)
 
     body_exprs
     |> Enum.filter(&defp_clause?/1)
     |> Enum.group_by(&defp_name_arity_or_skip/1)
     |> Enum.reject(fn {key, _} -> key == :skip end)
     |> Enum.flat_map(fn {{name, arity}, clauses} ->
-      build_helper_entry(module, name, arity, clauses, aliases, cfg)
+      build_helper_entry(module, name, arity, clauses, aliases, sigil_called, cfg)
     end)
   end
 
-  defp build_helper_entry(module, name, arity, clauses, aliases, cfg) do
+  defp build_helper_entry(module, name, arity, clauses, aliases, sigil_called, cfg) do
     cond do
       total_mass(clauses) < cfg.min_mass -> []
       references_module_attr_or_reserved?(clauses) -> []
       calls_unmigratable?(clauses) -> []
+      MapSet.member?(sigil_called, name) -> []
       true -> [helper_entry(module, name, arity, clauses, aliases)]
     end
+  end
+
+  # Function names invoked as `name(...)` inside any `~H`/`~L` sigil in the
+  # module body. A promoted `defp` is deleted and its call sites rewritten by
+  # walking the Elixir AST — but a call embedded in a HEEx template
+  # (`{pricing_formula_type_label(@x)}`) lives in the sigil's *string*, invisible
+  # to that walk. Promoting such a helper would delete the `defp` and leave the
+  # in-template call dangling (undefined function, #370). We can't rewrite the
+  # in-sigil call site, so a helper named here is declined rather than promoted.
+  defp sigil_called_names(body_exprs) do
+    body_exprs
+    |> Enum.flat_map(&Macro.prewalker/1)
+    |> Enum.flat_map(fn
+      {sigil, _, [{:<<>>, _, parts}, _modifiers]}
+      when sigil in [:sigil_H, :sigil_L] ->
+        parts |> Enum.filter(&is_binary/1) |> Enum.flat_map(&local_call_names_in_string/1)
+
+      _ ->
+        []
+    end)
+    |> MapSet.new()
+  end
+
+  @local_call_re ~r/\b([a-z_][a-zA-Z0-9_]*[?!]?)\s*\(/
+
+  defp local_call_names_in_string(text) do
+    @local_call_re
+    |> Regex.scan(text)
+    |> Enum.map(fn [_, name] -> String.to_atom(name) end)
   end
 
   defp helper_entry(module, name, arity, clauses, aliases) do
@@ -459,8 +490,81 @@ defmodule Number42.Refactors.Ex.PromoteRepeatedPrivateHelpers do
 
     rewrite_patches = live_entries |> Enum.flat_map(&call_site_patches(body_exprs, &1))
     delete_patches = live_entries |> Enum.flat_map(&delete_defp_patches(body_exprs, &1))
+    alias_patches = dead_alias_patches(body_exprs, live_entries)
 
-    rewrite_patches ++ delete_patches
+    rewrite_patches ++ delete_patches ++ alias_patches
+  end
+
+  # Promoting a helper moves its body — and any alias it referenced — into the
+  # support module. If that alias is now used nowhere else in the origin, the
+  # `alias` line is dead and `mix compile --warnings-as-errors` rejects it
+  # (#370). Prune exactly those: an alias whose short name appears in a deleted
+  # clause but nowhere in the surviving body. An alias still used elsewhere, or
+  # one that was already unused before this run, is left untouched.
+  defp dead_alias_patches(body_exprs, live_entries) do
+    deleted_keys =
+      live_entries |> Enum.map(fn %{name: n, arity: a} -> {n, a} end) |> MapSet.new()
+
+    {deleted_clauses, surviving} =
+      Enum.split_with(body_exprs, fn expr ->
+        defp_clause?(expr) and MapSet.member?(deleted_keys, defp_name_arity_or_skip(expr))
+      end)
+
+    used_in_deleted = alias_short_names_used(deleted_clauses)
+    used_in_surviving = alias_short_names_used(surviving)
+
+    body_exprs
+    |> Enum.filter(&alias_node?/1)
+    |> Enum.flat_map(fn alias_node ->
+      shorts = alias_short_names(alias_node)
+
+      if shorts != [] and Enum.all?(shorts, &MapSet.member?(used_in_deleted, &1)) and
+           not Enum.any?(shorts, &MapSet.member?(used_in_surviving, &1)) do
+        delete_line_patch(alias_node)
+      else
+        []
+      end
+    end)
+  end
+
+  defp alias_node?({:alias, _, _}), do: true
+  defp alias_node?(_), do: false
+
+  # The bound short names an `alias` introduces (the `as:` name, the last
+  # segment, or each sub-alias of a `Foo.{Bar, Baz}` group).
+  defp alias_short_names({:alias, _, [{:__aliases__, _, parts}]}), do: [List.last(parts)]
+
+  defp alias_short_names({:alias, _, [{:__aliases__, _, parts}, opts]}),
+    do: [alias_as(opts) || List.last(parts)]
+
+  defp alias_short_names({:alias, _, [{{:., _, [{:__aliases__, _, _base}, :{}]}, _, subs}]}) do
+    Enum.map(subs, fn {:__aliases__, _, sub_parts} -> List.last(sub_parts) end)
+  end
+
+  defp alias_short_names(_), do: []
+
+  # Every `:__aliases__` head short-name referenced inside the given exprs —
+  # the set of alias short names actually in use there.
+  defp alias_short_names_used(exprs) do
+    exprs
+    |> Enum.reject(&alias_node?/1)
+    |> Enum.flat_map(&Macro.prewalker/1)
+    |> Enum.flat_map(fn
+      {:__aliases__, _, [head | _]} when is_atom(head) -> [head]
+      _ -> []
+    end)
+    |> MapSet.new()
+  end
+
+  # Delete the whole source line(s) of a node by blanking its range.
+  defp delete_line_patch(node) do
+    case Sourceror.get_range(node) do
+      %{start: start_pos, end: end_pos} ->
+        [%{change: "", range: %{start: start_pos, end: end_pos}}]
+
+      _ ->
+        []
+    end
   end
 
   # Skip an entry whose target `defp` was already rewritten by an earlier

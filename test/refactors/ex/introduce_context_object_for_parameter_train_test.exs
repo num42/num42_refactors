@@ -64,14 +64,16 @@ defmodule Number42.Refactors.Ex.IntroduceContextObjectForParameterTrainTest do
     end
 
     test "a train crossing two helper boundaries is bundled across both callees" do
+      # Dictionary-named train (`items`+`region`+`currency` → `Order`); an
+      # unnameable param set would be declined (no placeholder fallback).
       src = """
       defmodule Pricing do
-        def total(a, b, c) do
-          one(a, b, c) + two(a, b, c)
+        def total(items, region, currency) do
+          one(items, region, currency) + two(items, region, currency)
         end
 
-        defp one(a, b, c), do: a + b + c
-        defp two(a, b, c), do: a * b * c
+        defp one(items, region, currency), do: items + region + currency
+        defp two(items, region, currency), do: items * region * currency
       end
       """
 
@@ -79,19 +81,21 @@ defmodule Number42.Refactors.Ex.IntroduceContextObjectForParameterTrainTest do
 
       assert out =~ "defp one(%"
       assert out =~ "defp two(%"
+      assert out =~ "defmodule Order do"
       assert_compiles(out)
     end
   end
 
   describe "public wrapper mode" do
     test "a public def train keeps a backward-compat wrapper at the original arity" do
+      # Dictionary-named train (`conn`+`params`+`session` → `Request`).
       src = """
       defmodule View do
-        def show(socket, assigns, params) do
-          render(socket, assigns, params)
+        def show(conn, params, session) do
+          render(conn, params, session)
         end
 
-        def render(socket, assigns, params), do: socket + assigns + params
+        def render(conn, params, session), do: conn + params + session
       end
       """
 
@@ -99,7 +103,7 @@ defmodule Number42.Refactors.Ex.IntroduceContextObjectForParameterTrainTest do
 
       # the public callee gets the struct arity AND a forwarding wrapper
       assert out =~ "def render(%"
-      assert out =~ "def render(socket, assigns, params), do: render(%"
+      assert out =~ "def render(conn, params, session), do: render(%"
       assert_compiles(out)
     end
 
@@ -168,6 +172,26 @@ defmodule Number42.Refactors.Ex.IntroduceContextObjectForParameterTrainTest do
       """
 
       assert_unchanged(Subject, src, opts(src))
+    end
+
+    test "an unnameable param set is declined (no Context<N> placeholder)" do
+      # `a`/`b`/`c` match no dictionary entry. With no placeholder fallback
+      # (#375) the train is declined rather than bundled into `Context1`.
+      src = """
+      defmodule M do
+        def caller(a, b, c) do
+          one(a, b, c) + two(a, b, c)
+        end
+
+        defp one(a, b, c), do: a + b + c
+        defp two(a, b, c), do: a * b * c
+      end
+      """
+
+      out = Subject.transform(src, opts(src))
+      assert_unchanged(Subject, src, opts(src))
+      refute out =~ "Context"
+      refute out =~ "TODO: rename"
     end
 
     test "a framework callback arity is never bundled" do

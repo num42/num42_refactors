@@ -94,14 +94,62 @@ defmodule Number42.Refactors.Ex.ExtractToPublicComponentTest do
       assert table.free_vars == []
     end
 
-    test "classifies a motif with phx-events as a live_component" do
+    test "a motif with phx-events is classified live_component but DECLINED (#374)" do
+      # A stateful (phx-event) motif can't be auto-lifted into a public
+      # live_component safely: Phoenix needs a single static root, a
+      # guaranteed-unique `id`, and correct `update/2` assign flow, none of
+      # which a motif cut can synthesize. It is recognised as a
+      # live_component kind but declined.
       group =
         page_with_buttons()
         |> ExtractToPublicComponent.find_candidates()
         |> Enum.find(&(&1.component_kind == :live_component))
 
       assert group
-      assert group.accepted
+      refute group.accepted
+      assert group.decline =~ "live_component"
+    end
+
+    test "declines a motif whose body carries a literal id= (would duplicate on reuse, #374)" do
+      # A reusable component invoked more than once would render the same
+      # hardcoded DOM id twice → LiveView "Duplicate id found". A literal
+      # `id="…"` in the lifted body is declined; a dynamic `id={@x}` is fine.
+      src = """
+      defmodule MyAppWeb.UserListLive do
+        use MyAppWeb, :live_view
+
+        def render(assigns) do
+          ~H\"\"\"
+          <section class="page">
+            <h1>Users</h1>
+            <table id="user-table" class="data">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Email</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr :for={row <- @rows}>
+                  <td>{row.name}</td>
+                  <td>{row.email}</td>
+                </tr>
+              </tbody>
+            </table>
+          </section>
+          \"\"\"
+        end
+      end
+      """
+
+      table =
+        src
+        |> ExtractToPublicComponent.find_candidates()
+        |> Enum.find(&(&1.tag == "table"))
+
+      assert table
+      refute table.accepted
+      assert table.decline =~ "literal id"
     end
 
     test "declines a subtree with no recognised motif" do
@@ -254,10 +302,11 @@ defmodule Number42.Refactors.Ex.ExtractToPublicComponentTest do
   end
 
   describe "build_plan/2 — module + naming" do
-    test "names the module by motif under the configured namespace" do
+    test "names the module by motif qualified with the dominant assign" do
+      # data_table motif + dominant @rows assign → rows_table / RowsTable
       [plan] = build(%{"lib/a.ex" => page_with_table("rows")})
-      assert plan.name == :data_table
-      assert plan.module == "MyAppWeb.Components.DataTable"
+      assert plan.name == :rows_table
+      assert plan.module == "MyAppWeb.Components.RowsTable"
       assert plan.component_kind == :function
     end
 
@@ -300,7 +349,7 @@ defmodule Number42.Refactors.Ex.ExtractToPublicComponentTest do
       }
 
       plans = build(sources)
-      assert plans |> Enum.map(& &1.module) |> Enum.uniq() == ["MyAppWeb.Components.DataTable"]
+      assert plans |> Enum.map(& &1.module) |> Enum.uniq() == ["MyAppWeb.Components.RowsTable"]
     end
   end
 
@@ -320,11 +369,11 @@ defmodule Number42.Refactors.Ex.ExtractToPublicComponentTest do
         )
 
       refute out =~ ~s(<thead>)
-      assert out =~ "<DataTable.data_table rows={@rows} />"
-      assert out =~ "alias MyAppWeb.Components.DataTable"
+      assert out =~ "<RowsTable.rows_table rows={@rows} />"
+      assert out =~ "alias MyAppWeb.Components.RowsTable"
     end
 
-    test "rewrites a stateful occurrence to a <.live_component …/> call" do
+    test "a stateful (phx-event) occurrence is left unchanged — live_components are declined (#374)" do
       src = page_with_buttons()
       sources = %{"lib/a.ex" => src}
       plans = build(sources)
@@ -338,8 +387,9 @@ defmodule Number42.Refactors.Ex.ExtractToPublicComponentTest do
           project_config: @config
         )
 
-      assert out =~ "<.live_component module={MyAppWeb.Components.ButtonGroup}"
-      assert out =~ "id="
+      # No live_component plan survives, so the stateful motif stays put.
+      refute out =~ "<.live_component"
+      refute Enum.any?(plans, &(&1.component_kind == :live_component))
     end
 
     test "is a no-op without enabled: true" do
@@ -354,6 +404,281 @@ defmodule Number42.Refactors.Ex.ExtractToPublicComponentTest do
         )
 
       assert out == src
+    end
+  end
+
+  describe "transform/2 — caller directive cleanup after extraction" do
+    # A caller that uses `MediaUrl` ONLY inside the extracted table, plus
+    # `ValueLabels` in code OUTSIDE it. After the lift, MediaUrl is dead in the
+    # caller (it moved into the component) and must be dropped; ValueLabels is
+    # still used in code and must survive.
+    defp caller_with_mixed_directives do
+      """
+      defmodule MyAppWeb.UserListLive do
+        use MyAppWeb, :live_view
+        alias MyAppWeb.Helpers.MediaUrl
+        alias MyAppWeb.Helpers.ValueLabels
+
+        def label, do: ValueLabels.format(:x)
+
+        def render(assigns) do
+          ~H\"\"\"
+          <section class="page">
+            <h1>Users</h1>
+            <table class="data">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Link</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr :for={row <- @rows}>
+                  <td>{row.name}</td>
+                  <td><a href={MediaUrl.download_original_url(row)}>open</a></td>
+                </tr>
+              </tbody>
+            </table>
+          </section>
+          \"\"\"
+        end
+      end
+      """
+    end
+
+    test "drops an alias used only inside the extracted subtree" do
+      src = caller_with_mixed_directives()
+      plans = build(%{"lib/a.ex" => src})
+
+      out =
+        @subject.transform(src,
+          enabled: true,
+          dry_run: true,
+          prepared: %{plans: plans, source_to_file: %{src => "lib/a.ex"}},
+          project_config: @config
+        )
+
+      # MediaUrl moved into the component → dead in the caller → dropped
+      refute out =~ "alias MyAppWeb.Helpers.MediaUrl"
+    end
+
+    test "keeps an alias still used in caller code outside the subtree" do
+      src = caller_with_mixed_directives()
+      plans = build(%{"lib/a.ex" => src})
+
+      out =
+        @subject.transform(src,
+          enabled: true,
+          dry_run: true,
+          prepared: %{plans: plans, source_to_file: %{src => "lib/a.ex"}},
+          project_config: @config
+        )
+
+      # ValueLabels is referenced in `label/0` → must survive the prune
+      assert out =~ "alias MyAppWeb.Helpers.ValueLabels"
+      assert out =~ "ValueLabels.format(:x)"
+    end
+
+    test "keeps an `as:`-renamed alias still used by its `as:` name" do
+      # the prune must check the introduced name (the `as:` target), not the
+      # module's last segment: `alias Foo.Formatter, as: AssetUseFormatter` is
+      # alive while `AssetUseFormatter.x(...)` is referenced.
+      src = """
+      defmodule MyAppWeb.UserListLive do
+        use MyAppWeb, :live_view
+        alias MyAppWeb.Types.AssetUse.Formatter, as: AssetUseFormatter
+
+        @groups [{:images, AssetUseFormatter.group_label(:images)}]
+
+        def groups, do: @groups
+
+        def render(assigns) do
+          ~H\"\"\"
+          <section class="page">
+            <h1>Users</h1>
+            <table class="data">
+              <thead><tr><th>Name</th><th>X</th></tr></thead>
+              <tbody>
+                <tr :for={row <- @rows}>
+                  <td>{row.name}</td>
+                  <td>{row.x}</td>
+                </tr>
+              </tbody>
+            </table>
+          </section>
+          \"\"\"
+        end
+      end
+      """
+
+      plans = build(%{"lib/a.ex" => src})
+
+      out =
+        @subject.transform(src,
+          enabled: true,
+          dry_run: true,
+          prepared: %{plans: plans, source_to_file: %{src => "lib/a.ex"}},
+          project_config: @config
+        )
+
+      assert out =~ "as: AssetUseFormatter"
+      assert out =~ "AssetUseFormatter.group_label(:images)"
+    end
+
+    test "keeps an `import …, only:` whose function is still used as a HEEx tag" do
+      # `import …ItemRow, only: [item_row: 1]` is alive while `<.item_row>` is
+      # used outside the extracted subtree — the tag form must count as a use.
+      src = """
+      defmodule MyAppWeb.UserListLive do
+        use MyAppWeb, :live_view
+        import MyAppWeb.Components.ItemRow, only: [item_row: 1]
+
+        def render(assigns) do
+          ~H\"\"\"
+          <section class="page">
+            <h1>Users</h1>
+            <.item_row label="kept" />
+            <table class="data">
+              <thead><tr><th>Name</th><th>X</th></tr></thead>
+              <tbody>
+                <tr :for={row <- @rows}>
+                  <td>{row.name}</td>
+                  <td>{row.x}</td>
+                </tr>
+              </tbody>
+            </table>
+          </section>
+          \"\"\"
+        end
+      end
+      """
+
+      plans = build(%{"lib/a.ex" => src})
+
+      out =
+        @subject.transform(src,
+          enabled: true,
+          dry_run: true,
+          prepared: %{plans: plans, source_to_file: %{src => "lib/a.ex"}},
+          project_config: @config
+        )
+
+      assert out =~ "import MyAppWeb.Components.ItemRow, only: [item_row: 1]"
+    end
+
+    test "prunes a plain import resolved via the corpus when none of its components is used" do
+      # AssetPreview exports asset_preview + pdf_document_viewer; the caller's
+      # only use of <.asset_preview> sits inside the extracted table, so after
+      # the lift NEITHER component is used → the plain import is dead. Resolved
+      # from the corpus, not guessed from the module name.
+      preview_mod = """
+      defmodule MyAppWeb.Components.AssetPreview do
+        use MyAppWeb, :html
+        def asset_preview(assigns), do: ~H"<img src={@src} />"
+        def pdf_document_viewer(assigns), do: ~H"<object data={@url} />"
+      end
+      """
+
+      # The <.asset_preview> lives INSIDE a wrapped list block that lifts whole
+      # into its own component — so the tag (and its import) move out of the
+      # caller, leaving the import dead.
+      caller = """
+      defmodule MyAppWeb.GalleryLive do
+        use MyAppWeb, :live_view
+        import MyAppWeb.Components.AssetPreview
+
+        def render(assigns) do
+          ~H\"\"\"
+          <article class="page">
+            <h1>Gallery</h1>
+            <section class="assets">
+              <h2>Assets</h2>
+              <ul class="grid">
+                <li :for={asset <- @gallery.assets} class="cell flex flex-col gap-2">
+                  <figure class="thumb">
+                    <.asset_preview src={asset.src} size="full" />
+                  </figure>
+                  <span class="title truncate">{asset.title}</span>
+                  <a href={asset.href} class="link">open</a>
+                </li>
+              </ul>
+            </section>
+          </article>
+          \"\"\"
+        end
+      end
+      """
+
+      {:ok, prepared} =
+        @subject.prepare(
+          source_files: write_tmp(%{"asset_preview.ex" => preview_mod, "caller.ex" => caller}),
+          project_config: @config
+        )
+
+      out =
+        @subject.transform(caller,
+          enabled: true,
+          dry_run: true,
+          prepared: prepared,
+          project_config: @config
+        )
+
+      # the assets block (with <.asset_preview>) lifted out → import dead → pruned
+      refute out =~ "<.asset_preview"
+      refute out =~ "import MyAppWeb.Components.AssetPreview"
+    end
+
+    test "keeps a corpus-resolved plain import when one of its components is still used" do
+      preview_mod = """
+      defmodule MyAppWeb.Components.AssetPreview do
+        use MyAppWeb, :html
+        def asset_preview(assigns), do: ~H"<img src={@src} />"
+        def pdf_document_viewer(assigns), do: ~H"<object data={@url} />"
+      end
+      """
+
+      # <.pdf_document_viewer> sits OUTSIDE the extracted table → import alive,
+      # even though the module-name heuristic (asset_preview) would not see it.
+      caller = """
+      defmodule MyAppWeb.UserListLive do
+        use MyAppWeb, :live_view
+        import MyAppWeb.Components.AssetPreview
+
+        def render(assigns) do
+          ~H\"\"\"
+          <section class="page">
+            <h1>Users</h1>
+            <.pdf_document_viewer url={@doc} />
+            <table class="data">
+              <thead><tr><th>Name</th><th>X</th></tr></thead>
+              <tbody>
+                <tr :for={row <- @rows}>
+                  <td>{row.name}</td>
+                  <td>{row.x}</td>
+                </tr>
+              </tbody>
+            </table>
+          </section>
+          \"\"\"
+        end
+      end
+      """
+
+      {:ok, prepared} =
+        @subject.prepare(
+          source_files: write_tmp(%{"asset_preview.ex" => preview_mod, "caller.ex" => caller}),
+          project_config: @config
+        )
+
+      out =
+        @subject.transform(caller,
+          enabled: true,
+          dry_run: true,
+          prepared: prepared,
+          project_config: @config
+        )
+
+      assert out =~ "import MyAppWeb.Components.AssetPreview"
     end
   end
 
@@ -407,11 +732,11 @@ defmodule Number42.Refactors.Ex.ExtractToPublicComponentTest do
         project_config: @config
       )
 
-      path = Path.join(root, "lib/my_app_web/components/data_table.ex")
+      path = Path.join(root, "lib/my_app_web/components/rows_table.ex")
       assert File.exists?(path)
       module = File.read!(path)
 
-      assert module =~ "defmodule MyAppWeb.Components.DataTable do"
+      assert module =~ "defmodule MyAppWeb.Components.RowsTable do"
       assert module =~ "use MyAppWeb, :html"
       # alias whose name the body references is kept
       assert module =~ "alias MyAppWeb.Helpers.Formatting"
@@ -420,7 +745,7 @@ defmodule Number42.Refactors.Ex.ExtractToPublicComponentTest do
       # body has a local `<.badge>` → plain import kept (may expose it)
       assert module =~ "import MyAppWeb.TextComponents"
       assert module =~ "attr :rows"
-      assert module =~ "def data_table(assigns)"
+      assert module =~ "def rows_table(assigns)"
     end
 
     test "drops plain imports when the body has no local component tag (pure HTML)" do
@@ -466,11 +791,11 @@ defmodule Number42.Refactors.Ex.ExtractToPublicComponentTest do
         project_config: @config
       )
 
-      module = File.read!(Path.join(root, "lib/my_app_web/components/data_table.ex"))
+      module = File.read!(Path.join(root, "lib/my_app_web/components/rows_table.ex"))
       refute module =~ "import MyAppWeb.TextComponents"
     end
 
-    test "writes a stateful live_component module with update/2 + render/1" do
+    test "no live_component module is written — stateful motifs are declined (#374)" do
       src = page_with_buttons()
       root = unique_tmp_dir()
       caller = "lib/my_app_web/live/toolbar_live.ex"
@@ -486,13 +811,9 @@ defmodule Number42.Refactors.Ex.ExtractToPublicComponentTest do
         project_config: @config
       )
 
-      path = Path.join(root, "lib/my_app_web/components/button_group.ex")
-      assert File.exists?(path)
-      module = File.read!(path)
-
-      assert module =~ "use MyAppWeb, :live_component"
-      assert module =~ "def update(assigns, socket)"
-      assert module =~ "def render(assigns)"
+      # No live_component plan survives, so no module file is generated.
+      refute File.exists?(Path.join(root, "lib/my_app_web/components/button_group.ex"))
+      refute Enum.any?(plans, &(&1.component_kind == :live_component))
     end
   end
 

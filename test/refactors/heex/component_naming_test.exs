@@ -20,8 +20,9 @@ defmodule Number42.Refactors.Heex.ComponentNamingTest do
     end
 
     test "3. heading text when no semantic tag / class hint" do
+      # a headed display block → heading noun + the `_panel` functional role
       n = parse(~S|<div><h2>Order Summary</h2><p>{@a}</p></div>|)
-      assert ComponentNaming.derive(n, []) == :order_summary
+      assert ComponentNaming.derive(n, []) == :order_summary_panel
     end
 
     test "4. gettext literal when no heading" do
@@ -45,70 +46,209 @@ defmodule Number42.Refactors.Heex.ComponentNamingTest do
       assert ComponentNaming.derive(n, [:section, :section_2]) == :section_3
     end
 
-    test "semantic tag beats class hint beats heading (priority order)" do
+    test "a heading names a headed block over the bare semantic tag" do
+      # functional naming: the <h2> heading is the subject, `_panel` the role —
+      # `profile_panel` says more than the bare tag `section`
       n = parse(~S|<section class="user-card"><h2>Profile</h2><p>{@a}</p></section>|)
-      assert ComponentNaming.derive(n, []) == :section
+      assert ComponentNaming.derive(n, []) == :profile_panel
     end
   end
 
-  describe "derive/2 — structural motif (source #0)" do
-    test "a data_table shape is named by its motif, not the reserved <table> tag" do
+  describe "derive/2 — structural motif (source #0), qualified by dominant assign" do
+    test "a data_table is named {dominant_assign}_table, not the reserved <table> tag" do
       # <table> alone would name :table (a CoreComponents builtin) → :table_2;
-      # the motif names it meaningfully instead
+      # the motif gives the `_table` type word, the dominant `@entries` assign
+      # makes it mean something in this codebase
       n =
         parse(~S"""
         <table>
-          <thead><tr><th>A</th><th>B</th></tr></thead>
+          <thead><tr><th>Name</th><th>Qty</th></tr></thead>
           <tbody>
-            <tr><td>{@a}</td><td>{@b}</td></tr>
-            <tr><td>{@c}</td><td>{@d}</td></tr>
+            <tr :for={entry <- @entries}><td>{entry.name}</td><td>{entry.qty}</td></tr>
+            <tr><td>{@entries}</td><td>{@entries}</td></tr>
           </tbody>
         </table>
         """)
 
-      assert ComponentNaming.derive(n, []) == :data_table
+      assert ComponentNaming.derive(n, []) == :entries_table
     end
 
-    test "a select_field shape is named by its motif" do
+    test "a select_field is named {dominant_assign}_field" do
       n =
         parse(~S"""
         <select name="x">
-          <option>{@a}</option>
-          <option>{@b}</option>
-          <option>{@c}</option>
+          <option :for={c <- @categories}>{c.label}</option>
+          <option>{@categories}</option>
+          <option>{@categories}</option>
         </select>
         """)
 
-      assert ComponentNaming.derive(n, []) == :select_field
+      assert ComponentNaming.derive(n, []) == :categories_field
     end
 
-    test "a button_group shape beats a class hint / heading" do
-      # without the motif, the <h2> heading would name it :pick_one
+    test "a heading + button group is named {heading}_actions" do
+      # functional naming: heading noun "Pick one" + the action role (buttons,
+      # no domain :for) → pick_one_actions, beating the bare button_group motif
       n =
         parse(~S"""
         <div>
           <h2>Pick one</h2>
-          <button>{@a}</button>
-          <button>{@b}</button>
+          <button>{@actions}</button>
+          <button>{@actions}</button>
         </div>
         """)
 
-      assert ComponentNaming.derive(n, []) == :button_group
+      assert ComponentNaming.derive(n, []) == :pick_one_actions
     end
 
-    test "a card_grid shape beats the :card class hint" do
+    test "a card_grid is named {dominant_assign}_grid, beating the :card class hint" do
       # each child carries `card` → class-hint chain would name it :card;
-      # the grid-of-cards motif is the more precise name
+      # the grid-of-cards motif + dominant @products is the more precise name
       n =
         parse(~S"""
         <div>
-          <div class="card shadow"><h3>{@a}</h3></div>
-          <div class="card shadow"><h3>{@b}</h3></div>
-          <div class="card shadow"><h3>{@c}</h3></div>
+          <div class="card shadow"><h3>{@products}</h3></div>
+          <div class="card shadow"><h3>{@products}</h3></div>
+          <div class="card shadow"><h3>{@products}</h3></div>
         </div>
         """)
 
-      assert ComponentNaming.derive(n, []) == :card_grid
+      assert ComponentNaming.derive(n, []) == :products_grid
+    end
+
+    test "a <nav>-rooted :for of links is named {source}_nav" do
+      # functional naming: root <nav> → the `_nav` role; subject from the :for
+      # source @brand_items → brand_items_nav (navigation, not a bare list)
+      n =
+        parse(~S"""
+        <nav>
+          <.link :for={item <- @brand_items} navigate={item.path}>{item.label}</.link>
+          <.link navigate="/x">{@brand_items}</.link>
+        </nav>
+        """)
+
+      assert ComponentNaming.derive(n, []) == :brand_items_nav
+    end
+
+    test "names by the :for source, qualified by its parent, not the wrapper assign" do
+      # the block is about @page.rows (the iterated collection), not the dominant
+      # frequency assign; the parent qualifies the member → page_rows
+      n =
+        parse(~S"""
+        <table>
+          <thead><tr><th>A</th></tr></thead>
+          <tbody><tr :for={row <- @page.rows}><td>{row.a}</td></tr></tbody>
+        </table>
+        """)
+
+      assert ComponentNaming.derive(n, []) == :page_rows_table
+    end
+
+    test "a thin/adjective :for sub-field is qualified by its parent noun" do
+      # `@preview.new` alone reads as `new_table`; the parent makes it preview_new
+      n =
+        parse(~S"""
+        <table>
+          <thead><tr><th>A</th></tr></thead>
+          <tbody><tr :for={entry <- @preview.new}><td>{entry.a}</td></tr></tbody>
+        </table>
+        """)
+
+      assert ComponentNaming.derive(n, []) == :preview_new_table
+    end
+
+    test "the parent is dropped when the member already carries it as a prefix" do
+      # @brand_item.brand_item_assets must not stutter into brand_item_brand_item_assets
+      n =
+        parse(~S"""
+        <ul>
+          <li :for={bia <- @brand_item.brand_item_assets}>{bia.name}</li>
+          <li :for={bia <- @brand_item.brand_item_assets}>{bia.name}</li>
+        </ul>
+        """)
+
+      assert ComponentNaming.derive(n, []) == :brand_item_assets_list
+    end
+
+    test "a wrapped list (root is a container, not the <ul>) is named _container" do
+      # <section> wraps a heading + the :for-driven <ul> over @brand_item.brand_item_assets;
+      # the list is not the root, so it is a container, named by the :for source
+      n =
+        parse(~S"""
+        <section :if={@brand_item.brand_item_assets != []} class="p-2">
+          <p>Bilder</p>
+          <ul>
+            <li :for={bia <- @brand_item.brand_item_assets}>{bia.asset.name}</li>
+          </ul>
+        </section>
+        """)
+
+      assert ComponentNaming.derive(n, []) == :brand_item_assets_container
+    end
+
+    test "a bare <ul> root stays a _list (not wrapped)" do
+      n =
+        parse(~S"""
+        <ul>
+          <li :for={tag <- @tags}>{tag.label}</li>
+          <li :for={tag <- @tags}>{tag.label}</li>
+        </ul>
+        """)
+
+      assert ComponentNaming.derive(n, []) == :tags_list
+    end
+
+    test "no stutter when the collection name already ends in the type word (plural)" do
+      # @brand_price_lists + item_list must not become brand_price_lists_list
+      n =
+        parse(~S"""
+        <ul>
+          <li :for={pl <- @brand_price_lists}>{pl.name}</li>
+          <li :for={pl <- @brand_price_lists}>{pl.name}</li>
+        </ul>
+        """)
+
+      assert ComponentNaming.derive(n, []) == :brand_price_lists
+    end
+
+    test "no stutter when the collection name ends in the singular type word" do
+      n =
+        parse(~S"""
+        <ul>
+          <li :for={t <- @todo_list}>{t.label}</li>
+          <li :for={t <- @todo_list}>{t.label}</li>
+        </ul>
+        """)
+
+      assert ComponentNaming.derive(n, []) == :todo_list
+    end
+
+    test "a static group of action links is named {assign}_actions" do
+      # btn-classed <.link>s with no domain :for → the `_actions` functional role
+      # (they are action triggers, not navigation or a data list)
+      n =
+        parse(~S"""
+        <div class="space-y-2">
+          <.link navigate={"/assets/#{@asset.id}"} class="btn">Details</.link>
+          <.link href={@asset.url} class="btn">Download</.link>
+        </div>
+        """)
+
+      assert ComponentNaming.derive(n, []) == :asset_actions
+    end
+
+    test "with no usable assign the bare motif is kept" do
+      # static options, no @assign at all → nothing to qualify with → :select_field
+      n =
+        parse(~S"""
+        <select name="x">
+          <option>One</option>
+          <option>Two</option>
+          <option>Three</option>
+        </select>
+        """)
+
+      assert ComponentNaming.derive(n, []) == :select_field
     end
 
     test "an :unknown motif is transparent — the existing chain is unchanged" do
@@ -117,22 +257,22 @@ defmodule Number42.Refactors.Heex.ComponentNamingTest do
       assert ComponentNaming.derive(n, []) == :section
     end
 
-    test "a motif name is disambiguated against taken names" do
+    test "a qualified motif name is disambiguated against taken names" do
       n =
         parse(~S"""
-        <select name="x"><option>{@a}</option><option>{@b}</option></select>
+        <select name="x"><option>{@categories}</option><option>{@categories}</option></select>
         """)
 
-      assert ComponentNaming.derive(n, [:select_field]) == :select_field_2
+      assert ComponentNaming.derive(n, [:categories_field]) == :categories_field_2
     end
   end
 
   describe "derive/2 — reserved names" do
     test "a reserved semantic-tag name falls through to a meaningful source" do
-      # <footer> would name :footer (clashes with CoreComponents.footer/1); a
-      # heading is a better name than a numeric-suffixed :footer_2 anyway
+      # <footer> would name :footer (clashes with CoreComponents.footer/1); the
+      # heading "Contact Info" names the headed block → contact_info_panel
       n = parse(~S|<footer class="x"><h3>Contact Info</h3><p>{@a}</p></footer>|)
-      assert ComponentNaming.derive(n, []) == :contact_info
+      assert ComponentNaming.derive(n, []) == :contact_info_panel
     end
 
     test "a reserved name with no alternative source is suffixed, not made generic" do
@@ -154,18 +294,18 @@ defmodule Number42.Refactors.Heex.ComponentNamingTest do
       assert ComponentNaming.derive(n, [:report]) == :report_2
     end
 
-    test "a reserved name falls through past taken to the next real source" do
+    test "a headed block names from its heading + panel role" do
       n = parse(~S|<footer><h3>Order Total</h3><p>{@a}</p></footer>|)
-      assert ComponentNaming.derive(n, [:order_total]) == :order_total_2
+      assert ComponentNaming.derive(n, []) == :order_total_panel
     end
 
-    test "the dominant assign falls through a reserved name to the next assign" do
-      # @form dominates but clashes with Phoenix.Component.form/1; the next
-      # assign @collection names the component meaningfully (not :form_2)
+    test "a block containing a .form is named by the {subject}_form role" do
+      # the `<.form>` gives the `_form` functional role; @collection is the
+      # subject noun (@form clashes with the builtin) → collection_form
       n =
         parse(~S|<div><.form for={@form}>{@form}{@form}<span>{@collection}</span></.form></div>|)
 
-      assert ComponentNaming.derive(n, []) == :collection
+      assert ComponentNaming.derive(n, []) == :collection_form
     end
 
     test "all assigns reserved -> still suffix the dominant one" do

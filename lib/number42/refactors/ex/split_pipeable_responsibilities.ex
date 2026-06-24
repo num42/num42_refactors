@@ -17,18 +17,18 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilities do
       # after
       def report(order) do
         order
-        |> report_phase_1()
-        |> report_phase_2()
+        |> compute_net()
+        |> format_total()
       end
 
-      defp report_phase_1(order) do
+      defp compute_net(order) do
         subtotal = sum_lines(order)
         discount = lookup_discount(order)
         net = subtotal - discount
         net
       end
 
-      defp report_phase_2(net) do
+      defp format_total(net) do
         doubled = net * 2
         adjusted = doubled + 1
         format(adjusted)
@@ -65,30 +65,28 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilities do
   - `:min_phases` (default `3`)
   - `:max_carriers` (default `3`)
 
+  ## Naming: derive or decline (no placeholder)
+
+  Each phase must earn a *meaningful* name from what it does and produces
+  (`compute_net`, `format_total`) via `HelperNaming`. There is **no
+  `<fn>_phase_n` placeholder fallback**: a `report_phase_1 |> report_phase_2`
+  chain names nothing the original didn't and reads as machinery (#375,
+  mirrors `ExtractPipelineToFunction`). If *any* phase — including the final
+  tail phase, which has no live-out and so rarely yields a verb+object name —
+  cannot be named, the whole split is **declined**. In practice this makes
+  the refactor conservative: a body is split only when every phase has a
+  nameable result, otherwise it is left as the original straight-line body.
+
   ## Pass scope & idempotence
 
-  Every eligible function in the module is split in a single pass, into
-  its *maximally fine* partition: `group_phases/2` cuts at every clean
-  data-flow boundary at once, so a six-statement body with three
-  single-carrier phases becomes `fn_phase_1 |> fn_phase_2 |> fn_phase_3`
-  immediately — never `fn_phase_1, fn_phase_2` with `fn_phase_2` left long
-  enough to re-split into `fn_phase_2_phase_1` on a later pass.
-
-  This makes the refactor single-pass idempotent two ways over: the host
-  body is now a pipe/binding chain of `phase_n` calls (no longer a
-  multi-binding run), and each generated `phase_n` helper is already as
-  short as the `min_statements_per_phase` floor allows.
-
-  One residual case needs a guard. A *fan-in* body — many independent
-  bindings all feeding one tail expression — has a monotonically growing
-  carrier count, so under `max_carriers` only its first boundary is a
-  clean cut: the maximal partition is just two phases, leaving a long
-  tail helper. That helper, with its carriers now passed as parameters,
-  has a narrower cut profile than the same statements had in the host, so
-  a naive second pass would re-split it into `_phase_2_phase_1`. To keep
-  the fixpoint at one pass, any `defp` already named `<host>_phase_<int>`
-  is recognised as this refactor's own output and never re-split. A
-  re-run is a no-op.
+  Every eligible function is split in a single pass into its *maximally
+  fine* partition: `group_phases/2` cuts at every clean data-flow boundary
+  at once, so a body that splits becomes a flat pipe/binding chain of named
+  phase helpers, each already as short as the `min_statements_per_phase`
+  floor allows. A re-run finds the host is now a chain and the helpers are
+  minimal, so it is a no-op. As a defensive backstop a `defp` already named
+  `<host>_phase_<int>` (legacy output from before the naming gate) is never
+  re-split.
 
   ## Default-OFF (opt-in only)
 
@@ -196,6 +194,7 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilities do
          {:ok, plan} <- plan_phases(phases, param_set, fn_name, existing_names) do
       build_split(def_node, plan, def_node)
     else
+      :decline -> []
       _ -> []
     end
   end
@@ -312,43 +311,35 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilities do
   # two phases never collide; a phase HelperNaming can't name (no verb,
   # no meaningful live-out — typical of the final tail phase) falls back
   # to `<fn>_phase_n`.
+  # Each phase must earn a *meaningful* name from what it does and produces
+  # (`fetch_brands`, `compute_totals`). There is no `<fn>_phase_n`
+  # placeholder fallback: a chain of `report_phase_1 |> report_phase_2`
+  # names nothing the original didn't and reads as machinery (#375, mirrors
+  # `ExtractPipelineToFunction`). If *any* phase can't be named, the whole
+  # split is **declined** — a partition no one can name reads better as the
+  # original straight-line body.
   defp plan_phases(phases, param_set, fn_name, existing_names) do
     indexed = Enum.with_index(phases, 1)
     written_before = writes_before(phases)
 
-    {plan, _taken} =
-      Enum.map_reduce(indexed, existing_names, fn {phase, n}, taken ->
-        params = phase_params(phase, n, param_set, written_before)
-        live_out = phase_live_out(phase, phases, n)
-        stmts = Enum.map(phase, & &1.ast)
-        helper = phase_helper_name(fn_name, n, live_out, stmts, params, taken)
+    Enum.reduce_while(indexed, {[], existing_names}, fn {phase, n}, {acc, taken} ->
+      params = phase_params(phase, n, param_set, written_before)
+      live_out = phase_live_out(phase, phases, n)
+      stmts = Enum.map(phase, & &1.ast)
 
-        {%{helper: helper, params: params, live_out: live_out, stmts: stmts},
-         MapSet.put(taken, helper)}
-      end)
+      case HelperNaming.name(fn_name, live_out, stmts, params, taken, fallback: :none) do
+        {:ok, helper} ->
+          entry = %{helper: helper, params: params, live_out: live_out, stmts: stmts}
+          {:cont, {[entry | acc], MapSet.put(taken, helper)}}
 
-    {:ok, plan}
-  end
-
-  defp phase_helper_name(fn_name, n, live_out, stmts, params, taken) do
-    # When ExtractFunctionFromBlock ran first the host is already
-    # `<x>_block`; appending `_phase_n` would double the suffix into
-    # `<x>_block_phase_n`. Strip a trailing `_block` so the fallback reads
-    # `<x>_phase_n`.
-    fallback = HelperNaming.suffixed(strip_block_suffix(fn_name), "_phase_#{n}")
-
-    case HelperNaming.name(fn_name, live_out, stmts, params, taken, fallback: fallback) do
-      {:ok, name} -> name
-      :skip -> fallback
+        :skip ->
+          {:halt, :decline}
+      end
+    end)
+    |> case do
+      :decline -> :decline
+      {plan, _taken} -> {:ok, Enum.reverse(plan)}
     end
-  end
-
-  # `add_nodes_block` → `add_nodes`, `verify_block!` → `verify!`. Only a
-  # `_block` token immediately before an optional `!`/`?` marker is
-  # stripped; an unrelated `_block` elsewhere in the name is left alone.
-  @block_suffix ~r/_block([!?]?)$/
-  defp strip_block_suffix(fn_name) do
-    fn_name |> Atom.to_string() |> String.replace(@block_suffix, "\\1") |> String.to_atom()
   end
 
   # Names available to phase n as inputs: original params + everything

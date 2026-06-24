@@ -83,21 +83,39 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunction do
   ## Default-OFF (opt-in only)
 
   Disabled by default — both `prepare/1` and `transform/2` are no-ops
-  unless its own opts carry `enabled: true`. A dogfood run against
-  position-db surfaced two unsafe move classes the envy metric does not
-  catch:
+  unless its own opts carry `enabled: true`. Relocating a function across
+  a module boundary is an architectural move: even a *safe* relocation is
+  a design judgement (does this function genuinely belong in the target?),
+  so it stays opt-in for review rather than running unattended.
 
-    * **Multi-clause functions with literal/pattern heads** — e.g.
-      `handle_event("reseed", …)` / `handle_event("clear_all_data", …)`
-      collapse into a single `defdelegate handle_event(arg, …)`, erasing
-      the per-event clause routing.
-    * **Framework callbacks** (`handle_event`, `mount`, `render`,
-      `handle_info`, …) relocated into a plain context module that lacks
-      the `use …, :live_view` providing `put_flash/3`, `push_navigate/2`,
-      the `~p` sigil, etc. — the target no longer compiles.
+  A dogfood run against position-db surfaced four unsafe move classes the
+  raw envy metric does not catch — all now hard-declined:
 
-  Enable per project once the metric also skips multi-clause/pattern
-  heads and framework callbacks:
+    * **Framework callbacks** (`handle_event/3`, `mount/3`, `render/1`,
+      `handle_info/2`, …) — arity is externally imposed and the body needs
+      the host's `use …, :live_view` / `use GenServer` context. Relocated
+      into a plain module they no longer compile. Declined by
+      `{name, arity}` (`@framework_callbacks`).
+    * **Infra-module targets** — a function calling `Repo.get_by(Asset, …)`
+      twice envies `Repo` by reference count, but a `use Ecto.Repo`
+      module is a data-access boundary, not a domain home. Any target that
+      `use`s a framework/infra macro (`@infra_use_prefixes`) is declined.
+    * **Host-only imported macros** — a body using `from(e in schema, …)`
+      relies on the host's `import Ecto.Query`. If the target lacks that
+      import the relocated body fails to compile (`undefined variable "e"`).
+      Declined when the host has imports the target does not and the body
+      makes any unqualified non-Kernel call.
+    * **Unreachable target file** — the def is appended to the target's
+      *actual* on-disk path, not the path guessed from its module name (a
+      Phoenix `live/` subdir is absent from the name). If the real file
+      can't be located, the relocation is dropped entirely — never a
+      `defdelegate` to a function the target does not define.
+
+  Multi-clause functions (e.g. a `sort_rows/5` with literal/pattern heads)
+  relocate as **one whole block**: every clause of the `{name, arity}`
+  group moves together, guards intact, and the host keeps a single
+  arity-correct `defdelegate`. Enable per project after reviewing the
+  dry-run diff:
 
       configured_modules: [
         {Number42.Refactors.Ex.RelocateMisplacedFunction, enabled: true}
@@ -116,6 +134,59 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunction do
   # only bodies that genuinely *work with* B's data qualify; teams can
   # tune it via `min_envy_refs:` in opts.
   @default_min_envy_refs 2
+
+  # Framework/OTP/Phoenix callbacks whose `{name, arity}` is fixed by an
+  # external contract and which need the `use ..., :live_view` / `use
+  # GenServer` context (`put_flash/3`, `~p`, `assign/3`, …) of their host.
+  # Relocating one into a plain context module silently strips that
+  # context and the target no longer compiles (#373). Never a candidate.
+  @framework_callbacks MapSet.new([
+                         {:mount, 1},
+                         {:mount, 3},
+                         {:render, 1},
+                         {:update, 2},
+                         {:handle_event, 3},
+                         {:handle_params, 3},
+                         {:handle_info, 2},
+                         {:handle_call, 3},
+                         {:handle_cast, 2},
+                         {:handle_continue, 2},
+                         {:init, 1},
+                         {:terminate, 2},
+                         {:code_change, 3},
+                         {:call, 2}
+                       ])
+
+  # `use`d macros that mark a module as framework/infrastructure rather
+  # than a domain home. A function calling `Repo.get_by(Asset, …)` envies
+  # `Repo` by raw reference count, but it does not *belong in* `Repo` —
+  # `Repo` is a data-access boundary with no domain home for the body,
+  # and appending the def there is both meaningless and (for a generated
+  # `use Ecto.Repo` module) a guarantee of breakage (#373). A module that
+  # `use`s any of these is never a relocation target.
+  # Special forms / always-available macros that `collect_calls_in_clauses`
+  # may surface but that need no import and resolve identically anywhere.
+  @kernel_special_forms ~w(if unless cond case with for try receive fn
+                           raise reraise throw to_string to_charlist
+                           tap then send self spawn make_ref)a
+
+  @infra_use_prefixes [
+    "Ecto.Repo",
+    "Phoenix.Endpoint",
+    "Phoenix.Router",
+    "Phoenix.Channel",
+    "Phoenix.Presence",
+    "Phoenix.LiveDashboard",
+    "Supervisor",
+    "DynamicSupervisor",
+    "Application",
+    "GenServer",
+    "GenStage",
+    "Agent",
+    "Task.Supervisor",
+    "Oban.Worker",
+    "Swoosh.Mailer"
+  ]
 
   @type relocation :: %{
           aliases: %{atom() => module()},
@@ -208,22 +279,77 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunction do
 
   defp do_build_plan(relevant, all_sources, write_root, dry_run?, min_envy_refs) do
     modules = collect_modules(relevant)
-    paths = source_paths(all_sources)
+    target_paths = module_path_index(all_sources)
 
-    relocations =
+    candidates =
       relevant
       |> Enum.flat_map(&candidate_relocations(&1, modules, min_envy_refs))
       |> Enum.filter(&safe_relocation?(&1, modules, all_sources))
+      # The relocated def must land in the target's *actual* file. If that
+      # file can't be located on disk, the move can't complete — drop it so
+      # no host delegate to a non-existent target function is emitted (#373).
+      |> Enum.filter(&Map.has_key?(target_paths, &1.target))
 
-    unless dry_run? do
-      relocations
-      |> Enum.group_by(& &1.target)
-      |> Enum.each(fn {target, relocs} ->
-        append_to_target(target, relocs, write_root, paths)
-      end)
-    end
+    # A relocation survives only if its def is actually written into the
+    # target (dry-run: assume success). A delegate is emitted ONLY for
+    # relocations whose def landed — never a delegate to a function the
+    # target does not define.
+    relocations =
+      if dry_run? do
+        candidates
+      else
+        candidates
+        |> Enum.group_by(& &1.target)
+        |> Enum.flat_map(fn {target, relocs} ->
+          path = resolve_path(Map.fetch!(target_paths, target), write_root)
+
+          case append_to_target(target, relocs, path) do
+            :ok -> relocs
+            :error -> []
+          end
+        end)
+      end
 
     build_module_plan(relocations)
+  end
+
+  # `module => its actual on-disk path`. The relocation target's file must
+  # be found by where it really lives, not by the standard layout guessed
+  # from the module name — a Phoenix `live/` (or any non-conventional) subdir
+  # is absent from the module name, so `shared_module_path/3` would point at a
+  # path that does not exist and the append would silently no-op (#373).
+  defp module_path_index(sources) do
+    sources
+    |> Enum.flat_map(fn {path, source} ->
+      case Sourceror.parse_string(source) do
+        {:ok, ast} -> ast |> module_names_in_ast() |> Enum.map(&{&1, path})
+        {:error, _} -> []
+      end
+    end)
+    |> Map.new()
+  end
+
+  # A source path is taken as-is when absolute (production: real on-disk
+  # paths). A relative path is resolved under `write_root` — the test setup
+  # materialises sources at `Path.join(write_root, rel_path)` and passes the
+  # relative path in the source tuples.
+  defp resolve_path(path, write_root) do
+    if Path.type(path) == :absolute, do: path, else: Path.join(write_root, path)
+  end
+
+  defp module_names_in_ast(ast) do
+    ast
+    |> Macro.prewalker()
+    |> Enum.flat_map(fn
+      {:defmodule, _, [name_ast, _]} ->
+        case alias_to_module(name_ast) do
+          {:ok, mod} -> [mod]
+          :error -> []
+        end
+
+      _ ->
+        []
+    end)
   end
 
   # Per-module index of everything we need to reason about a module:
@@ -261,9 +387,51 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunction do
       attr_names: attr_names(body_exprs),
       body_exprs: body_exprs,
       function_keys: function_keys(body_exprs),
+      imports: imported_modules(body_exprs),
+      infra?: infra_module?(body_exprs),
       module: module
     }
   end
+
+  # The set of modules brought into scope via `import` (and `use`, which
+  # commonly imports a DSL). Used to prove a relocated body's unqualified
+  # macro/function calls — `from`/`where` from `import Ecto.Query`,
+  # `field`/`belongs_to` from `use Ecto.Schema` — still resolve in the
+  # target. A body needing a host-only import is declined (#373).
+  defp imported_modules(body_exprs) do
+    body_exprs
+    |> Enum.flat_map(fn
+      {directive, _, [mod_ast | _]} when directive in [:import, :use] ->
+        case mod_ast do
+          {:__aliases__, _, parts} when is_list(parts) -> [Module.concat(parts)]
+          mod when is_atom(mod) -> [mod]
+          _ -> []
+        end
+
+      _ ->
+        []
+    end)
+    |> MapSet.new()
+  end
+
+  # A module is infrastructure (not a relocation home) when its body `use`s
+  # a framework/data-access macro — `use Ecto.Repo`, `use GenServer`,
+  # `use Phoenix.Endpoint`, … A function that envies such a module by
+  # reference count merely *uses* its API; it does not belong inside it.
+  defp infra_module?(body_exprs) do
+    body_exprs
+    |> Enum.any?(fn
+      {:use, _, [mod_ast | _]} -> infra_use_target?(mod_ast)
+      _ -> false
+    end)
+  end
+
+  defp infra_use_target?({:__aliases__, _, parts}) when is_list(parts) do
+    name = Enum.map_join(parts, ".", &Atom.to_string/1)
+    Enum.any?(@infra_use_prefixes, &(name == &1 or String.ends_with?(name, "." <> &1)))
+  end
+
+  defp infra_use_target?(_), do: false
 
   # ── Candidate detection (the envy metric) ────────────────────────
 
@@ -302,7 +470,8 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunction do
     aliases = host_info.aliases
     host_attrs = host_info.attr_names
 
-    with :ok <- references_only_other_modules(def_info, sibling_keys),
+    with :ok <- not_framework_callback(def_info),
+         :ok <- references_only_other_modules(def_info, sibling_keys),
          :ok <- no_host_internals(def_info, host_attrs),
          {:ok, target} <- envied_target(def_info, aliases, host, min_envy_refs),
          {:ok, delegate_args} <- plain_delegate_args(def_info) do
@@ -310,6 +479,7 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunction do
         %{
           aliases: aliases,
           arity: def_info.arity,
+          calls: def_info.calls,
           clauses: def_info.clauses,
           delegate_args: delegate_args,
           host: host,
@@ -320,6 +490,13 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunction do
     else
       _ -> []
     end
+  end
+
+  # A framework/OTP callback has an externally-imposed arity and depends on
+  # the host's `use ..., :live_view` / `use GenServer` context. It can never
+  # be relocated into a plain target module (#373).
+  defp not_framework_callback(%{name: name, arity: arity}) do
+    if MapSet.member?(@framework_callbacks, {name, arity}), do: :skip, else: :ok
   end
 
   # No local call into a sibling def/defp of the host.
@@ -428,6 +605,8 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunction do
 
   defp safe_relocation?(reloc, modules, all_sources) do
     with {:ok, target_info} <- fetch_target(modules, reloc.target),
+         :ok <- target_is_domain_module(target_info),
+         :ok <- imports_compatible(reloc, modules, target_info),
          :ok <- no_name_clash(reloc, target_info),
          :ok <- no_cycle(reloc, target_info),
          :ok <- no_dynamic_call_site(reloc, all_sources) do
@@ -438,6 +617,51 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunction do
   end
 
   defp fetch_target(modules, target), do: Map.fetch(modules, target)
+
+  # The target must be a domain home, not framework/infra. A `use Ecto.Repo`
+  # module exposes `get_by`/`all`/… that callers envy by reference count, but
+  # appending a domain function into it is meaningless and, for a generated
+  # module, uncompilable (#373).
+  defp target_is_domain_module(%{infra?: true}), do: :skip
+  defp target_is_domain_module(_), do: :ok
+
+  # The moved body's unqualified calls must still resolve in the target. A
+  # call like `from(e in schema, …)` is the `Ecto.Query.from/1` macro, in
+  # scope only because the *host* does `import Ecto.Query`. If the host
+  # imports/uses modules the target does not, and the body makes any
+  # unqualified call that is not a plain Kernel form, that call may be a
+  # macro/function the target can't see — the relocated body would not
+  # compile (`undefined variable "e"`, #373). Decline rather than guess
+  # which import each unqualified call needs.
+  defp imports_compatible(%{host: host, calls: calls}, modules, target_info) do
+    host_imports = host_imports(modules, host)
+    missing = MapSet.difference(host_imports, target_info.imports)
+
+    cond do
+      MapSet.size(missing) == 0 -> :ok
+      not Enum.any?(calls, &unqualified_nonkernel_call?/1) -> :ok
+      true -> :skip
+    end
+  end
+
+  defp host_imports(modules, host) do
+    case Map.get(modules, host) do
+      %{imports: imports} -> imports
+      _ -> MapSet.new()
+    end
+  end
+
+  # `def_info.calls` holds `{name, arity}` of unqualified calls in the body
+  # (remote/qualified calls are excluded by `collect_calls_in_clauses`). A
+  # call is import-dependent unless it is a Kernel builtin always in scope.
+  defp unqualified_nonkernel_call?({name, arity}) do
+    not kernel_builtin?(name, arity)
+  end
+
+  defp kernel_builtin?(name, arity) do
+    macro_exported?(Kernel, name, arity) or function_exported?(Kernel, name, arity) or
+      name in @kernel_special_forms
+  end
 
   defp no_name_clash(%{arity: arity, name: name}, target_info) do
     if MapSet.member?(target_info.function_keys, {name, arity}), do: :skip, else: :ok
@@ -766,18 +990,27 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunction do
 
   # ── Disk side-effect: append relocated functions to target file ──
 
-  defp append_to_target(target, relocs, write_root, source_paths) do
-    path = shared_module_path(target, write_root, source_paths)
-
-    with true <- File.exists?(path),
-         {:ok, source} <- File.read(path),
+  # Append the relocated defs to the target's real file. Returns `:ok` when
+  # the target is materialised with the functions (already-present counts as
+  # success — idempotence), `:error` when the file can't be read/parsed or
+  # the target module isn't found in it. The caller emits the host delegate
+  # ONLY on `:ok`, so a delegate is never left pointing at a target the def
+  # didn't reach (#373).
+  defp append_to_target(target, relocs, path) do
+    with {:ok, source} <- File.read(path),
          {:ok, ast} <- Sourceror.parse_string(source),
-         {:ok, body} <- find_module_body(ast, target),
-         new_relocs when new_relocs != [] <- not_yet_present(relocs, body) do
-      rendered = render_relocations(new_relocs)
-      File.write!(path, splice_before_module_end(source, rendered))
+         {:ok, body} <- find_module_body(ast, target) do
+      case not_yet_present(relocs, body) do
+        [] ->
+          :ok
+
+        new_relocs ->
+          rendered = render_relocations(new_relocs)
+          File.write!(path, splice_before_module_end(source, rendered))
+          :ok
+      end
     else
-      _ -> :ok
+      _ -> :error
     end
   end
 
@@ -973,8 +1206,6 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunction do
     normalized = String.trim_leading(path, "./")
     @excluded_path_prefixes |> Enum.any?(&String.starts_with?(normalized, &1))
   end
-
-  defp source_paths(sources), do: sources |> Enum.map(fn {path, _src} -> path end)
 
   # ── prepare/1 wiring ─────────────────────────────────────────────
 
