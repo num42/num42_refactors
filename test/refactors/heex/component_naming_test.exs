@@ -20,8 +20,9 @@ defmodule Number42.Refactors.Heex.ComponentNamingTest do
     end
 
     test "3. heading text when no semantic tag / class hint" do
+      # a headed display block → heading noun + the `_panel` functional role
       n = parse(~S|<div><h2>Order Summary</h2><p>{@a}</p></div>|)
-      assert ComponentNaming.derive(n, []) == :order_summary
+      assert ComponentNaming.derive(n, []) == :order_summary_panel
     end
 
     test "4. gettext literal when no heading" do
@@ -45,9 +46,11 @@ defmodule Number42.Refactors.Heex.ComponentNamingTest do
       assert ComponentNaming.derive(n, [:section, :section_2]) == :section_3
     end
 
-    test "semantic tag beats class hint beats heading (priority order)" do
+    test "a heading names a headed block over the bare semantic tag" do
+      # functional naming: the <h2> heading is the subject, `_panel` the role —
+      # `profile_panel` says more than the bare tag `section`
       n = parse(~S|<section class="user-card"><h2>Profile</h2><p>{@a}</p></section>|)
-      assert ComponentNaming.derive(n, []) == :section
+      assert ComponentNaming.derive(n, []) == :profile_panel
     end
   end
 
@@ -83,8 +86,9 @@ defmodule Number42.Refactors.Heex.ComponentNamingTest do
       assert ComponentNaming.derive(n, []) == :categories_field
     end
 
-    test "a button_group is named {dominant_assign}_group, beating a class hint / heading" do
-      # without the motif, the <h2> heading would name it :pick_one
+    test "a heading + button group is named {heading}_actions" do
+      # functional naming: heading noun "Pick one" + the action role (buttons,
+      # no domain :for) → pick_one_actions, beating the bare button_group motif
       n =
         parse(~S"""
         <div>
@@ -94,7 +98,7 @@ defmodule Number42.Refactors.Heex.ComponentNamingTest do
         </div>
         """)
 
-      assert ComponentNaming.derive(n, []) == :actions_group
+      assert ComponentNaming.derive(n, []) == :pick_one_actions
     end
 
     test "a card_grid is named {dominant_assign}_grid, beating the :card class hint" do
@@ -112,7 +116,9 @@ defmodule Number42.Refactors.Heex.ComponentNamingTest do
       assert ComponentNaming.derive(n, []) == :products_grid
     end
 
-    test "a nav_list is named {dominant_assign}_list" do
+    test "a <nav>-rooted :for of links is named {source}_nav" do
+      # functional naming: root <nav> → the `_nav` role; subject from the :for
+      # source @brand_items → brand_items_nav (navigation, not a bare list)
       n =
         parse(~S"""
         <nav>
@@ -121,7 +127,7 @@ defmodule Number42.Refactors.Heex.ComponentNamingTest do
         </nav>
         """)
 
-      assert ComponentNaming.derive(n, []) == :brand_items_list
+      assert ComponentNaming.derive(n, []) == :brand_items_nav
     end
 
     test "names by the :for source, qualified by its parent, not the wrapper assign" do
@@ -217,7 +223,9 @@ defmodule Number42.Refactors.Heex.ComponentNamingTest do
       assert ComponentNaming.derive(n, []) == :todo_list
     end
 
-    test "a static link group is named {assign}_links, not _container/_group" do
+    test "a static group of action links is named {assign}_actions" do
+      # btn-classed <.link>s with no domain :for → the `_actions` functional role
+      # (they are action triggers, not navigation or a data list)
       n =
         parse(~S"""
         <div class="space-y-2">
@@ -226,7 +234,7 @@ defmodule Number42.Refactors.Heex.ComponentNamingTest do
         </div>
         """)
 
-      assert ComponentNaming.derive(n, []) == :asset_links
+      assert ComponentNaming.derive(n, []) == :asset_actions
     end
 
     test "with no usable assign the bare motif is kept" do
@@ -261,10 +269,10 @@ defmodule Number42.Refactors.Heex.ComponentNamingTest do
 
   describe "derive/2 — reserved names" do
     test "a reserved semantic-tag name falls through to a meaningful source" do
-      # <footer> would name :footer (clashes with CoreComponents.footer/1); a
-      # heading is a better name than a numeric-suffixed :footer_2 anyway
+      # <footer> would name :footer (clashes with CoreComponents.footer/1); the
+      # heading "Contact Info" names the headed block → contact_info_panel
       n = parse(~S|<footer class="x"><h3>Contact Info</h3><p>{@a}</p></footer>|)
-      assert ComponentNaming.derive(n, []) == :contact_info
+      assert ComponentNaming.derive(n, []) == :contact_info_panel
     end
 
     test "a reserved name with no alternative source is suffixed, not made generic" do
@@ -286,18 +294,18 @@ defmodule Number42.Refactors.Heex.ComponentNamingTest do
       assert ComponentNaming.derive(n, [:report]) == :report_2
     end
 
-    test "a reserved name falls through past taken to the next real source" do
+    test "a headed block names from its heading + panel role" do
       n = parse(~S|<footer><h3>Order Total</h3><p>{@a}</p></footer>|)
-      assert ComponentNaming.derive(n, [:order_total]) == :order_total_2
+      assert ComponentNaming.derive(n, []) == :order_total_panel
     end
 
-    test "the dominant assign falls through a reserved name to the next assign" do
-      # @form dominates but clashes with Phoenix.Component.form/1; the next
-      # assign @collection names the component meaningfully (not :form_2)
+    test "a block containing a .form is named by the {subject}_form role" do
+      # the `<.form>` gives the `_form` functional role; @collection is the
+      # subject noun (@form clashes with the builtin) → collection_form
       n =
         parse(~S|<div><.form for={@form}>{@form}{@form}<span>{@collection}</span></.form></div>|)
 
-      assert ComponentNaming.derive(n, []) == :collection
+      assert ComponentNaming.derive(n, []) == :collection_form
     end
 
     test "all assigns reserved -> still suffix the dominant one" do

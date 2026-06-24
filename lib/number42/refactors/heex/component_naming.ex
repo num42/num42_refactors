@@ -88,11 +88,18 @@ defmodule Number42.Refactors.Heex.ComponentNaming do
   def derive(node, taken \\ []) do
     taken = MapSet.new(taken)
 
-    # the naming sources in priority order; the dominant-assign source expands to
-    # ALL assigns by descending frequency so a reserved top assign (`@form`) can
-    # fall through to the next meaningful one (`@collection`) instead of `form_2`
+    # PRIMARY: a functional name = `{noun}_{functional_suffix}`, where the noun
+    # comes from the heading / assign-path leaf / class noun (NOT the bare
+    # dominant assign) and the suffix is the block's functional role (`_panel`,
+    # `_alert`, `_selector`, `_actions`, ...), NOT its structural tag. Measured
+    # to match hand-picked names far better than the motif chain below; see
+    # `compose_functional_name/1`.
+    #
+    # FALLBACK: the structural motif / tag / class / heading / assign chain, used
+    # only when the functional source declines (no usable noun).
     candidates =
       ([
+         compose_functional_name(node),
          motif_name(node),
          semantic_name(node),
          class_hint_name(node),
@@ -158,7 +165,271 @@ defmodule Number42.Refactors.Heex.ComponentNaming do
     |> Enum.reduce(&MapSet.union/2)
   end
 
-  # ---- sources -------------------------------------------------------------
+  # ---- functional naming (primary) -----------------------------------------
+
+  # A functional name = `{noun}_{suffix}`: the noun the block is *about* + the
+  # role it *plays*. Fires only when it has REAL signal — a heading/class/`:for`
+  # noun, or a distinctive (non-panel) functional role — so a block named only
+  # by a weak dominant assign with no role falls through to the structural
+  # chain, which handles semantic tags/motifs better. Returns nil to decline.
+  defp compose_functional_name(node) do
+    strong_noun = heading_noun(node) || path_leaf_noun(node) || class_noun(node)
+    suffix = functional_suffix(node)
+    # `_panel`/`_list`/`_table` are weak roles the structural motif expresses at
+    # least as well (it also knows `_container`/`_grid`/`_field`). A *distinctive*
+    # role (`_alert`/`_selector`/`_form`/`_actions`/`_nav`/`_header`/`_images`)
+    # has no motif equivalent, so it wins even over a strong motif.
+    distinctive_suffix = suffix not in [nil, "panel", "list", "table"]
+
+    cond do
+      # a distinctive functional role → it names the block, with the best noun
+      distinctive_suffix ->
+        compose_noun_suffix(strong_noun || assign_noun(node), suffix)
+
+      # a real heading/class/`:for` noun AND the motif has no opinion → use the
+      # noun as a headed display block
+      strong_noun != nil and motif_name(node) == nil ->
+        compose_noun_suffix(strong_noun, suffix)
+
+      # otherwise defer to the structural motif — it owns the weak/structural
+      # suffixes (`_container`/`_grid`/`_field`/`_list`/`_table`)
+      true ->
+        nil
+    end
+  end
+
+  # Join noun + suffix, but drop the suffix when the noun already ends in it
+  # (singular or plural) so `manufacturers` + `list` stays `manufacturers_list`
+  # but `price_lists` + `list` does not become `price_lists_list`. A nil suffix
+  # (a bare display block with no distinctive role) keeps just the noun.
+  # no noun at all (a distinctive role on a node with no nameable assign) → use
+  # the role word itself (`actions`, `alert`) rather than the generic fallback.
+  defp compose_noun_suffix(nil, nil), do: @fallback
+  defp compose_noun_suffix(nil, suffix), do: String.to_atom(suffix)
+  defp compose_noun_suffix(noun, nil), do: String.to_atom(noun)
+
+  defp compose_noun_suffix(noun, suffix) do
+    if suffix_redundant?(noun, suffix),
+      do: String.to_atom(noun),
+      else: String.to_atom("#{noun}_#{suffix}")
+  end
+
+  # ---- noun stem: ranked chain (heading → path-leaf → class → assign) -------
+
+  # generic single-word headings that are column/section labels, not the
+  # component subject — they must not win the noun, so the chain falls through
+  @generic_headings ~w(typ type bilder images attribute attributes schlüssel
+                       schluessel key wert value name bezeichnung label preis
+                       price details detail info)
+
+  # N1: the first heading/legend text, slugified as-is (German kept — an honest
+  # `dokumentationsbilder` beats a fragile dictionary). A single generic word
+  # (a column/section label) does not qualify.
+  defp heading_noun(node) do
+    case heading_text(node) do
+      nil -> nil
+      text -> text |> slug_to_atom() |> reject_generic()
+    end
+  end
+
+  defp reject_generic(nil), do: nil
+
+  defp reject_generic(atom) do
+    s = Atom.to_string(atom)
+    if s in @generic_headings, do: nil, else: s
+  end
+
+  # the first heading-ish text in the subtree: h1–h6, `<.header>`, `<legend>`,
+  # or a `<p>`/`<span>` whose class marks it a heading (`fixating`/`announcing`).
+  defp heading_text(node) do
+    Tree.walk(node, nil, fn
+      {:element, t, _attrs, ch, _}, acc when t in ~w(h1 h2 h3 h4 h5 h6 .header legend) ->
+        acc || deep_text(ch)
+
+      _o, acc ->
+        acc
+    end)
+  end
+
+  # N2: the assign-path leaf — `@preview.new` → "preview_new",
+  # `@usages.manufacturers` → "manufacturers". The block's `:for` source is the
+  # subject when present (`qualified_member` already takes the path leaf and
+  # de-stutters against its parent). A non-`:for` path leaf is left to N5 for
+  # now (the measured cases all carry a `:for`).
+  defp path_leaf_noun(node), do: for_source_name(node)
+
+  # N3: a recognised UI class noun used as the block's identity
+  # (`breadcrumb`/`dock`/`card`...). Pure layout/structure classes (`grid`,
+  # `row`, `cell`, `item`, `list`) are NEVER a subject noun — they describe the
+  # arrangement, not the thing — so they are excluded here (they still feed the
+  # suffix ladder and the motif).
+  @non_noun_classes ~w(grid row cell item list)a
+  defp class_noun(node) do
+    case class_hint_name(node) do
+      nil -> nil
+      atom when atom in @non_noun_classes -> nil
+      atom -> Atom.to_string(atom)
+    end
+  end
+
+  # N5: the root dominant assign as the noun, last resort (`@asset` → "asset",
+  # `@mass` → "mass" — the subject IS the assign).
+  defp assign_noun(node) do
+    case dominant_assign(node) do
+      nil -> nil
+      assign -> assign
+    end
+  end
+
+  # ---- functional suffix: role ladder, top-down -----------------------------
+
+  # The block's functional role as a suffix, evaluated most-specific first. nil
+  # = a plain headed display block with no distinctive role (the noun stands
+  # alone, or `compose` may leave it bare).
+  defp functional_suffix(node) do
+    sig = role_signals(node)
+
+    cond do
+      sig.alert -> "alert"
+      sig.selector -> "selector"
+      sig.form -> "form"
+      sig.actions -> "actions"
+      sig.nav -> "nav"
+      sig.header -> "header"
+      sig.grid -> "grid"
+      sig.table -> "table"
+      sig.images -> "images"
+      sig.list -> "list"
+      # a headed display block with no distinctive role reads as a panel
+      sig.headed -> "panel"
+      true -> nil
+    end
+  end
+
+  defp role_signals(node) do
+    classes = all_classes(node)
+    tags = all_tags(node)
+    {:element, root_tag, _ra, _rc, _} = ensure_element(node)
+    domain_for? = for_source_name(node) != nil
+
+    %{
+      alert: class_any?(classes, ~w(alert warning error)),
+      selector: "fieldset" in tags or has_input_type?(node, ~w(checkbox radio)),
+      form: has_phx_form?(node) or "form" in tags or ".form" in tags,
+      actions: not domain_for? and link_or_button_group?(node, classes),
+      nav:
+        root_tag in ~w(nav) or class_any?(classes, ~w(dock breadcrumb breadcrumbs menu navbar)),
+      header: not domain_for? and header_role?(tags),
+      grid: class_any?(classes, ~w(grid)) and domain_for?,
+      table: "table" in tags,
+      images: domain_for? and image_collection?(node),
+      list: domain_for? and root_tag in ~w(ul ol),
+      headed: heading_text(node) != nil
+    }
+  end
+
+  defp ensure_element({:element, _, _, _, _} = el), do: el
+  defp ensure_element(_), do: {:element, "div", [], [], nil}
+
+  # ---- role signal helpers --------------------------------------------------
+
+  defp all_classes(node) do
+    Tree.walk(node, [], fn
+      {:element, _t, attrs, _ch, _}, acc -> class_tokens(attrs) ++ acc
+      _o, acc -> acc
+    end)
+  end
+
+  defp class_tokens(attrs) do
+    attrs
+    |> Enum.find_value("", fn
+      {"class", {:string, s}} -> s
+      {"class", {:expr, s}} -> s
+      _ -> nil
+    end)
+    |> String.downcase()
+    |> then(&Regex.scan(~r/[a-z]+/, &1))
+    |> List.flatten()
+  end
+
+  defp class_any?(classes, nouns), do: Enum.any?(nouns, &(&1 in classes))
+
+  defp all_tags(node) do
+    Tree.walk(node, [], fn
+      {:element, t, _attrs, _ch, _}, acc -> [t | acc]
+      _o, acc -> acc
+    end)
+  end
+
+  defp has_input_type?(node, types) do
+    Tree.walk(node, false, fn
+      {:element, "input", attrs, _ch, _}, acc -> acc or input_type_in?(attrs, types)
+      _o, acc -> acc
+    end)
+  end
+
+  defp input_type_in?(attrs, types) do
+    Enum.any?(attrs, fn
+      {"type", {:string, t}} -> t in types
+      _ -> false
+    end)
+  end
+
+  defp has_phx_form?(node) do
+    Tree.walk(node, false, fn
+      {:element, _t, attrs, _ch, _}, acc -> acc or phx_form_attr?(attrs)
+      _o, acc -> acc
+    end)
+  end
+
+  defp phx_form_attr?(attrs) do
+    Enum.any?(attrs, fn {name, _v} -> name in ~w(phx-submit phx-change) end)
+  end
+
+  # a group of ≥2 links/buttons (often `btn`-classed) — action triggers, not a
+  # data list (the `:for` gate is applied by the caller).
+  defp link_or_button_group?(node, classes) do
+    links =
+      Tree.walk(node, 0, fn
+        {:element, "." <> rest, _a, _c, _}, acc when rest in ["link"] -> acc + 1
+        {:element, "button", _a, _c, _}, acc -> acc + 1
+        _o, acc -> acc
+      end)
+
+    links >= 2 or ("btn" in classes and links >= 1)
+  end
+
+  # a header: a heading element plus action controls (buttons/dropdown/links)
+  # and NO data list — a top-of-block bar, not content.
+  defp header_role?(tags) do
+    has_heading = Enum.any?(tags, &(&1 in ~w(h1 h2 h3 h4 h5 h6 .header)))
+    has_controls = Enum.any?(tags, &(&1 in ~w(button .link .dropdown)))
+    has_heading and has_controls
+  end
+
+  defp image_collection?(node) do
+    Tree.walk(node, false, fn
+      {:element, t, _a, _c, _}, _acc when t in ~w(img figure .asset_preview .image) -> true
+      _o, acc -> acc
+    end)
+  end
+
+  defp deep_text(children) do
+    children
+    |> Enum.map(fn
+      {:text, s, _} -> String.trim(s)
+      {:element, _t, _a, ch, _} -> deep_text(ch)
+      _ -> ""
+    end)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.join(" ")
+    |> case do
+      "" -> nil
+      s -> s
+    end
+  end
+
+  # ---- sources (fallback chain) ---------------------------------------------
 
   # source #0: a recognised structural motif classifies the block by component
   # type (`data_table`, `nav_list`, ...), then the dominant assign qualifies the
