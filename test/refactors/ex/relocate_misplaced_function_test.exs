@@ -154,6 +154,54 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunctionTest do
       target_source = File.read!(Path.join(tmp, "lib/my_app/b.ex"))
       assert target_source =~ "def describe(%MyApp.B{} = b)"
     end
+
+    test "the relocated function's own @doc/@spec are removed from the host", %{tmp: tmp} do
+      # An orphaned @spec points at a function the host no longer defines (it
+      # delegates), which breaks the moment the delegate is later inlined away
+      # (#373 ↔ InlineDefdelegate interplay); an orphaned @doc redefines the
+      # next def's doc. The delegate carries neither.
+      a = """
+      defmodule MyApp.A do
+        alias MyApp.B
+
+        @doc \"\"\"
+        Describe a B by name and code.
+        \"\"\"
+        @spec describe(B.t()) :: String.t()
+        def describe(%B{} = b) do
+          B.name(b) <> B.code(b)
+        end
+
+        @doc "Untouched neighbour."
+        def keep(x), do: x
+      end
+      """
+
+      b = """
+      defmodule MyApp.B do
+        defstruct [:name, :code]
+
+        def name(%__MODULE__{name: n}), do: n
+        def code(%__MODULE__{code: c}), do: c
+      end
+      """
+
+      paths = materialize([{"lib/my_app/a.ex", a}, {"lib/my_app/b.ex", b}], tmp)
+      plan = prepared(paths, write_root: tmp)
+
+      result_a = apply_refactor(@subject, a, prepared: plan, enabled: true)
+
+      assert result_a =~ "defdelegate describe(b), to: MyApp.B"
+      # the relocated function's own attributes are gone with its body
+      refute result_a =~ "@spec describe"
+      refute result_a =~ "Describe a B by name and code."
+      # an unrelated neighbour's doc is untouched
+      assert result_a =~ ~s(@doc "Untouched neighbour.")
+      assert result_a =~ "def keep(x)"
+
+      target_source = File.read!(Path.join(tmp, "lib/my_app/b.ex"))
+      assert_compiles(result_a <> "\n" <> target_source)
+    end
   end
 
   describe "rewrites — pipe and capture call sites" do
@@ -688,6 +736,45 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunctionTest do
       # Declined: the host keeps the callback, no delegate is emitted, and
       # nothing is appended to a target file.
       assert_unchanged(@subject, a, prepared: plan, enabled: true)
+    end
+
+    # Regression for #373: an `@impl`-annotated function implements a project
+    # `@behaviour` callback (here an `InfiniteScroll.Source`). Its body may
+    # envy another module (`Cursor.decode`/`encode`), but the behaviour binds
+    # it to THIS module, and dynamic `source.callback(...)` dispatch (invisible
+    # to the static call-site rewrite) calls it here. Never a candidate.
+    test "@impl behaviour callback is left alone even when it envies a module", %{tmp: tmp} do
+      a = """
+      defmodule MyApp.RowsSource do
+        @behaviour MyApp.Source
+
+        alias MyApp.Cursor
+
+        @impl MyApp.Source
+        def fetch_page(direction, cursor, limit) do
+          decoded = Cursor.decode(cursor)
+          Cursor.encode(decoded + limit + direction)
+        end
+      end
+      """
+
+      cursor = """
+      defmodule MyApp.Cursor do
+        def decode(c), do: c
+        def encode(n), do: n
+      end
+      """
+
+      plan =
+        prepared(
+          [{"lib/my_app/rows_source.ex", a}, {"lib/my_app/cursor.ex", cursor}],
+          write_root: tmp
+        )
+
+      assert_unchanged(@subject, a, prepared: plan, enabled: true)
+
+      # nothing was appended to the envied target either
+      refute File.exists?(Path.join(tmp, "lib/my_app/cursor.ex"))
     end
 
     # Regression for #373: a function calling `Repo.get_by(Asset, …)` twice

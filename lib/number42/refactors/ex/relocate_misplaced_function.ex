@@ -389,11 +389,37 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunction do
       attr_names: attr_names(body_exprs),
       body_exprs: body_exprs,
       function_keys: function_keys(body_exprs),
+      impl_keys: impl_keys(body_exprs),
       imports: imported_modules(body_exprs),
       infra?: infra_module?(body_exprs),
       module: module
     }
   end
+
+  # `{name, arity}` of every function carrying an `@impl` attribute — it
+  # implements a `@behaviour` callback (a `Source`, `Plug`, custom protocol,
+  # …) whose contract binds it to THIS module. Relocating it breaks the
+  # behaviour (and any dynamic `mod.callback(...)` dispatch the AST can't see),
+  # so #373 declines these alongside the fixed `@framework_callbacks`.
+  defp impl_keys(body_exprs) do
+    body_exprs
+    |> Enum.chunk_every(2, 1, :discard)
+    |> Enum.flat_map(fn
+      [{:@, _, [{:impl, _, [_]}]}, def_node] -> def_key(def_node)
+      _ -> []
+    end)
+    |> MapSet.new()
+  end
+
+  defp def_key({kind, _, [head | _]}) when kind in [:def, :defp] do
+    case strip_when(head) do
+      {name, _, args} when is_atom(name) and is_list(args) -> [{name, length(args)}]
+      {name, _, nil} when is_atom(name) -> [{name, 0}]
+      _ -> []
+    end
+  end
+
+  defp def_key(_), do: []
 
   # The set of modules brought into scope via `import` (and `use`, which
   # commonly imports a DSL). Used to prove a relocated body's unqualified
@@ -473,6 +499,7 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunction do
     host_attrs = host_info.attr_names
 
     with :ok <- not_framework_callback(def_info),
+         :ok <- not_behaviour_callback(def_info, host_info.impl_keys),
          :ok <- references_only_other_modules(def_info, sibling_keys),
          :ok <- no_host_internals(def_info, host_attrs),
          {:ok, target} <- envied_target(def_info, aliases, host, min_envy_refs),
@@ -499,6 +526,13 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunction do
   # be relocated into a plain target module (#373).
   defp not_framework_callback(%{name: name, arity: arity}) do
     if MapSet.member?(@framework_callbacks, {name, arity}), do: :skip, else: :ok
+  end
+
+  # An `@impl`-annotated function implements a `@behaviour` callback bound to
+  # this module — moving it breaks the behaviour and any dynamic
+  # `source.callback(...)` dispatch (invisible to the static call-site rewrite).
+  defp not_behaviour_callback(%{name: name, arity: arity}, impl_keys) do
+    if MapSet.member?(impl_keys, {name, arity}), do: :skip, else: :ok
   end
 
   # No local call into a sibling def/defp of the host.
@@ -884,10 +918,39 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunction do
     clauses = body_exprs |> Enum.filter(&clause_matches?(&1, reloc.name, reloc.arity))
 
     case clauses do
-      [] -> []
-      [first | _] -> build_group_patch(first, List.last(clauses), render_delegate(reloc))
+      [] ->
+        []
+
+      [first | _] ->
+        # Swallow the function's own `@doc`/`@spec` attributes sitting
+        # directly above its first clause. Left behind, the `@spec` points at
+        # a now-delegated function (a latent break the moment the delegate is
+        # later inlined away) and the orphaned `@doc` redefines the next def's
+        # doc. The delegate carries neither — `defdelegate` generates its own.
+        start_node = first_doc_or_spec_before(first, body_exprs) || first
+        build_group_patch(start_node, List.last(clauses), render_delegate(reloc))
     end
   end
+
+  # The earliest `@doc`/`@spec`/`@typedoc` attribute in the unbroken run of
+  # attributes immediately preceding `clause` in the module body. Returns nil
+  # when no attribute directly precedes it.
+  defp first_doc_or_spec_before(clause, body_exprs) do
+    case Enum.find_index(body_exprs, &(&1 == clause)) do
+      nil ->
+        nil
+
+      idx ->
+        body_exprs
+        |> Enum.take(idx)
+        |> Enum.reverse()
+        |> Enum.take_while(&fn_attribute?/1)
+        |> List.last()
+    end
+  end
+
+  defp fn_attribute?({:@, _, [{attr, _, _}]}) when attr in [:doc, :spec, :typedoc], do: true
+  defp fn_attribute?(_), do: false
 
   # Caller side: rewrite `Host.name(...)` (and `host_alias.name(...)`)
   # into `Target.name(...)`, across direct, pipe, and capture call
