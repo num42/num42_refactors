@@ -213,8 +213,12 @@ defmodule Number42.Refactors.Heex.ComponentNaming do
   end
 
   # The motif's own type word (`data_table` → `table`, `nav_list` → `list`),
-  # except a wrapped list/table reads as a `container`: its root is a generic
-  # wrapper rather than the list element itself, with siblings around the list.
+  # except: a `link_group` of static links reads as `links` (`asset_links`, not
+  # `asset_group`); and a wrapped list/table reads as a `container` — its root is
+  # a generic wrapper rather than the list element itself, with siblings around
+  # the list.
+  defp type_word(:link_group, _node), do: "links"
+
   defp type_word(motif, node) do
     bare = motif |> Atom.to_string() |> String.split("_") |> List.last()
 

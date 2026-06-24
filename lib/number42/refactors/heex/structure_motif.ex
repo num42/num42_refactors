@@ -26,8 +26,14 @@ defmodule Number42.Refactors.Heex.StructureMotif do
           | :select_field
           | :item_list
           | :nav_list
+          | :link_group
           | :button_group
           | :card_grid
+
+  # tags that make a group of links *navigation* rather than a static link group:
+  # a `<nav>`, or a genuine list (`<ul>`/`<ol>`). A generic wrapper (`<div>`,
+  # `<section>`) holding a few static links is a link group, not navigation.
+  @nav_tags ~w(nav ul ol menu)
 
   # class nouns that, when repeated, mark a card grid (the only motif that needs
   # a class signal rather than a tag — a card is a styled div, not a semantic tag)
@@ -66,7 +72,7 @@ defmodule Number42.Refactors.Heex.StructureMotif do
         {:ok, :select_field}
 
       has?(tokens, ".links") ->
-        {:ok, :nav_list}
+        {:ok, links_motif(node)}
 
       has?(tokens, "buttons") ->
         {:ok, :button_group}
@@ -87,6 +93,26 @@ defmodule Number42.Refactors.Heex.StructureMotif do
   defp tokens(sig), do: String.split(sig, ~r/[>;]/, trim: true)
 
   defp has?(tokens, label), do: label in tokens
+
+  # A group of links is *navigation* (`nav_list`) when it is a dynamic list
+  # (`:for`-driven) or sits in a `<nav>`/`<ul>`/`<ol>`. A handful of STATIC links
+  # in a generic wrapper (`<div>`/`<section>` of two action `<.link class="btn">`s)
+  # is a `link_group` — not a list, not navigation.
+  defp links_motif(node) do
+    if for_driven?(node) or nav_rooted?(node), do: :nav_list, else: :link_group
+  end
+
+  defp nav_rooted?({:element, tag, _attrs, _ch, _}), do: tag in @nav_tags
+  defp nav_rooted?(_), do: false
+
+  defp for_driven?(node) do
+    Tree.walk(node, false, fn
+      {:element, _tag, attrs, _ch, _}, acc -> acc or has_for?(attrs)
+      _node, acc -> acc
+    end)
+  end
+
+  defp has_for?(attrs), do: Enum.any?(attrs, fn {name, _v} -> name == ":for" end)
 
   # a card grid is a plural of `div`s each carrying a `card`/`tile` class
   defp card_grid?(tokens, node) do

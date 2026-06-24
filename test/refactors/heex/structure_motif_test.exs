@@ -37,17 +37,40 @@ defmodule Number42.Refactors.Heex.StructureMotifTest do
       assert StructureMotif.classify(n) == {:ok, :select_field}
     end
 
-    test "repeated links are a nav_list" do
+    test "a :for-driven list of links is a nav_list" do
       n =
         parse(~S"""
         <div>
-          <.link navigate={@a}>{@a}</.link>
-          <.link navigate={@b}>{@b}</.link>
-          <.link navigate={@c}>{@c}</.link>
+          <.link :for={item <- @items} navigate={item.path}>{item.label}</.link>
         </div>
         """)
 
       assert StructureMotif.classify(n) == {:ok, :nav_list}
+    end
+
+    test "links inside a <nav>/<ul> are a nav_list" do
+      n =
+        parse(~S"""
+        <nav>
+          <.link navigate={@a}>A</.link>
+          <.link navigate={@b}>B</.link>
+        </nav>
+        """)
+
+      assert StructureMotif.classify(n) == {:ok, :nav_list}
+    end
+
+    test "a few STATIC links in a generic wrapper are a link_group, not nav_list" do
+      # two action <.link class="btn"> in a div — not a list, not navigation
+      n =
+        parse(~S"""
+        <div class="space-y-2">
+          <.link navigate={@a} class="btn">Details</.link>
+          <.link href={@b} class="btn">Download</.link>
+        </div>
+        """)
+
+      assert StructureMotif.classify(n) == {:ok, :link_group}
     end
 
     test "repeated buttons are a button_group" do

@@ -217,6 +217,18 @@ defmodule Number42.Refactors.Heex.ComponentNamingTest do
       assert ComponentNaming.derive(n, []) == :todo_list
     end
 
+    test "a static link group is named {assign}_links, not _container/_group" do
+      n =
+        parse(~S"""
+        <div class="space-y-2">
+          <.link navigate={"/assets/#{@asset.id}"} class="btn">Details</.link>
+          <.link href={@asset.url} class="btn">Download</.link>
+        </div>
+        """)
+
+      assert ComponentNaming.derive(n, []) == :asset_links
+    end
+
     test "with no usable assign the bare motif is kept" do
       # static options, no @assign at all → nothing to qualify with → :select_field
       n =
