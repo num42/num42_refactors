@@ -215,6 +215,235 @@ defmodule Number42.Refactors.AstHelpers do
   def module_body_exprs({:defmodule, _, [_name, [{_do, body}]]}), do: body_to_exprs(body)
   def module_body_exprs(_), do: nil
 
+  @doc """
+  Drop top-level `alias`/`import …, only:` directives left dead after a
+  refactor moved or extracted the only code that referenced them.
+
+  A directive is dead when its introduced name no longer appears anywhere
+  else in the source — `mix compile --warnings-as-errors` rejects such a
+  dangling directive, so any refactor that removes code must re-scan and
+  prune. Refactors that lift/relocate code (`RelocateMisplacedFunction`,
+  `ExtractExpressionClone`) call this on their rewritten source.
+
+  Sound by construction — only the *provably* dead is dropped:
+
+    * `alias Foo.Bar` (or `alias Foo.Bar, as: Baz`) drops iff the single
+      introduced short name (`Bar` / `Baz`) appears nowhere else. A
+      multi-name group alias (`alias Foo.{A, B}`) is left alone — proving
+      the whole group dead needs per-name surgery this does not attempt.
+    * `import Foo, only: [run: 1, …]` drops iff none of its named
+      functions is used (as a call or a `<.tag>`).
+    * a plain `import Foo` is left alone — its exported names aren't
+      enumerable here, so it can't be proven dead (see
+      `ExtractToPublicComponent` for the corpus-resolved variant).
+
+  Usage is read from the AST, not the raw text — a name appearing only in a
+  comment (`# Path encoding`) or inside a string is correctly *not* counted as
+  a live reference, so the directive is still pruned. Source that does not
+  parse passes through unchanged.
+  """
+  @spec prune_dead_directives(String.t()) :: String.t()
+  def prune_dead_directives(source) do
+    case dead_directive_lines(source) do
+      [] -> source
+      lines -> drop_lines(source, lines)
+    end
+  end
+
+  defp dead_directive_lines(source) do
+    case Sourceror.parse_string(source) do
+      {:ok, ast} ->
+        directives = top_level_directive_nodes(ast)
+        usage = name_usage_lines(ast)
+
+        directives
+        |> Enum.filter(&directive_dead?(&1, usage))
+        |> Enum.flat_map(&directive_lines/1)
+
+      _ ->
+        []
+    end
+  end
+
+  # Only directives that sit *directly* in a module body are pruneable. An
+  # `import …, only: […]` (or `alias`) nested inside a `quote do … end` (the
+  # `def html, do: quote ...` macro pattern in a Phoenix `_web.ex`) or inside a
+  # function body is injected into a *different* expansion context — its names
+  # are deliberately unused in THIS file, so a whole-file scan would wrongly
+  # flag it dead. Walking each `defmodule`'s direct body children excludes
+  # those nested directives.
+  defp top_level_directive_nodes(ast) do
+    ast
+    |> Macro.prewalker()
+    |> Enum.flat_map(fn
+      {:defmodule, _, [_name, [{_do, body}]]} -> body_to_exprs(body)
+      _ -> []
+    end)
+    |> Enum.filter(fn
+      {directive, _meta, [{:__aliases__, _, _} | _]} when directive in [:alias, :import] -> true
+      _ -> false
+    end)
+  end
+
+  # Map of `name => MapSet of source lines` where the name is referenced. The
+  # line lets a directive's death check ignore the name's appearance in the
+  # directive's OWN declaration (an `alias …, as: Baz` mentions `Baz` on its
+  # own line; an `import Foo, only: [run: 1]` mentions `run` on its own line)
+  # while still counting a use by a *different* directive — crucially, an
+  # `import AliasedName, only: …` is a real use of the `alias …AliasedName`,
+  # so the alias must NOT be pruned.
+  #
+  # Two sources, because neither alone is sound:
+  #
+  #   1. **AST refs** — alias short names (the head atom of any
+  #      `{:__aliases__, _, [Head | _]}`; `Cursor.new()` and `%Cursor{}` both
+  #      reference `Cursor`) and bare call/identifier names (the atom of any
+  #      `{name, _, …}`, covering `import only:` functions used as `run(x)`).
+  #      Comments and string interiors are not AST nodes, so a name surviving
+  #      only in a comment is correctly absent — the false-positive this scan
+  #      was built to avoid.
+  #
+  #   2. **Sigil bodies** — a `~H`/`~L` body is an opaque binary to the AST, so
+  #      a HEEx `<.item_thumbnail>` tag is invisible to (1). Missing it would
+  #      false-prune an `import only:` / alias used solely in markup — a hard
+  #      compile break, not a warning. So every identifier-shaped token inside
+  #      a sigil body counts as a use, attributed to the sigil's line.
+  defp name_usage_lines(ast) do
+    (ast_name_lines(ast) ++ sigil_name_lines(ast))
+    |> Enum.reduce(%{}, fn {name, line}, acc ->
+      Map.update(acc, name, MapSet.new([line]), &MapSet.put(&1, line))
+    end)
+  end
+
+  defp ast_name_lines(ast) do
+    ast
+    |> Macro.prewalker()
+    |> Enum.flat_map(fn
+      {:__aliases__, meta, [head | _]} when is_atom(head) ->
+        [{Atom.to_string(head), line(meta)}]
+
+      {name, meta, ctx} when is_atom(name) and is_atom(ctx) ->
+        [{Atom.to_string(name), line(meta)}]
+
+      {name, meta, args} when is_atom(name) and is_list(args) ->
+        [{Atom.to_string(name), line(meta)}]
+
+      _ ->
+        []
+    end)
+  end
+
+  defp sigil_name_lines(ast) do
+    ast
+    |> Macro.prewalker()
+    |> Enum.flat_map(fn
+      {sigil, meta, [{:<<>>, _, parts}, _modifiers]} when sigil in [:sigil_H, :sigil_L] ->
+        parts
+        |> Enum.filter(&is_binary/1)
+        |> Enum.flat_map(&Regex.scan(~r/[A-Za-z_][A-Za-z0-9_]*/, &1))
+        |> Enum.map(fn [token] -> {token, line(meta)} end)
+
+      _ ->
+        []
+    end)
+  end
+
+  defp line(meta) when is_list(meta), do: Keyword.get(meta, :line, 0)
+
+  # `name` is used somewhere outside `own_lines` (the directive's own span).
+  defp used_off_lines?(usage, name, own_lines) do
+    case Map.get(usage, name) do
+      nil -> false
+      lines -> not MapSet.subset?(lines, own_lines)
+    end
+  end
+
+  defp directive_dead?({:import, _, _} = node, usage) do
+    case import_only_names(directive_text(node)) do
+      names when is_list(names) ->
+        own = MapSet.new(directive_lines(node))
+        Enum.all?(names, fn n -> not used_off_lines?(usage, n, own) end)
+
+      nil ->
+        # plain `import Mod` — exported names aren't enumerable, leave it.
+        false
+    end
+  end
+
+  defp directive_dead?(node, usage) do
+    case introduced_short_name(node) do
+      nil ->
+        false
+
+      name ->
+        own = MapSet.new(directive_lines(node))
+        not used_off_lines?(usage, name, own)
+    end
+  end
+
+  defp directive_text({_d, _meta, _args} = node), do: Macro.to_string(node)
+
+  defp introduced_short_name({:alias, _, [{:__aliases__, _, parts}]}),
+    do: parts |> List.last() |> Atom.to_string()
+
+  defp introduced_short_name({:alias, _, [{:__aliases__, _, parts}, opts]}) do
+    case alias_as_opt(opts) do
+      nil -> parts |> List.last() |> Atom.to_string()
+      as -> as
+    end
+  end
+
+  # a group alias `Foo.{A, B}` introduces several names; not pruned here.
+  defp introduced_short_name(_), do: nil
+
+  # The `as:` target of `alias Foo.Bar, as: Baz`. Sourceror wraps the keyword
+  # key in `{:__block__, _, [:as]}`, so a bare `Keyword.get(opts, :as)` misses
+  # it — match the wrapped pair directly.
+  defp alias_as_opt(opts) when is_list(opts) do
+    Enum.find_value(opts, fn
+      {{:__block__, _, [:as]}, {:__aliases__, _, parts}} ->
+        parts |> List.last() |> Atom.to_string()
+
+      {:as, {:__aliases__, _, parts}} ->
+        parts |> List.last() |> Atom.to_string()
+
+      _ ->
+        nil
+    end)
+  end
+
+  defp alias_as_opt(_), do: nil
+
+  defp import_only_names(directive) do
+    case Regex.run(~r/only:\s*\[(.+)\]/, directive) do
+      [_, inner] ->
+        Regex.scan(~r/([a-z_][a-zA-Z0-9_]*):/, inner) |> Enum.map(fn [_, n] -> n end)
+
+      _ ->
+        nil
+    end
+  end
+
+  # The full line span of a directive — a multi-line `import Foo,\n  only: […]`
+  # must drop every line it occupies, or the orphaned `only:` continuation
+  # breaks syntax. Falls back to the node's `:line` when no range is available.
+  defp directive_lines({_d, meta, _a} = node) do
+    case Sourceror.get_range(node) do
+      %{start: [line: s, column: _], end: [line: e, column: _]} -> Enum.to_list(s..e)
+      _ -> [Keyword.get(meta, :line, 0)]
+    end
+  end
+
+  defp drop_lines(source, lines) do
+    drop = MapSet.new(lines)
+
+    source
+    |> String.split("\n", trim: false)
+    |> Enum.with_index(1)
+    |> Enum.reject(fn {_line, idx} -> MapSet.member?(drop, idx) end)
+    |> Enum.map_join("\n", fn {line, _idx} -> line end)
+  end
+
   # Elixir reserved words that cannot be used as parameter names.
   @reserved_words ~w(true false nil when and or not in fn do end after else
                      catch rescue case cond if unless quote unquote receive try with for)
