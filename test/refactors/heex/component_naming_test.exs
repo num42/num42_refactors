@@ -124,6 +124,47 @@ defmodule Number42.Refactors.Heex.ComponentNamingTest do
       assert ComponentNaming.derive(n, []) == :brand_items_list
     end
 
+    test "names by the :for source, not the wrapper assign" do
+      # the block is about @rows (the iterated collection), not the wrapper @page
+      n =
+        parse(~S"""
+        <table>
+          <thead><tr><th>A</th></tr></thead>
+          <tbody><tr :for={row <- @page.rows}><td>{row.a}</td></tr></tbody>
+        </table>
+        """)
+
+      assert ComponentNaming.derive(n, []) == :rows_table
+    end
+
+    test "a wrapped list (root is a container, not the <ul>) is named _container" do
+      # <section> wraps a heading + the :for-driven <ul> over @brand_item.brand_item_assets;
+      # the list is not the root, so it is a container, named by the :for source
+      n =
+        parse(~S"""
+        <section :if={@brand_item.brand_item_assets != []} class="p-2">
+          <p>Bilder</p>
+          <ul>
+            <li :for={bia <- @brand_item.brand_item_assets}>{bia.asset.name}</li>
+          </ul>
+        </section>
+        """)
+
+      assert ComponentNaming.derive(n, []) == :brand_item_assets_container
+    end
+
+    test "a bare <ul> root stays a _list (not wrapped)" do
+      n =
+        parse(~S"""
+        <ul>
+          <li :for={tag <- @tags}>{tag.label}</li>
+          <li :for={tag <- @tags}>{tag.label}</li>
+        </ul>
+        """)
+
+      assert ComponentNaming.derive(n, []) == :tags_list
+    end
+
     test "with no usable assign the bare motif is kept" do
       # static options, no @assign at all → nothing to qualify with → :select_field
       n =

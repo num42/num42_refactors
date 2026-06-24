@@ -7,16 +7,18 @@ defmodule Number42.Refactors.Heex.ComponentNaming do
   to the codebase (an i18n app names from `gettext` strings; an
   assign-centric one from the dominant assign):
 
-    0. **structural motif, qualified by the dominant assign** — a recognised
-       plural skeleton (`StructureMotif`) classifies the block by component
-       *type* (`data_table`, `nav_list`, ...). The type word is generic, so the
-       dominant `@assign` qualifies it: a `data_table` over `@entries` is an
-       `entries_table`, over `@preview` a `preview_table`; a `nav_list` of
-       `@brand_item`s a `brand_item_list`. The assign is what makes the name
-       mean something in *this* codebase; the motif supplies the type suffix
-       (`_table`, `_list`, `_field`, ...) so the kind stays legible. With no
-       usable assign the bare motif (`data_table`) is kept. `:unknown` yields
-       nil, so the chain below is unaffected;
+    0. **structural motif, qualified by its collection** — a recognised plural
+       skeleton (`StructureMotif`) classifies the block by component *type*
+       (`data_table`, `nav_list`, ...). The type word is generic, so the
+       *collection the block iterates* qualifies it. That collection is the
+       block's `:for` source when present (`:for={bia <- @brand_item.brand_item_assets}`
+       → `brand_item_assets`, not the wrapper `@brand_item`), else the dominant
+       `@assign`: a `data_table` over `@entries` is an `entries_table`. When the
+       list/table is *wrapped* — the root is a generic container with content
+       beside the list, not the `<ul>`/`<table>` itself — the type word becomes
+       `container`: `brand_item_assets_container`. With no usable collection the
+       bare motif (`data_table`) is kept. `:unknown` yields nil, so the chain
+       below is unaffected;
     1. **semantic tag** — `<section>`, `<article>`, `<table>`, ... the tag
        already declares what the block is;
     2. **class-hint noun** — a recognised UI noun in the `class` attribute
@@ -32,6 +34,10 @@ defmodule Number42.Refactors.Heex.ComponentNaming do
   alias Number42.Refactors.Heex.{Motif, StructureMotif, Tree}
 
   @semantic_tags ~w(section article header footer aside main nav table form dialog fieldset details figure)
+
+  # generic wrapper tags that, as the *root* of a recognised list/table motif,
+  # mark the block as a container *around* a list rather than the list itself
+  @container_tags ~w(section article div main aside)
 
   @class_nouns ~w(card panel sidebar list item row cell modal dialog badge avatar banner hero
                   toolbar menu nav tab breadcrumb pagination alert toast tooltip dropdown
@@ -166,18 +172,96 @@ defmodule Number42.Refactors.Heex.ComponentNaming do
     end
   end
 
-  # Replace the motif's generic qualifier with the dominant assign, keeping its
-  # type word as a suffix: `data_table` + `@entries` → `entries_table`,
-  # `nav_list` + `@brand_item` → `brand_item_list`. The type word is the motif
-  # atom's last `_`-segment (`data_table` → `table`). A reserved/empty assign
-  # leaves the bare motif (`data_table`) so the chain still has a usable name.
+  # Replace the motif's generic qualifier with the *thing the block is about*,
+  # keeping its type word as a suffix:
+  #
+  #   * the **collection** comes from the block's `:for` source when present —
+  #     `:for={bia <- @brand_item.brand_item_assets}` is *about* the
+  #     `brand_item_assets`, not the wrapper `@brand_item`. The last path member
+  #     of the source names it. Falls back to the dominant assign otherwise
+  #     (`data_table` over `@entries` → `entries_table`).
+  #   * the **type word** is normally the motif's own (`data_table` → `table`),
+  #     but when the recognised list/table is *wrapped* — the root is a generic
+  #     container (`<section>`/`<div>`) with content beside the list, not the
+  #     `<ul>`/`<table>` itself — the block is a `_container`, not a bare list.
+  #
+  # So `item_list` whose root `<section>` wraps a heading + a `:for`-driven `<ul>`
+  # over `@brand_item.brand_item_assets` → `brand_item_assets_container`.
+  #
+  # A reserved/empty qualifier leaves the bare motif so the chain always has a
+  # usable name.
   defp qualify_motif(motif, node) do
-    type_word = motif |> Atom.to_string() |> String.split("_") |> List.last()
+    type_word = type_word(motif, node)
+    collection = for_source_name(node) || dominant_assign(node)
 
-    case dominant_assign(node) do
-      nil -> motif
-      ^type_word -> motif
-      assign -> String.to_atom("#{assign}_#{type_word}")
+    cond do
+      is_nil(collection) -> motif
+      collection == Atom.to_string(motif) -> motif
+      type_word == Atom.to_string(motif) -> motif
+      true -> String.to_atom("#{collection}_#{type_word}")
+    end
+  end
+
+  # The motif's own type word (`data_table` → `table`, `nav_list` → `list`),
+  # except a wrapped list/table reads as a `container`: its root is a generic
+  # wrapper rather than the list element itself, with siblings around the list.
+  defp type_word(motif, node) do
+    bare = motif |> Atom.to_string() |> String.split("_") |> List.last()
+
+    if bare in ~w(list table) and wrapped_collection?(node), do: "container", else: bare
+  end
+
+  # True when the recognised list/table is *not* the root — the root is a generic
+  # container tag and the list element sits among siblings (a heading, copy, ...).
+  # A block whose root IS the `<ul>`/`<table>` is a plain list, not a container.
+  defp wrapped_collection?({:element, tag, _attrs, children, _}) do
+    tag in @container_tags and Enum.count(children, &element?/1) > 1
+  end
+
+  defp wrapped_collection?(_), do: false
+
+  defp element?({:element, _, _, _, _}), do: true
+  defp element?(_), do: false
+
+  # The collection named by the first `:for` generator in the block — the last
+  # path member of its source (`bia <- @brand_item.brand_item_assets` →
+  # `brand_item_assets`, `row <- @rows` → `rows`). The `:for` source is the
+  # block's true subject; the wrapper assign (`@brand_item`) is just where it
+  # hangs. Reserved names are skipped so the name cannot clash.
+  defp for_source_name(node) do
+    Tree.walk(node, nil, fn
+      {:element, _t, attrs, _ch, _}, acc -> acc || for_member(attrs)
+      _o, acc -> acc
+    end)
+  end
+
+  defp for_member(attrs) do
+    Enum.find_value(attrs, fn
+      {":for", {:expr, code}} -> for_member_from(code)
+      _ -> nil
+    end)
+  end
+
+  # `bia <- @brand_item.brand_item_assets` → "brand_item_assets";
+  # `row <- @rows` → "rows". Take the RHS of `<-`, then its last `@…path` member.
+  defp for_member_from(code) when is_binary(code) do
+    with [_, rhs] <- Regex.run(~r/<-\s*(.+)$/s, code),
+         member when is_binary(member) <- last_member(rhs),
+         name = String.to_atom(member),
+         false <- MapSet.member?(reserved(), name) or name in @non_naming_assigns do
+      member
+    else
+      _ -> nil
+    end
+  end
+
+  defp for_member_from(_), do: nil
+
+  # last dotted member of a `@a.b.c` / `@xs` expression: "c" / "xs"
+  defp last_member(rhs) do
+    case Regex.run(~r/@?([a-z_][a-zA-Z0-9_.]*)\s*$/, rhs) do
+      [_, path] -> path |> String.split(".") |> List.last()
+      _ -> nil
     end
   end
 
