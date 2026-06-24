@@ -136,17 +136,20 @@ defmodule Number42.Refactors.Ex.GenerateHeexAssignContracts do
     ast
     |> component_defs()
     |> Enum.group_by(fn {_def_node, fn_name} -> fn_name end)
-    |> Enum.flat_map(fn {fn_name, _clauses} ->
-      missing_for_component(fn_name, first_lines, declared, source)
+    |> Enum.flat_map(fn {fn_name, clauses} ->
+      derived = clauses |> Enum.flat_map(&assigned_in_def/1) |> MapSet.new()
+      missing_for_component(fn_name, first_lines, declared, derived, source)
     end)
   end
 
-  defp missing_for_component(fn_name, first_lines, declared, source) do
+  defp missing_for_component(fn_name, first_lines, declared, derived, source) do
     used = used_assigns(fn_name, source)
 
     missing =
       used
-      |> Enum.reject(fn {name, _type} -> MapSet.member?(declared, name) end)
+      |> Enum.reject(fn {name, _type} ->
+        MapSet.member?(declared, name) or MapSet.member?(derived, name)
+      end)
       |> Enum.sort_by(fn {name, _type} -> name end)
 
     case missing do
@@ -154,6 +157,59 @@ defmodule Number42.Refactors.Ex.GenerateHeexAssignContracts do
       decls -> [%{anchor_line: Map.fetch!(first_lines, fn_name), decls: decls}]
     end
   end
+
+  # Assigns the component computes for *itself* in its body via
+  # `assign/2,3` / `assign_new/2,3` are NOT caller inputs — declaring an
+  # `attr :x, required: true` for them is wrong: the caller must not pass
+  # `x`; the body derives it from another assign (e.g.
+  # `assign(:pdf_url, MediaUrl.download_original_url(assigns.asset))`). Such
+  # names are subtracted, per clause, from the generated contract.
+  #
+  # `clauses` are `{def_node, fn_name}` tuples from `component_defs/1`.
+  defp assigned_in_def({def_node, _fn_name}) do
+    def_node |> Macro.prewalker() |> Enum.flat_map(&assign_targets/1)
+  end
+
+  # The assign key(s) set by one `assign`/`assign_new` call node, in any
+  # shape. A pipe `x |> assign(:k, v)` keeps the call as the `|>` RHS with
+  # the subject DROPPED (`{:assign, _, [:k, v]}`), so the explicit args are
+  # one fewer than the direct form — both arities are handled here.
+  #
+  #   direct: assign(x, :k, v)        rhs:  assign(:k, v)
+  #   direct: assign(x, k: v, ...)    rhs:  assign(k: v, ...)
+  #   direct: assign_new(x, :k, fn)   rhs:  assign_new(:k, fn)
+  #
+  # A non-literal key (`assign(x, key, v)` with `key` a var) yields nothing.
+  defp assign_targets({:|>, _, [_lhs, {fun, _, args}]})
+       when fun in [:assign, :assign_new] and is_list(args),
+       do: piped_assign_keys(args)
+
+  defp assign_targets({fun, _, args}) when fun in [:assign, :assign_new] and is_list(args) do
+    case args do
+      [_subject | rest] -> piped_assign_keys(rest)
+      _ -> []
+    end
+  end
+
+  defp assign_targets(_), do: []
+
+  # Keys from the subject-less argument list (the `|>`-RHS form, or the
+  # tail of a direct call after dropping the subject): `[kw]` or `[key, val]`.
+  defp piped_assign_keys([kw]) when is_list(kw), do: keyword_keys(kw)
+  defp piped_assign_keys([key, _value]), do: List.wrap(literal_key(key))
+  defp piped_assign_keys(_), do: []
+
+  defp keyword_keys(kw) do
+    kw
+    |> Enum.flat_map(fn
+      {key, _value} -> List.wrap(literal_key(key))
+      _ -> []
+    end)
+  end
+
+  defp literal_key({:__block__, _, [key]}) when is_atom(key), do: key
+  defp literal_key(key) when is_atom(key), do: key
+  defp literal_key(_), do: nil
 
   # `fn_name => line of its earliest clause`, over every arity-1 `def`/`defp`
   # in the module. The anchor must precede the FIRST clause of the component's

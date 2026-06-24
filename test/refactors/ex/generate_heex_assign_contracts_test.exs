@@ -232,6 +232,80 @@ defmodule Number42.Refactors.Ex.GenerateHeexAssignContractsTest do
     end
   end
 
+  describe "derived assigns (set in the body) are not declared" do
+    test "an assign computed via assign/3 in the body gets no attr" do
+      # `@pdf_url` is derived inside the component from `@asset`; the caller
+      # must NOT pass it, so an `attr :pdf_url, required: true` would be wrong.
+      # Only the genuine input `@asset` is declared.
+      before_source = ~S'''
+      defmodule MyView do
+        def pdf_preview(assigns) do
+          assigns = assign(assigns, :pdf_url, download_url(assigns.asset))
+
+          ~H"""
+          <object data={@pdf_url}>{@asset.name}</object>
+          """
+        end
+      end
+      '''
+
+      after_source = ~S'''
+      defmodule MyView do
+        attr :asset, :map, required: true
+
+        def pdf_preview(assigns) do
+          assigns = assign(assigns, :pdf_url, download_url(assigns.asset))
+
+          ~H"""
+          <object data={@pdf_url}>{@asset.name}</object>
+          """
+        end
+      end
+      '''
+
+      assert_rewrites(@subject, before_source, after_source, @enabled)
+    end
+
+    test "the pipe form `assigns |> assign(:x, ...)` is also recognised as derived" do
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule MyView do
+          def card(assigns) do
+            assigns = assigns |> assign(:label, build_label(assigns))
+
+            ~H"""
+            <span>{@label}</span>
+            """
+          end
+        end
+        ''',
+        @enabled
+      )
+    end
+
+    test "assign_new and keyword-form assign targets are recognised as derived" do
+      assert_unchanged(
+        @subject,
+        ~S'''
+        defmodule MyView do
+          def panel(assigns) do
+            assigns =
+              assigns
+              |> assign_new(:open, fn -> false end)
+              |> assign(title: "x", count: 0)
+
+            ~H"""
+            <details open={@open}><summary>{@title}</summary>{@count}</details>
+            """
+          end
+        end
+        ''',
+        @enabled
+      )
+    end
+  end
+
   describe "leaves alone" do
     test "all assigns already declared" do
       assert_unchanged(
