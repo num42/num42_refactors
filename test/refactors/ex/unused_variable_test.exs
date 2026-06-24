@@ -120,4 +120,30 @@ defmodule Number42.Refactors.Ex.UnusedVariableTest do
       """)
     end
   end
+
+  describe "malformed AST from an upstream refactor" do
+    # Valid Elixir source never parses to a `case`/`fn`/`receive` node whose
+    # args are not a proper list — `case` is always `{:case, _, [subject, kw]}`.
+    # But UnusedVariable runs late in a fixpoint pass and walks AST already
+    # mutated by other refactors; a producer that emits a structurally-invalid
+    # `case` node (args not a list) used to crash `all_clauses/1` with
+    # `List.last/1` on a non-list (#361). The guard must decline, not crash.
+    test "case node with non-list args is declined, not crashed" do
+      invalid = {:case, [line: 1], {:scrutinee, [line: 1], nil}}
+
+      assert UnusedVariable.patches(invalid, "case x", []) == []
+    end
+
+    test "fn node with non-list args is declined, not crashed" do
+      invalid = {:fn, [line: 1], :atom}
+
+      assert UnusedVariable.patches(invalid, "fn", []) == []
+    end
+
+    test "receive node with non-list args is declined, not crashed" do
+      invalid = {:receive, [line: 1], nil}
+
+      assert UnusedVariable.patches(invalid, "receive", []) == []
+    end
+  end
 end

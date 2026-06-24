@@ -214,7 +214,8 @@ defmodule Number42.Refactors.Ex.UnusedVariable do
     patches_for(args, guard, body, whitelist)
   end
 
-  defp node_patches({op, _, args}, whitelist) when op in [:case, :fn, :receive] do
+  defp node_patches({op, _, args}, whitelist)
+       when op in [:case, :fn, :receive] and is_list(args) do
     args
     |> all_clauses()
     |> Enum.flat_map(&branch_patches(&1, whitelist))

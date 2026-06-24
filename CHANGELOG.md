@@ -247,6 +247,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`UnusedVariable`** (#361) crashed mid-pipeline with a `FunctionClauseError`
+  (`List.last/1` on a non-list) when it walked a structurally-invalid
+  `case`/`fn`/`receive` node whose args were not a proper list. Valid Elixir
+  source never parses to such a node, but `UnusedVariable` runs late in the
+  fixpoint pass and walks AST already mutated by other refactors. The
+  `case`/`fn`/`receive` clause was the lone `node_patches/2` arm without an
+  `is_list(args)` guard — the neighbouring `def`, `:try` and `:with` arms all
+  have one; it now declines (via the existing catch-all) instead of crashing.
+  Regression tests drive a hand-built invalid node through the public
+  `patches/3`. The upstream refactor that emits the invalid node no longer
+  reproduces on current position-db (full pipeline, both dry-run and fixpoint,
+  against the issue ref and HEAD) — tracked separately as a follow-up.
 - Six default-OFF refactors had correctness bugs surfaced by a position-db
   dogfood (#370–#375); each fixed at the root, with regression tests. All stay
   default-OFF — the fixes make them sound (or sound-but-inert), not safe to run
