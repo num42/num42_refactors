@@ -407,6 +407,281 @@ defmodule Number42.Refactors.Ex.ExtractToPublicComponentTest do
     end
   end
 
+  describe "transform/2 — caller directive cleanup after extraction" do
+    # A caller that uses `MediaUrl` ONLY inside the extracted table, plus
+    # `ValueLabels` in code OUTSIDE it. After the lift, MediaUrl is dead in the
+    # caller (it moved into the component) and must be dropped; ValueLabels is
+    # still used in code and must survive.
+    defp caller_with_mixed_directives do
+      """
+      defmodule MyAppWeb.UserListLive do
+        use MyAppWeb, :live_view
+        alias MyAppWeb.Helpers.MediaUrl
+        alias MyAppWeb.Helpers.ValueLabels
+
+        def label, do: ValueLabels.format(:x)
+
+        def render(assigns) do
+          ~H\"\"\"
+          <section class="page">
+            <h1>Users</h1>
+            <table class="data">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Link</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr :for={row <- @rows}>
+                  <td>{row.name}</td>
+                  <td><a href={MediaUrl.download_original_url(row)}>open</a></td>
+                </tr>
+              </tbody>
+            </table>
+          </section>
+          \"\"\"
+        end
+      end
+      """
+    end
+
+    test "drops an alias used only inside the extracted subtree" do
+      src = caller_with_mixed_directives()
+      plans = build(%{"lib/a.ex" => src})
+
+      out =
+        @subject.transform(src,
+          enabled: true,
+          dry_run: true,
+          prepared: %{plans: plans, source_to_file: %{src => "lib/a.ex"}},
+          project_config: @config
+        )
+
+      # MediaUrl moved into the component → dead in the caller → dropped
+      refute out =~ "alias MyAppWeb.Helpers.MediaUrl"
+    end
+
+    test "keeps an alias still used in caller code outside the subtree" do
+      src = caller_with_mixed_directives()
+      plans = build(%{"lib/a.ex" => src})
+
+      out =
+        @subject.transform(src,
+          enabled: true,
+          dry_run: true,
+          prepared: %{plans: plans, source_to_file: %{src => "lib/a.ex"}},
+          project_config: @config
+        )
+
+      # ValueLabels is referenced in `label/0` → must survive the prune
+      assert out =~ "alias MyAppWeb.Helpers.ValueLabels"
+      assert out =~ "ValueLabels.format(:x)"
+    end
+
+    test "keeps an `as:`-renamed alias still used by its `as:` name" do
+      # the prune must check the introduced name (the `as:` target), not the
+      # module's last segment: `alias Foo.Formatter, as: AssetUseFormatter` is
+      # alive while `AssetUseFormatter.x(...)` is referenced.
+      src = """
+      defmodule MyAppWeb.UserListLive do
+        use MyAppWeb, :live_view
+        alias MyAppWeb.Types.AssetUse.Formatter, as: AssetUseFormatter
+
+        @groups [{:images, AssetUseFormatter.group_label(:images)}]
+
+        def groups, do: @groups
+
+        def render(assigns) do
+          ~H\"\"\"
+          <section class="page">
+            <h1>Users</h1>
+            <table class="data">
+              <thead><tr><th>Name</th><th>X</th></tr></thead>
+              <tbody>
+                <tr :for={row <- @rows}>
+                  <td>{row.name}</td>
+                  <td>{row.x}</td>
+                </tr>
+              </tbody>
+            </table>
+          </section>
+          \"\"\"
+        end
+      end
+      """
+
+      plans = build(%{"lib/a.ex" => src})
+
+      out =
+        @subject.transform(src,
+          enabled: true,
+          dry_run: true,
+          prepared: %{plans: plans, source_to_file: %{src => "lib/a.ex"}},
+          project_config: @config
+        )
+
+      assert out =~ "as: AssetUseFormatter"
+      assert out =~ "AssetUseFormatter.group_label(:images)"
+    end
+
+    test "keeps an `import …, only:` whose function is still used as a HEEx tag" do
+      # `import …ItemRow, only: [item_row: 1]` is alive while `<.item_row>` is
+      # used outside the extracted subtree — the tag form must count as a use.
+      src = """
+      defmodule MyAppWeb.UserListLive do
+        use MyAppWeb, :live_view
+        import MyAppWeb.Components.ItemRow, only: [item_row: 1]
+
+        def render(assigns) do
+          ~H\"\"\"
+          <section class="page">
+            <h1>Users</h1>
+            <.item_row label="kept" />
+            <table class="data">
+              <thead><tr><th>Name</th><th>X</th></tr></thead>
+              <tbody>
+                <tr :for={row <- @rows}>
+                  <td>{row.name}</td>
+                  <td>{row.x}</td>
+                </tr>
+              </tbody>
+            </table>
+          </section>
+          \"\"\"
+        end
+      end
+      """
+
+      plans = build(%{"lib/a.ex" => src})
+
+      out =
+        @subject.transform(src,
+          enabled: true,
+          dry_run: true,
+          prepared: %{plans: plans, source_to_file: %{src => "lib/a.ex"}},
+          project_config: @config
+        )
+
+      assert out =~ "import MyAppWeb.Components.ItemRow, only: [item_row: 1]"
+    end
+
+    test "prunes a plain import resolved via the corpus when none of its components is used" do
+      # AssetPreview exports asset_preview + pdf_document_viewer; the caller's
+      # only use of <.asset_preview> sits inside the extracted table, so after
+      # the lift NEITHER component is used → the plain import is dead. Resolved
+      # from the corpus, not guessed from the module name.
+      preview_mod = """
+      defmodule MyAppWeb.Components.AssetPreview do
+        use MyAppWeb, :html
+        def asset_preview(assigns), do: ~H"<img src={@src} />"
+        def pdf_document_viewer(assigns), do: ~H"<object data={@url} />"
+      end
+      """
+
+      # The <.asset_preview> lives INSIDE a wrapped list block that lifts whole
+      # into its own component — so the tag (and its import) move out of the
+      # caller, leaving the import dead.
+      caller = """
+      defmodule MyAppWeb.GalleryLive do
+        use MyAppWeb, :live_view
+        import MyAppWeb.Components.AssetPreview
+
+        def render(assigns) do
+          ~H\"\"\"
+          <article class="page">
+            <h1>Gallery</h1>
+            <section class="assets">
+              <h2>Assets</h2>
+              <ul class="grid">
+                <li :for={asset <- @gallery.assets} class="cell flex flex-col gap-2">
+                  <figure class="thumb">
+                    <.asset_preview src={asset.src} size="full" />
+                  </figure>
+                  <span class="title truncate">{asset.title}</span>
+                  <a href={asset.href} class="link">open</a>
+                </li>
+              </ul>
+            </section>
+          </article>
+          \"\"\"
+        end
+      end
+      """
+
+      {:ok, prepared} =
+        @subject.prepare(
+          source_files: write_tmp(%{"asset_preview.ex" => preview_mod, "caller.ex" => caller}),
+          project_config: @config
+        )
+
+      out =
+        @subject.transform(caller,
+          enabled: true,
+          dry_run: true,
+          prepared: prepared,
+          project_config: @config
+        )
+
+      # the assets block (with <.asset_preview>) lifted out → import dead → pruned
+      refute out =~ "<.asset_preview"
+      refute out =~ "import MyAppWeb.Components.AssetPreview"
+    end
+
+    test "keeps a corpus-resolved plain import when one of its components is still used" do
+      preview_mod = """
+      defmodule MyAppWeb.Components.AssetPreview do
+        use MyAppWeb, :html
+        def asset_preview(assigns), do: ~H"<img src={@src} />"
+        def pdf_document_viewer(assigns), do: ~H"<object data={@url} />"
+      end
+      """
+
+      # <.pdf_document_viewer> sits OUTSIDE the extracted table → import alive,
+      # even though the module-name heuristic (asset_preview) would not see it.
+      caller = """
+      defmodule MyAppWeb.UserListLive do
+        use MyAppWeb, :live_view
+        import MyAppWeb.Components.AssetPreview
+
+        def render(assigns) do
+          ~H\"\"\"
+          <section class="page">
+            <h1>Users</h1>
+            <.pdf_document_viewer url={@doc} />
+            <table class="data">
+              <thead><tr><th>Name</th><th>X</th></tr></thead>
+              <tbody>
+                <tr :for={row <- @rows}>
+                  <td>{row.name}</td>
+                  <td>{row.x}</td>
+                </tr>
+              </tbody>
+            </table>
+          </section>
+          \"\"\"
+        end
+      end
+      """
+
+      {:ok, prepared} =
+        @subject.prepare(
+          source_files: write_tmp(%{"asset_preview.ex" => preview_mod, "caller.ex" => caller}),
+          project_config: @config
+        )
+
+      out =
+        @subject.transform(caller,
+          enabled: true,
+          dry_run: true,
+          prepared: prepared,
+          project_config: @config
+        )
+
+      assert out =~ "import MyAppWeb.Components.AssetPreview"
+    end
+  end
+
   describe "module file generation" do
     test "writes a stateless function-component module keeping used directives, dropping unused aliases" do
       # body uses `Formatting.humanize/1` → that alias is kept; the unused

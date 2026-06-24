@@ -456,8 +456,66 @@ defmodule Number42.Refactors.Ex.ExtractToPublicComponent do
 
     plans = build_plan(sources, opts)
     source_to_file = Map.new(sources, fn {path, src} -> {src, path} end)
-    {:ok, %{plans: plans, source_to_file: source_to_file}}
+
+    {:ok,
+     %{
+       plans: plans,
+       source_to_file: source_to_file,
+       component_index: build_component_index(sources)
+     }}
   end
+
+  # `%{module_name => MapSet of component-function names}` over the corpus, so
+  # the caller-directive prune can resolve which `<.tag>`s an `import Module`
+  # actually provides instead of guessing from the module name (`Macro.underscore`
+  # is not the inverse of the Phoenix convention, and a module exports many
+  # arbitrarily-named components). A component function is an arity-1 public
+  # `def name(assigns)` whose body renders a `~H` sigil.
+  defp build_component_index(sources) do
+    sources
+    |> Enum.flat_map(fn {_path, src} -> module_components(src) end)
+    |> Map.new()
+  end
+
+  defp module_components(source) do
+    case Sourceror.parse_string(source) do
+      {:ok, ast} ->
+        ast
+        |> Macro.prewalker()
+        |> Enum.flat_map(fn
+          {:defmodule, _, [{:__aliases__, _, parts}, [{_do, body}]]} ->
+            [{Enum.map_join(parts, ".", &Atom.to_string/1), component_fn_names(body)}]
+
+          _ ->
+            []
+        end)
+
+      _ ->
+        []
+    end
+  end
+
+  # Every public arity-1 `def` is a potential component the module exposes as a
+  # `<.tag>`. A function-component is invoked positionally, so its parameter may
+  # be `assigns`, a pattern (`%{name: n}`), and the head may carry a `when` guard
+  # or a `do:`-shorthand body — none of which change that the function name is a
+  # tag. Some are plain arity-1 helpers, not components; indexing those is the
+  # conservative direction (it only KEEPS more imports, never drops a needed one)
+  # — the purpose here is to decide which imports are safe to prune.
+  defp component_fn_names(body) do
+    body
+    |> Macro.prewalker()
+    |> Enum.flat_map(fn
+      {:def, _, [head | _]} -> List.wrap(arity_one_def_name(head))
+      _ -> []
+    end)
+    |> MapSet.new()
+  end
+
+  # the name of an arity-1 `def`, unwrapping a `when` guard; nil otherwise
+  defp arity_one_def_name({:when, _, [head | _]}), do: arity_one_def_name(head)
+  defp arity_one_def_name({name, _, [_arg]}) when is_atom(name), do: Atom.to_string(name)
+  defp arity_one_def_name(_), do: nil
 
   @doc """
   Corpus pass: one plan entry per accepted candidate across `sources`
@@ -576,18 +634,19 @@ defmodule Number42.Refactors.Ex.ExtractToPublicComponent do
   defp rewrite(source, plans, opts, prepared) do
     write_root = Keyword.get(opts, :write_root, File.cwd!())
     dry_run? = Keyword.get(opts, :dry_run, false)
+    index = Map.get(prepared, :component_index, %{})
 
-    unless dry_run?, do: write_component_files(plans, write_root)
+    unless dry_run?, do: write_component_files(plans, write_root, index)
 
     case resolve_target_file(source, opts, prepared) do
-      file when is_binary(file) -> rewrite_occurrences(source, plans, file)
+      file when is_binary(file) -> rewrite_occurrences(source, plans, file, index)
       _ -> source
     end
   end
 
   # Each distinct component → its own file. The component body + caller context
   # are taken from the plan's representative occurrence.
-  defp write_component_files(plans, write_root) do
+  defp write_component_files(plans, write_root, index) do
     plans
     |> Enum.uniq_by(& &1.module)
     |> Enum.each(fn plan ->
@@ -596,18 +655,177 @@ defmodule Number42.Refactors.Ex.ExtractToPublicComponent do
 
       unless File.exists?(path) do
         File.mkdir_p!(Path.dirname(path))
-        File.write!(path, render_module(plan))
+        File.write!(path, render_module(plan, index))
       end
     end)
   end
 
-  defp rewrite_occurrences(source, plans, file) do
+  defp rewrite_occurrences(source, plans, file, index) do
     file_plans = Enum.filter(plans, &(&1.file == file))
 
     case file_plans do
-      [] -> source
-      _ -> source |> rewrite_sigils(file_plans) |> ensure_aliases(file_plans)
+      [] ->
+        source
+
+      _ ->
+        source
+        |> rewrite_sigils(file_plans)
+        |> ensure_aliases(file_plans)
+        |> prune_dead_directives(index)
     end
+  end
+
+  # After a subtree is lifted out, an `alias`/`import` the caller had only for
+  # that subtree (`alias …MediaUrl` used solely inside the extracted markup) is
+  # now dead and would trip `--warnings-as-errors`. Drop every top-level
+  # `alias`/`import` whose introduced name no longer appears anywhere else in the
+  # rewritten source — sigil bodies included (the reference may have lived in
+  # `MediaUrl.foo(...)` inside the `~H`). Conservative: a name we cannot pin to a
+  # single short token (a bare `import Foo.Bar` exposing snake_case components,
+  # an `import …, only: […]`) is left alone — its exported names are not
+  # enumerable here, so we cannot prove it dead.
+  defp prune_dead_directives(source, index) do
+    case dead_directive_lines(source, index) do
+      [] -> source
+      dead -> drop_lines(source, dead)
+    end
+  end
+
+  defp dead_directive_lines(source, index) do
+    case Sourceror.parse_string(source) do
+      {:ok, ast} ->
+        ast
+        |> top_level_directive_nodes()
+        |> Enum.filter(&directive_dead?(&1, source, index))
+        |> Enum.map(&directive_line/1)
+
+      _ ->
+        []
+    end
+  end
+
+  # Top-level `alias`/`import` nodes inside the (single) module body.
+  defp top_level_directive_nodes(ast) do
+    ast
+    |> Macro.prewalker()
+    |> Enum.filter(fn
+      {directive, _meta, [{:__aliases__, _, _} | _]} when directive in [:alias, :import] -> true
+      _ -> false
+    end)
+  end
+
+  # An `alias` is dead iff it introduces exactly one short name (a plain
+  # `alias Foo.Bar` → `Bar`, or `alias Foo.Bar, as: Baz` → `Baz`) and that name
+  # appears nowhere else in the source. A multi-name group alias is left alone.
+  #
+  # An `import …, only: [foo: 1]` names its functions explicitly — dead iff none
+  # of them is used (as a call or a `<.foo>` tag).
+  #
+  # A plain `import Foo.Bar` exposes function-components as tags whose names the
+  # module name does NOT reliably echo (`Item3dPreview` provides
+  # `<.item_3d_preview>`, not `<.item3d_preview>`; a module exports several
+  # arbitrarily-named components). So we resolve the module's ACTUAL component
+  # names from the corpus `index` and prune iff none appears as a `<.tag>`. A
+  # module absent from the index (an external dependency we cannot read) is only
+  # pruned when the body has NO local `<.tag>` at all — any tag could be its.
+  defp directive_dead?({:import, _, _} = node, source, index) do
+    case import_only_names(directive_text(node)) do
+      names when is_list(names) ->
+        Enum.all?(names, fn n -> not import_name_used?(n, source, directive_line(node)) end)
+
+      nil ->
+        plain_import_dead?(node, source, index)
+    end
+  end
+
+  defp directive_dead?(node, source, _index) do
+    case introduced_short_name(node) do
+      nil -> false
+      name -> not used_elsewhere?(name, source, directive_line(node))
+    end
+  end
+
+  defp plain_import_dead?({:import, _, [{:__aliases__, _, parts}]}, source, index) do
+    module = Enum.map_join(parts, ".", &Atom.to_string/1)
+
+    case Enum.find(index, fn {mod, _comps} -> String.ends_with?(mod, module) end) do
+      {_mod, comps} -> not Enum.any?(comps, &component_used?(&1, source))
+      nil -> not body_has_local_tag?(source)
+    end
+  end
+
+  defp plain_import_dead?(_node, source, _index), do: not body_has_local_tag?(source)
+
+  # A module component is used as a HEEx tag `<.foo>` or a plain call `foo(...)`.
+  defp component_used?(name, source) do
+    String.contains?(source, "<.#{name}") or Regex.match?(~r/(?<![\w.])#{name}\(/, source)
+  end
+
+  # An `import …, only: [foo: 1]` name is used either as a call `foo(...)` or as
+  # a HEEx component tag `<.foo>`. The tag form has a leading `.` that the bound-
+  # token check rejects, so test it separately.
+  defp import_name_used?(name, source, directive_line) do
+    used_elsewhere?(name, source, directive_line) or String.contains?(source, "<.#{name}")
+  end
+
+  # Any `<.local_component>` tag anywhere in the source (the conservative gate
+  # for keeping a plain import whose module we cannot read).
+  defp body_has_local_tag?(source), do: Regex.match?(~r/<\.[a-z_]/, source)
+
+  defp directive_text({_d, _meta, _args} = node), do: Macro.to_string(node)
+
+  defp introduced_short_name({:alias, _, [{:__aliases__, _, parts}]}),
+    do: parts |> List.last() |> Atom.to_string()
+
+  defp introduced_short_name({:alias, _, [{:__aliases__, _, parts}, opts]}) do
+    case alias_as_opt(opts) do
+      nil -> parts |> List.last() |> Atom.to_string()
+      as -> as
+    end
+  end
+
+  defp introduced_short_name(_), do: nil
+
+  # The `as:` target of `alias Foo.Bar, as: Baz`. Sourceror wraps the keyword
+  # key in `{:__block__, _, [:as]}`, so a bare `Keyword.get(opts, :as)` misses
+  # it — match the wrapped pair directly.
+  defp alias_as_opt(opts) when is_list(opts) do
+    Enum.find_value(opts, fn
+      {{:__block__, _, [:as]}, {:__aliases__, _, parts}} ->
+        parts |> List.last() |> Atom.to_string()
+
+      {:as, {:__aliases__, _, parts}} ->
+        parts |> List.last() |> Atom.to_string()
+
+      _ ->
+        nil
+    end)
+  end
+
+  defp alias_as_opt(_), do: nil
+
+  # Does `name` appear as a bound token anywhere in `source` other than on the
+  # directive's own line? Word-boundary match so `MediaUrl` does not match
+  # `MediaUrlHelper`.
+  defp used_elsewhere?(name, source, directive_line) do
+    re = ~r/(?<![A-Za-z0-9_.])#{Regex.escape(name)}(?![A-Za-z0-9_])/
+
+    source
+    |> String.split("\n", trim: false)
+    |> Enum.with_index(1)
+    |> Enum.any?(fn {line, idx} -> idx != directive_line and Regex.match?(re, line) end)
+  end
+
+  defp directive_line({_d, meta, _a}), do: Keyword.get(meta, :line, 0)
+
+  defp drop_lines(source, lines) do
+    drop = MapSet.new(lines)
+
+    source
+    |> String.split("\n", trim: false)
+    |> Enum.with_index(1)
+    |> Enum.reject(fn {_line, idx} -> MapSet.member?(drop, idx) end)
+    |> Enum.map_join("\n", fn {line, _idx} -> line end)
   end
 
   defp rewrite_sigils(source, file_plans) do
@@ -655,16 +873,16 @@ defmodule Number42.Refactors.Ex.ExtractToPublicComponent do
 
   # ---- module rendering ----------------------------------------------------
 
-  defp render_module(%{component_kind: :live_component} = plan),
-    do: render_live_component_module(plan)
+  defp render_module(%{component_kind: :live_component} = plan, index),
+    do: render_live_component_module(plan, index)
 
-  defp render_module(%{component_kind: :function} = plan),
-    do: render_function_module(plan)
+  defp render_module(%{component_kind: :function} = plan, index),
+    do: render_function_module(plan, index)
 
-  defp render_function_module(plan) do
+  defp render_function_module(plan, index) do
     """
     defmodule #{plan.module} do
-    #{module_header(plan, ":html")}
+    #{module_header(plan, ":html", index)}
     #{attr_decls(plan)}
       def #{plan.name}(assigns) do
         ~H\"\"\"
@@ -680,10 +898,10 @@ defmodule Number42.Refactors.Ex.ExtractToPublicComponent do
   # ("cannot declare attributes for function update/2"). The live_component's
   # assigns flow in through `update/2` and are validated at the call site, not
   # by `attr`. The read assigns are recorded as a `@moduledoc` note instead.
-  defp render_live_component_module(plan) do
+  defp render_live_component_module(plan, index) do
     """
     defmodule #{plan.module} do
-    #{module_header(plan, ":live_component")}
+    #{module_header(plan, ":live_component", index)}
 
       @doc \"\"\"
       Stateful component lifted from #{Path.basename(plan.file)}.
@@ -706,7 +924,7 @@ defmodule Number42.Refactors.Ex.ExtractToPublicComponent do
 
   # `use <App>Web, :html|:live_component` (reproducing the caller's web prefix)
   # plus the caller's import/alias lines so sub-component/`~p` refs resolve.
-  defp module_header(plan, use_arg) do
+  defp module_header(plan, use_arg, index) do
     use_line =
       case plan.web_prefix do
         nil ->
@@ -722,15 +940,12 @@ defmodule Number42.Refactors.Ex.ExtractToPublicComponent do
     # carrying the caller's whole import block would litter the module with
     # unused-alias/import warnings.
     body_tokens = body_tokens(plan.body)
-    # local component tags in the body (`<.item_row>` → "item_row"). A plain
-    # `import Foo.Bar` is kept only when the body calls `<.bar>` (snake_case of
-    # the module's last segment, the Phoenix convention) — so a body using
-    # `<.item_row>` does not drag in every sibling component import.
+    # local component tags in the body (`<.item_row>` → "item_row").
     local_components = local_component_tags(plan.node)
 
     ctx_lines =
       (plan.context.aliases ++ plan.context.imports)
-      |> Enum.filter(&directive_used?(&1, body_tokens, local_components))
+      |> Enum.filter(&directive_used?(&1, body_tokens, local_components, index))
       |> Enum.map(&indent(&1, "  "))
 
     Enum.join([use_line | ctx_lines], "\n")
@@ -755,36 +970,65 @@ defmodule Number42.Refactors.Ex.ExtractToPublicComponent do
   end
 
   # An `alias`/`import` directive is kept iff a name it introduces appears in the
-  # body. We can only enumerate the introduced names for an `alias` (its bound
-  # name — `alias Foo.Bar, as: Baz` → `Baz`, else `Bar`) and an
-  # `import …, only: [f: n]` (the function names). A **plain `import Module`**
-  # exposes that module's functions in snake_case (`<.asset_preview>` from
-  # `import …AssetPreview`) which the module name does not echo — so a plain
-  # import is always kept (conservative: an unused-import warning beats an
-  # undefined-function compile error).
-  defp directive_used?(directive, tokens, local_components) do
+  # body. We enumerate the introduced names for an `alias` (its bound name —
+  # `alias Foo.Bar, as: Baz` → `Baz`, else `Bar`) and an `import …, only: [f: n]`
+  # (the function names). A **plain `import Module`** exposes that module's
+  # component functions as `<.tag>`s; we resolve the module's ACTUAL components
+  # from the corpus `index` and keep iff one is used.
+  defp directive_used?(directive, tokens, local_components, index) do
     case directive_names(directive) do
-      :plain_import -> plain_import_used?(directive, local_components)
+      :plain_import -> plain_import_used?(directive, tokens, local_components, index)
       names -> Enum.any?(names, &MapSet.member?(tokens, &1))
     end
   end
 
-  # Keep a plain `import Foo.Bar` when the body uses a local `<.xxx>` it could
-  # plausibly provide. A **single-component** module (`ItemRow`) provides
-  # `<.item_row>` by Phoenix convention → keep iff that exact tag is present. A
-  # **collection** module (`*Components`/`*Layouts`) exports many arbitrarily
-  # named components → we cannot map names statically, so keep it whenever the
-  # body has any local component tag (conservative: an unused-import warning
-  # beats dropping a needed import and breaking compile).
-  defp plain_import_used?(directive, local_components) do
+  # Keep a plain `import Foo.Bar` iff the body uses one of the module's exposed
+  # functions — either as a HEEx tag `<.foo>` (in `local_components`) or as a
+  # plain call `foo(...)` (a body token). The module's real names come from the
+  # corpus `index` (`Item3dPreview` → `item_3d_preview`, not the unreliable
+  # `Macro.underscore`; a collection module → its actual exports). A module
+  # absent from the index (an unreadable external dependency) keeps the
+  # conservative fallback: the Phoenix-convention single tag, else kept while
+  # any local tag exists.
+  defp plain_import_used?(directive, tokens, local_components, index) do
     seg = last_segment(directive)
+    module = import_module(directive)
 
     cond do
-      not is_binary(seg) -> false
-      MapSet.member?(local_components, Macro.underscore(seg)) -> true
-      collection_module_segment?(seg) -> MapSet.size(local_components) > 0
-      true -> false
+      not is_binary(seg) ->
+        false
+
+      comps = index_components(module, index) ->
+        Enum.any?(comps, &(MapSet.member?(local_components, &1) or MapSet.member?(tokens, &1)))
+
+      MapSet.member?(local_components, Macro.underscore(seg)) ->
+        true
+
+      collection_module_segment?(seg) ->
+        MapSet.size(local_components) > 0
+
+      true ->
+        false
     end
+  end
+
+  # The full module path of a plain `import Foo.Bar` directive string.
+  defp import_module(directive) do
+    case Regex.run(~r/import\s+([A-Z][\w.]*)/, directive) do
+      [_, mod] -> mod
+      _ -> nil
+    end
+  end
+
+  # The corpus components of `module` (by suffix match against the index), or nil
+  # when the module is not in the corpus — distinguishing "no components" from
+  # "unknown module" so the caller can fall back.
+  defp index_components(nil, _index), do: nil
+
+  defp index_components(module, index) do
+    Enum.find_value(index, fn {mod, comps} ->
+      if String.ends_with?(mod, module), do: comps, else: nil
+    end)
   end
 
   defp collection_module_segment?(seg),
