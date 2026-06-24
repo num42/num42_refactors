@@ -198,8 +198,18 @@ defmodule Number42.Refactors.Heex.ComponentNaming do
       is_nil(collection) -> motif
       collection == Atom.to_string(motif) -> motif
       type_word == Atom.to_string(motif) -> motif
+      suffix_redundant?(collection, type_word) -> String.to_atom(collection)
       true -> String.to_atom("#{collection}_#{type_word}")
     end
+  end
+
+  # The collection already carries the type word as its last segment — appending
+  # it again stutters (`@brand_price_lists` + `list` → `brand_price_lists_list`).
+  # Match the type word OR its plural (`list`/`lists`, `table`/`tables`) so a
+  # plural collection name (`brand_price_lists`) suppresses a singular suffix.
+  defp suffix_redundant?(collection, type_word) do
+    last = collection |> String.split("_") |> List.last()
+    last == type_word or last == type_word <> "s"
   end
 
   # The motif's own type word (`data_table` → `table`, `nav_list` → `list`),

@@ -192,6 +192,31 @@ defmodule Number42.Refactors.Heex.ComponentNamingTest do
       assert ComponentNaming.derive(n, []) == :tags_list
     end
 
+    test "no stutter when the collection name already ends in the type word (plural)" do
+      # @brand_price_lists + item_list must not become brand_price_lists_list
+      n =
+        parse(~S"""
+        <ul>
+          <li :for={pl <- @brand_price_lists}>{pl.name}</li>
+          <li :for={pl <- @brand_price_lists}>{pl.name}</li>
+        </ul>
+        """)
+
+      assert ComponentNaming.derive(n, []) == :brand_price_lists
+    end
+
+    test "no stutter when the collection name ends in the singular type word" do
+      n =
+        parse(~S"""
+        <ul>
+          <li :for={t <- @todo_list}>{t.label}</li>
+          <li :for={t <- @todo_list}>{t.label}</li>
+        </ul>
+        """)
+
+      assert ComponentNaming.derive(n, []) == :todo_list
+    end
+
     test "with no usable assign the bare motif is kept" do
       # static options, no @assign at all → nothing to qualify with → :select_field
       n =
