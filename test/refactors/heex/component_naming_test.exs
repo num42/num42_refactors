@@ -51,64 +51,91 @@ defmodule Number42.Refactors.Heex.ComponentNamingTest do
     end
   end
 
-  describe "derive/2 — structural motif (source #0)" do
-    test "a data_table shape is named by its motif, not the reserved <table> tag" do
+  describe "derive/2 — structural motif (source #0), qualified by dominant assign" do
+    test "a data_table is named {dominant_assign}_table, not the reserved <table> tag" do
       # <table> alone would name :table (a CoreComponents builtin) → :table_2;
-      # the motif names it meaningfully instead
+      # the motif gives the `_table` type word, the dominant `@entries` assign
+      # makes it mean something in this codebase
       n =
         parse(~S"""
         <table>
-          <thead><tr><th>A</th><th>B</th></tr></thead>
+          <thead><tr><th>Name</th><th>Qty</th></tr></thead>
           <tbody>
-            <tr><td>{@a}</td><td>{@b}</td></tr>
-            <tr><td>{@c}</td><td>{@d}</td></tr>
+            <tr :for={entry <- @entries}><td>{entry.name}</td><td>{entry.qty}</td></tr>
+            <tr><td>{@entries}</td><td>{@entries}</td></tr>
           </tbody>
         </table>
         """)
 
-      assert ComponentNaming.derive(n, []) == :data_table
+      assert ComponentNaming.derive(n, []) == :entries_table
     end
 
-    test "a select_field shape is named by its motif" do
+    test "a select_field is named {dominant_assign}_field" do
       n =
         parse(~S"""
         <select name="x">
-          <option>{@a}</option>
-          <option>{@b}</option>
-          <option>{@c}</option>
+          <option :for={c <- @categories}>{c.label}</option>
+          <option>{@categories}</option>
+          <option>{@categories}</option>
         </select>
         """)
 
-      assert ComponentNaming.derive(n, []) == :select_field
+      assert ComponentNaming.derive(n, []) == :categories_field
     end
 
-    test "a button_group shape beats a class hint / heading" do
+    test "a button_group is named {dominant_assign}_group, beating a class hint / heading" do
       # without the motif, the <h2> heading would name it :pick_one
       n =
         parse(~S"""
         <div>
           <h2>Pick one</h2>
-          <button>{@a}</button>
-          <button>{@b}</button>
+          <button>{@actions}</button>
+          <button>{@actions}</button>
         </div>
         """)
 
-      assert ComponentNaming.derive(n, []) == :button_group
+      assert ComponentNaming.derive(n, []) == :actions_group
     end
 
-    test "a card_grid shape beats the :card class hint" do
+    test "a card_grid is named {dominant_assign}_grid, beating the :card class hint" do
       # each child carries `card` → class-hint chain would name it :card;
-      # the grid-of-cards motif is the more precise name
+      # the grid-of-cards motif + dominant @products is the more precise name
       n =
         parse(~S"""
         <div>
-          <div class="card shadow"><h3>{@a}</h3></div>
-          <div class="card shadow"><h3>{@b}</h3></div>
-          <div class="card shadow"><h3>{@c}</h3></div>
+          <div class="card shadow"><h3>{@products}</h3></div>
+          <div class="card shadow"><h3>{@products}</h3></div>
+          <div class="card shadow"><h3>{@products}</h3></div>
         </div>
         """)
 
-      assert ComponentNaming.derive(n, []) == :card_grid
+      assert ComponentNaming.derive(n, []) == :products_grid
+    end
+
+    test "a nav_list is named {dominant_assign}_list" do
+      n =
+        parse(~S"""
+        <nav>
+          <.link :for={item <- @brand_items} navigate={item.path}>{item.label}</.link>
+          <.link navigate="/x">{@brand_items}</.link>
+        </nav>
+        """)
+
+      assert ComponentNaming.derive(n, []) == :brand_items_list
+    end
+
+    test "with no usable assign the bare motif is kept" do
+      # static options, no @assign at all → nothing to qualify with → :select_field
+      n =
+        parse(~S"""
+        <select name="x">
+          <option>One</option>
+          <option>Two</option>
+          <option>Three</option>
+        </select>
+        """)
+
+      assert ComponentNaming.derive(n, []) == :select_field
     end
 
     test "an :unknown motif is transparent — the existing chain is unchanged" do
@@ -117,13 +144,13 @@ defmodule Number42.Refactors.Heex.ComponentNamingTest do
       assert ComponentNaming.derive(n, []) == :section
     end
 
-    test "a motif name is disambiguated against taken names" do
+    test "a qualified motif name is disambiguated against taken names" do
       n =
         parse(~S"""
-        <select name="x"><option>{@a}</option><option>{@b}</option></select>
+        <select name="x"><option>{@categories}</option><option>{@categories}</option></select>
         """)
 
-      assert ComponentNaming.derive(n, [:select_field]) == :select_field_2
+      assert ComponentNaming.derive(n, [:categories_field]) == :categories_field_2
     end
   end
 

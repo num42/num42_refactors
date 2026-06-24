@@ -302,10 +302,11 @@ defmodule Number42.Refactors.Ex.ExtractToPublicComponentTest do
   end
 
   describe "build_plan/2 — module + naming" do
-    test "names the module by motif under the configured namespace" do
+    test "names the module by motif qualified with the dominant assign" do
+      # data_table motif + dominant @rows assign → rows_table / RowsTable
       [plan] = build(%{"lib/a.ex" => page_with_table("rows")})
-      assert plan.name == :data_table
-      assert plan.module == "MyAppWeb.Components.DataTable"
+      assert plan.name == :rows_table
+      assert plan.module == "MyAppWeb.Components.RowsTable"
       assert plan.component_kind == :function
     end
 
@@ -348,7 +349,7 @@ defmodule Number42.Refactors.Ex.ExtractToPublicComponentTest do
       }
 
       plans = build(sources)
-      assert plans |> Enum.map(& &1.module) |> Enum.uniq() == ["MyAppWeb.Components.DataTable"]
+      assert plans |> Enum.map(& &1.module) |> Enum.uniq() == ["MyAppWeb.Components.RowsTable"]
     end
   end
 
@@ -368,8 +369,8 @@ defmodule Number42.Refactors.Ex.ExtractToPublicComponentTest do
         )
 
       refute out =~ ~s(<thead>)
-      assert out =~ "<DataTable.data_table rows={@rows} />"
-      assert out =~ "alias MyAppWeb.Components.DataTable"
+      assert out =~ "<RowsTable.rows_table rows={@rows} />"
+      assert out =~ "alias MyAppWeb.Components.RowsTable"
     end
 
     test "a stateful (phx-event) occurrence is left unchanged — live_components are declined (#374)" do
@@ -456,11 +457,11 @@ defmodule Number42.Refactors.Ex.ExtractToPublicComponentTest do
         project_config: @config
       )
 
-      path = Path.join(root, "lib/my_app_web/components/data_table.ex")
+      path = Path.join(root, "lib/my_app_web/components/rows_table.ex")
       assert File.exists?(path)
       module = File.read!(path)
 
-      assert module =~ "defmodule MyAppWeb.Components.DataTable do"
+      assert module =~ "defmodule MyAppWeb.Components.RowsTable do"
       assert module =~ "use MyAppWeb, :html"
       # alias whose name the body references is kept
       assert module =~ "alias MyAppWeb.Helpers.Formatting"
@@ -469,7 +470,7 @@ defmodule Number42.Refactors.Ex.ExtractToPublicComponentTest do
       # body has a local `<.badge>` → plain import kept (may expose it)
       assert module =~ "import MyAppWeb.TextComponents"
       assert module =~ "attr :rows"
-      assert module =~ "def data_table(assigns)"
+      assert module =~ "def rows_table(assigns)"
     end
 
     test "drops plain imports when the body has no local component tag (pure HTML)" do
@@ -515,7 +516,7 @@ defmodule Number42.Refactors.Ex.ExtractToPublicComponentTest do
         project_config: @config
       )
 
-      module = File.read!(Path.join(root, "lib/my_app_web/components/data_table.ex"))
+      module = File.read!(Path.join(root, "lib/my_app_web/components/rows_table.ex"))
       refute module =~ "import MyAppWeb.TextComponents"
     end
 

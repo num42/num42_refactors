@@ -7,11 +7,16 @@ defmodule Number42.Refactors.Heex.ComponentNaming do
   to the codebase (an i18n app names from `gettext` strings; an
   assign-centric one from the dominant assign):
 
-    0. **structural motif** — a recognised plural skeleton (`StructureMotif`)
-       names the block by its component *type* (`data_table`, `select_field`,
-       ...), beating the tag because the type is more precise than the tag
-       (`<table>` → `data_table`, not the reserved `table` builtin). Returns
-       `:unknown` on no match, so the chain below is unaffected;
+    0. **structural motif, qualified by the dominant assign** — a recognised
+       plural skeleton (`StructureMotif`) classifies the block by component
+       *type* (`data_table`, `nav_list`, ...). The type word is generic, so the
+       dominant `@assign` qualifies it: a `data_table` over `@entries` is an
+       `entries_table`, over `@preview` a `preview_table`; a `nav_list` of
+       `@brand_item`s a `brand_item_list`. The assign is what makes the name
+       mean something in *this* codebase; the motif supplies the type suffix
+       (`_table`, `_list`, `_field`, ...) so the kind stays legible. With no
+       usable assign the bare motif (`data_table`) is kept. `:unknown` yields
+       nil, so the chain below is unaffected;
     1. **semantic tag** — `<section>`, `<article>`, `<table>`, ... the tag
        already declares what the block is;
     2. **class-hint noun** — a recognised UI noun in the `class` attribute
@@ -149,13 +154,44 @@ defmodule Number42.Refactors.Heex.ComponentNaming do
 
   # ---- sources -------------------------------------------------------------
 
-  # source #0: a recognised structural motif names the block by component type
-  # (`data_table`, `select_field`, ...). `:unknown` yields nil, so the rest of
-  # the chain runs unchanged.
+  # source #0: a recognised structural motif classifies the block by component
+  # type (`data_table`, `nav_list`, ...), then the dominant assign qualifies the
+  # type so the name means something in this codebase (`data_table` over
+  # `@entries` → `entries_table`). `:unknown` yields nil, so the rest of the
+  # chain runs unchanged.
   defp motif_name(node) do
     case StructureMotif.classify(node) do
-      {:ok, motif} -> motif
+      {:ok, motif} -> qualify_motif(motif, node)
       :unknown -> nil
+    end
+  end
+
+  # Replace the motif's generic qualifier with the dominant assign, keeping its
+  # type word as a suffix: `data_table` + `@entries` → `entries_table`,
+  # `nav_list` + `@brand_item` → `brand_item_list`. The type word is the motif
+  # atom's last `_`-segment (`data_table` → `table`). A reserved/empty assign
+  # leaves the bare motif (`data_table`) so the chain still has a usable name.
+  defp qualify_motif(motif, node) do
+    type_word = motif |> Atom.to_string() |> String.split("_") |> List.last()
+
+    case dominant_assign(node) do
+      nil -> motif
+      ^type_word -> motif
+      assign -> String.to_atom("#{assign}_#{type_word}")
+    end
+  end
+
+  # the single most-referenced, name-worthy assign as a string (or nil); a
+  # reserved Phoenix/CoreComponents builtin is skipped so the qualified name
+  # cannot itself clash (`form_table` is fine, but a bare `@form`-only table
+  # falls through to the next assign).
+  defp dominant_assign(node) do
+    node
+    |> assign_names()
+    |> Enum.find(&(not MapSet.member?(reserved(), &1)))
+    |> case do
+      nil -> nil
+      assign -> Atom.to_string(assign)
     end
   end
 
