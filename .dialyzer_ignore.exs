@@ -108,6 +108,11 @@
   {"lib/number42/refactors/ex/extract_socket_to_pipe.ex", :pattern_match},
   {"lib/number42/refactors/ex/extract_to_pipeline.ex", :call},
   {"lib/number42/refactors/ex/extract_to_pipeline.ex", :pattern_match},
+  # `MergeNearCloneComponents` rewrites a def's sigil body via
+  # `Sourceror.patch_string/2` with map-patches (`%{range:, change:}`), whose
+  # element type sits outside the `[Sourceror.Patch.t()]` @spec — same dep-spec
+  # gap. Its MapSet.subset? findings are Category B.
+  {"lib/number42/refactors/ex/merge_near_clone_components.ex", :call},
   # `unused_variable.ex` calls `Patch.replace` in `rename_patch/1`; the `:call`
   # and the two `:no_return` findings (the anonymous mapper and `rename_patch/1`
   # itself) are pure follow-ons from the spec gap above. The `:call_without_opaque`

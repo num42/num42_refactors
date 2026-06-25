@@ -9,6 +9,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`Heex.TreeDiff` + `Heex.NearClones` + `MergeNearCloneComponents`** (#380,
+  the refactor default-OFF): near-clone detection for HEEx via tree-edit-distance,
+  plus a refactor that merges near-clone sibling function components into one
+  parametrised component. `Heex.Clones` clusters by exact normalised-hash
+  equality, so it cannot see two components hand-written from one template with
+  small drift (a tag swapped, a class string changed, one heading reworded) —
+  they share no hash in any mode. `Heex.TreeDiff` adds the missing measure:
+  classic **Zhang-Shasha** ordered-tree edit distance over normalised trees,
+  with integer op-costs and a label of `{kind, primary}` (tag/header/code/text)
+  so attribute drift is a cheap relabel — not a delete+insert — and its
+  per-attr granularity is recovered in the divergence descriptor. `diff/2`
+  returns typed divergences (`:tag`, `:attr_value`, `:text`, `:structural`) with
+  a child-index path; `similarity/2` is `1 - distance / max(mass_a, mass_b)`.
+  `Heex.NearClones` runs `:exact` fragments through a mass-band prefilter →
+  pairwise similarity → single-linkage union-find (safe here because the merge
+  gates on each occurrence's diff against one representative, not on the
+  clustering) → subtree-containment and subsumed-cluster suppression, returning
+  the `Clones`-shaped cluster plus a per-occurrence diff and a precomputed
+  `mergeable` flag (false on any `:structural` divergence).
+  `MergeNearCloneComponents` (default-OFF, opt-in) collapses a near-clone
+  cluster into a single parametrised component, in two modes: **sibling defs**
+  in one module, and — the real #380 shape — **single-`def` component modules
+  across files** (what `ExtractToPublicComponent` emits: `BrandItemAssetsImages`
+  + `…Images2` in their own files). The merge keeps the larger tree as the
+  survivor (mass tie → the canonical name, the `foo` of a `foo`/`foo_2` pair),
+  normalises the tag to the base's, lifts the one divergent text node to
+  `attr :label, :string, default: …`, keeps the **survivor's own `class`
+  values verbatim** (the clone's diverging classes are dropped with the clone —
+  one component's styling wins, no union/guessing), and rewrites every call site
+  to the survivor (alias swapped, `label="…"` passed) **across files** via
+  `prepare/source_files` corpus resolution, then deletes the merged-away
+  clone's file. Derive-or-decline: declines on any
+  `:structural` divergence (extra/missing subtree, differing `:if`/`:for` or eex
+  header, divergent child markup, kind change), a non-`class` attr divergence,
+  more than one differing text node, a lone component with no twin, or a dropped
+  clone whose caller lives outside the readable corpus (it could not be
+  rewritten). Idempotent (after merge the survivor has no twin and the clone is
+  gone). Configurable `:threshold` (default 0.85) and `:min_mass` (default 12);
+  the divergence-kind gate — not the threshold — is the soundness boundary, so a
+  lower threshold only widens candidates, never licences an unsafe merge.
+  Cross-file deletion is made safe by the engine skipping a path removed mid-run.
+  44 unit tests cover the distance/diff math, the clustering pipeline, both merge
+  modes, every decline gate, the cross-file caller rewrite, survivor-class
+  retention, and idempotence; dogfooded end-to-end on position-db (the
+  `#299 → #380` chain merges the brand-item containers and compiles clean).
+  Builds on the existing `Heex.Tree`/`Fingerprint`/`Normalizer` infra.
+
 - **`ConvertLiveComponentToFunction`** (#308, default-OFF): downgrades a
   **stateless** `Phoenix.LiveComponent` to a `:html` function component — drops
   `use ..., :live_component` for `:html`, removes the identity `update/2`,
