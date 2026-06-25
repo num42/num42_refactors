@@ -382,6 +382,94 @@ defmodule Number42.Refactors.Ex.RemoveDeadPrivateFunctionTest do
     end
   end
 
+  describe "prunes directives orphaned by the removal (#307)" do
+    test "drops an alias whose only user was the deleted defp" do
+      before_source = """
+      defmodule M do
+        alias MyApp.Cursor
+
+        def used, do: :ok
+
+        defp dead(x), do: Cursor.encode(x)
+      end
+      """
+
+      after_source = """
+      defmodule M do
+        def used, do: :ok
+      end
+      """
+
+      assert_rewrites(@subject, before_source, after_source)
+    end
+
+    test "drops an `import only:` whose named fn only the deleted defp used" do
+      before_source = """
+      defmodule M do
+        import MyApp.Helpers, only: [decorate: 1]
+
+        def used, do: :ok
+
+        defp dead(x), do: decorate(x)
+      end
+      """
+
+      after_source = """
+      defmodule M do
+        def used, do: :ok
+      end
+      """
+
+      assert_rewrites(@subject, before_source, after_source)
+    end
+
+    test "keeps an alias still used by a surviving function" do
+      assert_unchanged(@subject, """
+      defmodule M do
+        alias MyApp.Cursor
+
+        def used(x), do: Cursor.encode(x)
+      end
+      """)
+    end
+
+    test "keeps an alias used by both the dead defp and a survivor (drops only the defp)" do
+      before_source = """
+      defmodule M do
+        alias MyApp.Cursor
+
+        def used(x), do: Cursor.encode(x)
+
+        defp dead(y), do: Cursor.decode(y)
+      end
+      """
+
+      after_source = """
+      defmodule M do
+        alias MyApp.Cursor
+
+        def used(x), do: Cursor.encode(x)
+      end
+      """
+
+      assert_rewrites(@subject, before_source, after_source)
+    end
+
+    test "the pruned-directive output still compiles" do
+      source = """
+      defmodule RemoveDeadPrivateFunctionPruneCompileCheck do
+        alias Enum, as: E
+
+        def used, do: :ok
+
+        defp dead(list), do: E.count(list)
+      end
+      """
+
+      assert_compiles(apply_refactor(@subject, source))
+    end
+  end
+
   describe "idempotence" do
     test "stable after removing one dead function" do
       assert_idempotent(
