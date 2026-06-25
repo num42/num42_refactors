@@ -259,6 +259,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`IfLiftToClauses`** (default-ON) dropped the `= param` binder when it lifted
+  a function-component whose `if`/`else` branches are `~H`/`~L` sigils — e.g.
+  `def thing(assigns), do: if .. , do: ~H.., else: ~H..` became
+  `def thing(%{kind: :link}), do: ~H".."`, a head that no longer provides
+  `assigns`. A sigil expands to code that reads `assigns` from the surrounding
+  scope, but the sigil body is an opaque string, so that use is invisible to the
+  variable-usage walk and the binder (and the catch-all's param name) was
+  pruned, producing `undefined variable "assigns"` at compile time. A branch
+  body that contains a sigil now treats every param as used, so its clause keeps
+  the `= param` binder and the catch-all keeps the param name. Surfaced while
+  scoping #379 (the HEEx `if`-over-two-sigils split); the standalone unit repro
+  is covered, the position-db corpus does not happen to hit the exact bare-`if`
+  shape (a 232-file dogfood compiles clean with and without the fix).
 - **`UnusedVariable`** (#361) crashed mid-pipeline with a `FunctionClauseError`
   (`List.last/1` on a non-list) when it walked a structurally-invalid
   `case`/`fn`/`receive` node whose args were not a proper list. Valid Elixir

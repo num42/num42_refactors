@@ -437,10 +437,23 @@ defmodule Number42.Refactors.Ex.IfLiftToClauses do
 
       do_text = render_body_text(do_body, source)
       else_text = render_body_text(else_body, source)
-      else_uses = used_var_names(else_body)
+
+      # A `~H`/`~L` sigil expands to code that reads `assigns` (and any other
+      # param) from the surrounding scope, but the sigil body is an opaque
+      # string — that use is invisible to `used_var_names`. Treat every param as
+      # used by a branch that contains a sigil, so its clause keeps the `= param`
+      # binder (and the catch-all keeps the param name); otherwise the lifted
+      # clause drops `= assigns` and the output fails to compile.
+      all_params = MapSet.new(param_names)
+
+      else_uses =
+        used_var_names(else_body) |> with_sigil_params(else_body, all_params)
 
       _ = cond_ast
-      do_uses = used_var_names(do_body)
+
+      do_uses =
+        used_var_names(do_body) |> with_sigil_params(do_body, all_params)
+
       guard_uses = guard_referenced_params(atomics)
       head_uses = MapSet.union(do_uses, guard_uses)
 
@@ -458,6 +471,21 @@ defmodule Number42.Refactors.Ex.IfLiftToClauses do
     catch
       :throw, :skip -> :error
     end
+  end
+
+  # Union in every param when the body holds a sigil — its expansion reads
+  # them implicitly (see the call site). Leaves `uses` untouched otherwise.
+  defp with_sigil_params(uses, body, all_params) do
+    if contains_sigil?(body), do: MapSet.union(uses, all_params), else: uses
+  end
+
+  defp contains_sigil?(ast) do
+    ast
+    |> Macro.prewalker()
+    |> Enum.any?(fn
+      {sigil, _, _} when is_atom(sigil) -> match?("sigil_" <> _, Atom.to_string(sigil))
+      _ -> false
+    end)
   end
 
   defp contains_block_construct?(ast) do
