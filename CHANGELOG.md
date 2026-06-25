@@ -35,11 +35,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   + `…Images2` in their own files). The merge keeps the larger tree as the
   survivor (mass tie → the canonical name, the `foo` of a `foo`/`foo_2` pair),
   normalises the tag to the base's, lifts the one divergent text node to
-  `attr :label, :string, default: …`, unifies divergent `class` values by
-  **token union** (never dropping a class — both subset and non-subset cases),
-  and rewrites every call site to the survivor (alias swapped, `label="…"`
-  passed) **across files** via `prepare/source_files` corpus resolution, then
-  deletes the merged-away clone's file. Derive-or-decline: declines on any
+  `attr :label, :string, default: …`, keeps the **survivor's own `class`
+  values verbatim** (the clone's diverging classes are dropped with the clone —
+  one component's styling wins, no union/guessing), and rewrites every call site
+  to the survivor (alias swapped, `label="…"` passed) **across files** via
+  `prepare/source_files` corpus resolution, then deletes the merged-away
+  clone's file. Derive-or-decline: declines on any
   `:structural` divergence (extra/missing subtree, differing `:if`/`:for` or eex
   header, divergent child markup, kind change), a non-`class` attr divergence,
   more than one differing text node, a lone component with no twin, or a dropped
@@ -50,10 +51,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lower threshold only widens candidates, never licences an unsafe merge.
   Cross-file deletion is made safe by the engine skipping a path removed mid-run.
   44 unit tests cover the distance/diff math, the clustering pipeline, both merge
-  modes, every decline gate, the cross-file caller rewrite, union classes, and
-  idempotence; dogfooded end-to-end on position-db (`#299 → #380` chain merges
-  the brand-item containers and compiles clean). Builds on the existing
-  `Heex.Tree`/`Fingerprint`/`Normalizer` infra.
+  modes, every decline gate, the cross-file caller rewrite, survivor-class
+  retention, and idempotence; dogfooded end-to-end on position-db (the
+  `#299 → #380` chain merges the brand-item containers and compiles clean).
+  Builds on the existing `Heex.Tree`/`Fingerprint`/`Normalizer` infra.
 
 - **`ConvertLiveComponentToFunction`** (#308, default-OFF): downgrades a
   **stateless** `Phoenix.LiveComponent` to a `:html` function component — drops

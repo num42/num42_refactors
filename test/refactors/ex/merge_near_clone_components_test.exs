@@ -345,16 +345,19 @@ defmodule Number42.Refactors.Ex.MergeNearCloneComponentsTest do
       assert File.read!(paths["caller_a.ex"]) == before_a
     end
 
-    test "non-subset root classes are unified (union), not declined" do
+    test "the survivor keeps its own classes; the clone's diverging classes are dropped" do
       %{prepared: prepared, paths: paths} = setup_corpus()
 
       survivor_src = File.read!(paths["survivor.ex"])
       result = @subject.transform(survivor_src, enabled: true, prepared: prepared)
 
-      # py-3 ∪ px-2 py-2 = {py-3, px-2, py-2} — all three tokens survive.
-      assert result =~ "py-3"
-      assert result =~ "px-2"
-      assert result =~ "py-2"
+      # survivor root was class="py-3", head class="mb-2"; the clone's
+      # "px-2 py-2" / "mb-1" are NOT merged in — one component's styling wins.
+      assert result =~ ~s(class="py-3")
+      assert result =~ ~s(class="mb-2")
+      refute result =~ "px-2"
+      refute result =~ "py-2"
+      refute result =~ "mb-1"
     end
 
     test "the dropped clone's own pass is a no-op (survivor owns the effects)" do

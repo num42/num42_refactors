@@ -37,9 +37,9 @@ defmodule Number42.Refactors.Ex.MergeNearCloneComponents do
     * **tag** — an element tag differs → normalise to the base tree's tag (base =
       the LARGER tree; mass tie → the canonical name, the `foo` of a `foo`/`foo_2`
       pair).
-    * **class** — a `class` attr value differs → **token union** of both sets
-      (base order preserved, member-only tokens appended). Never drops a class —
-      sound for both subset and non-subset cases.
+    * **class** — a `class` attr value differs → the **survivor keeps its own
+      class verbatim**; the clone's differing classes are dropped with the clone.
+      No union, no guessing — one component's styling wins.
     * **text** — a pure text node differs → lift to `attr :label` (the base's text
       is the default); each call site passes its own via `label="…"`.
 
@@ -91,10 +91,10 @@ defmodule Number42.Refactors.Ex.MergeNearCloneComponents do
     the tag and a text node differ. Tree-edit-distance sees the small distance
     and reports the divergent nodes; where every divergence is a tag, a `class`
     value, or a pure text node, we collapse the duplicates into one parametrised
-    `def` (text → `attr :label`, tag normalised to the larger tree's, classes
-    unified as a checked superset) and rewrite each call site to the survivor.
-    Default-OFF and conservative: any structural difference, a second differing
-    text, a non-`class` attr, or non-subset classes declines the merge.
+    `def` (text → `attr :label`, tag normalised to the larger tree's, the
+    survivor's own classes kept and the clone's dropped) and rewrite each call
+    site to the survivor. Default-OFF and conservative: any structural
+    difference, a second differing text, or a non-`class` attr declines the merge.
     """
   end
 
@@ -283,7 +283,7 @@ defmodule Number42.Refactors.Ex.MergeNearCloneComponents do
 
     with {:ok, per_member} <- reconcile_all(base_norm, members),
          {:ok, label_node_path} <- single_text_divergence(per_member) do
-      assemble_plan(base, base_root, members, per_member, label_node_path)
+      assemble_plan(base, base_root, members, label_node_path)
     else
       _ -> :error
     end
@@ -308,10 +308,9 @@ defmodule Number42.Refactors.Ex.MergeNearCloneComponents do
 
   defp handled_kind?({:tag, _path, _from, _to}), do: true
   defp handled_kind?({:text, _path, _from, _to}), do: true
-  # A `class` divergence is always mechanically reconcilable: subset → the longer
-  # set is the safe superset; non-subset → the token union (both sets merged).
-  # The non-subset union is the looser, opt-in-by-default-OFF heuristic — it never
-  # *drops* a class, only adds.
+  # A `class` divergence is always reconcilable by keeping the survivor's class
+  # verbatim and dropping the clone's (the clone's def/file is removed anyway).
+  # No union, no guessing — one component's styling wins.
   defp handled_kind?({:attr_value, _path, "class", _from, _to}), do: true
   defp handled_kind?(_), do: false
 
@@ -337,13 +336,12 @@ defmodule Number42.Refactors.Ex.MergeNearCloneComponents do
     end
   end
 
-  defp assemble_plan(base, base_root, members, per_member, label_path) do
+  defp assemble_plan(base, base_root, members, label_path) do
     base_text = if label_path == :none, do: nil, else: text_at(base_root, label_path)
 
-    merged_body =
-      base.body
-      |> maybe_parametrise_text(base, label_path)
-      |> apply_class_unification(base, per_member, label_path)
+    # The survivor keeps its own classes verbatim; a clone's divergent classes
+    # are dropped with the clone. Only the text node is parametrised.
+    merged_body = maybe_parametrise_text(base.body, base, label_path)
 
     labels =
       Map.new(members, fn m ->
@@ -414,88 +412,6 @@ defmodule Number42.Refactors.Ex.MergeNearCloneComponents do
       {pos, len} ->
         binary_part(body, 0, pos) <>
           replacement <> binary_part(body, pos + len, byte_size(body) - pos - len)
-
-      :nomatch ->
-        body
-    end
-  end
-
-  # At every path where a `class` diverges, rewrite the base body's class to the
-  # **token union** across base + all members. Union is correct in both cases:
-  # subset → it equals the longer (superset) set; non-subset → it merges both
-  # without ever dropping a class. Base tokens keep their order; member-only
-  # tokens are appended in first-seen order.
-  defp apply_class_unification(body, base, per_member, _label_path) do
-    [root] = base.tree
-
-    class_divergences(per_member)
-    |> Enum.reduce(body, fn path, acc ->
-      case node_at(root, path) do
-        {:element, _tag, attrs, _ch, _} ->
-          base_class = class_value(attrs)
-          union = unified_class_at(path, base, per_member)
-
-          if union && union != base_class,
-            do: replace_first_class(acc, base_class, union),
-            else: acc
-
-        _ ->
-          acc
-      end
-    end)
-  end
-
-  defp class_divergences(per_member) do
-    per_member
-    |> Enum.flat_map(fn {_name, diffs} ->
-      for {:attr_value, path, "class", _from, _to} <- diffs, do: path
-    end)
-    |> Enum.uniq()
-  end
-
-  # The token union of the base's class and every member's class at `path`, as a
-  # space-joined string preserving base order then appending member-only tokens.
-  defp unified_class_at(path, base, per_member) do
-    [base_root] = base.tree
-    base_class = base_root |> node_at(path) |> element_class()
-    base_tokens = class_tokens(base_class)
-
-    member_tokens =
-      per_member
-      |> Enum.flat_map(fn {_name, diffs} ->
-        for {:attr_value, ^path, "class", _from, {:string, v}} <- diffs,
-            token <- class_tokens(v),
-            do: token
-      end)
-
-    extra = Enum.uniq(member_tokens) -- base_tokens
-
-    case base_tokens ++ extra do
-      [] -> nil
-      tokens -> Enum.join(tokens, " ")
-    end
-  end
-
-  defp class_tokens(nil), do: []
-  defp class_tokens(s) when is_binary(s), do: String.split(s, ~r/\s+/, trim: true)
-
-  defp element_class({:element, _tag, attrs, _ch, _}), do: class_value(attrs)
-  defp element_class(_), do: nil
-
-  defp class_value(attrs) do
-    Enum.find_value(attrs, fn
-      {"class", {:string, v}} -> v
-      _ -> nil
-    end)
-  end
-
-  defp replace_first_class(body, nil, _new), do: body
-
-  defp replace_first_class(body, old, new) do
-    case :binary.match(body, "\"#{old}\"") do
-      {pos, len} ->
-        binary_part(body, 0, pos) <>
-          "\"#{new}\"" <> binary_part(body, pos + len, byte_size(body) - pos - len)
 
       :nomatch ->
         body
@@ -871,13 +787,12 @@ defmodule Number42.Refactors.Ex.MergeNearCloneComponents do
     |> Enum.map(fn f -> %{file: f, tag_fn: member.name, dropped_module: member.module} end)
   end
 
-  defp build_cross_file_merge(base, _members, per_member, label_path, drops) do
+  defp build_cross_file_merge(base, _members, _per_member, label_path, drops) do
     [base_root] = base.tree
 
-    merged_body =
-      base.body
-      |> maybe_parametrise_text(base, label_path)
-      |> apply_class_unification(base, per_member, label_path)
+    # Survivor keeps its own classes verbatim; only the divergent text node is
+    # lifted to `@label`.
+    merged_body = maybe_parametrise_text(base.body, base, label_path)
 
     %{
       survivor_file: base.file,
