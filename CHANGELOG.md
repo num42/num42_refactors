@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`SplitRootConditionalComponent`** (#379, default-OFF): splits a
+  function-component whose body is a root-level `if cond do ~H A else ~H B end`
+  (optionally preceded by `assigns = setup`) into two pattern-matched clauses —
+  the do-branch becomes a guarded clause (`def name(assigns) when <cond>`), the
+  else-branch the catch-all. Both clauses keep `assigns` bound (the sigil reads
+  it) and reproduce the setup line verbatim. The condition is translated to a
+  guard, normalising `m[:k]` access to `is_map_key(m, :k)`. Derive-or-decline:
+  declines a non-sigil branch, a nested control-flow branch, a guard-unsafe
+  condition (arbitrary function call / non-guard operator), a condition over a
+  setup-derived assign (the head can't see body-computed values, cf. #371), an
+  `else`-less `if`, or a head that is not an arity-1 `assigns` component.
+  Idempotent. Eleven unit tests cover the split, every decline gate, the
+  default-OFF gate, and idempotence. position-db has no component in this exact
+  shape (it targets `core_components.ex`-style boilerplate), so the dogfood
+  solo run changes 0 files and a full pipeline with it enabled compiles clean —
+  no regression; stays default-OFF.
+
 - `disable_for_glob` config key: switch a refactor off for files matching any of
   its globs (`%{Module => ["lib/legacy/**", ...]}`), leaving it active on every
   other file. Per-file gating, distinct from `skipped_modules` (whole-pipeline).
