@@ -56,6 +56,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `#299 → #380` chain merges the brand-item containers and compiles clean).
   Builds on the existing `Heex.Tree`/`Fingerprint`/`Normalizer` infra.
 
+- **`TreeEditDistance` core + `Ex.TreeDiff` + `Ex.NearClones`** (#393): the
+  Elixir-AST analogue of #380's near-clone detection. The Zhang-Shasha engine
+  that #380 implemented for HEEx is hoisted into a **tree-agnostic
+  `Number42.Refactors.TreeEditDistance`** parameterised by an adapter behaviour
+  (`children/1`, `label/1`, `relabel_cost/2`, `divergences/3`) — the DP, the
+  post-order/keyroot preprocessing, the traceback, and the structural
+  insert/delete descriptors are all generic. `Heex.TreeDiff` is re-expressed as
+  a thin adapter over it with **no behaviour change** (its full test suite stays
+  green). A new `Ex.TreeDiff` adapter measures distance over **normalised Elixir
+  AST** — pipe-sugar inlined (`x |> f(y)` ≡ `f(x, y)`), metadata stripped, local
+  variables α-renamed to de-Bruijn indices, the *same* normalisation the
+  exact-hash detectors (`ExtractIntraModuleClone`/`ExtractExpressionClone`) hash
+  against — so two functions that differ only in local names or pipe style are
+  an *exact* clone, not a false near one. Its divergence descriptor speaks in
+  liftable kinds (`:literal`, `:call`, `:var`, `:atom`) versus `:structural`
+  (insert/delete/kind-change), so a downstream extract refactor can tell a
+  parametrisable divergence (a changed literal threshold) from an unliftable one
+  (an extra statement). `Ex.NearClones` clusters whole `def`/`defp` bodies:
+  enumerate bodies → drop below `:min_mass` / above `:max_mass` → mass-band +
+  **label-histogram** prefilters (both sound lower bounds on edit distance, so a
+  structurally-unrelated pair is pruned before the O(m⁴) Zhang-Shasha runs) →
+  pairwise similarity → single-linkage clustering at a configurable threshold →
+  per-occurrence typed diff against the representative, with a `mergeable`
+  boolean (true iff every divergence is liftable). Read-only analysis — surfaces
+  refactor targets and copy-paste diagnostics; an actual parametrising extract
+  refactor is a separate, default-OFF follow-up slice. 23 unit tests cover the
+  α-renaming/pipe normalisation, every distance/diff kind, clustering, and every
+  gate; dogfooded read-only on position-db (380 files, 17 s, 204 clusters — e.g.
+  a 16-way `notify_updated_or_show_errors`/`redirect_after_*` near-clone across
+  the LiveView tree — with structural clusters correctly flagged non-mergeable).
+
 - **`ConvertLiveComponentToFunction`** (#308, default-OFF): downgrades a
   **stateless** `Phoenix.LiveComponent` to a `:html` function component — drops
   `use ..., :live_component` for `:html`, removes the identity `update/2`,
