@@ -58,10 +58,13 @@ defmodule Number42.Refactors.Ex.NearClones do
   @type near_occurrence :: %{
           file: String.t(),
           line: pos_integer(),
+          kind: :def | :defp,
           name: atom(),
           arity: non_neg_integer(),
           mass: pos_integer(),
           ast: Macro.t(),
+          def_ast: Macro.t(),
+          arg_strings: [String.t()],
           similarity: float(),
           diffs: [TreeDiff.divergence()]
         }
@@ -154,7 +157,7 @@ defmodule Number42.Refactors.Ex.NearClones do
     |> Enum.filter(&(&1.mass >= min_mass))
   end
 
-  defp clause_fragment({kind, meta, [head, body_kw]}, path)
+  defp clause_fragment({kind, meta, [head, body_kw]} = def_ast, path)
        when kind in [:def, :defp] and is_list(body_kw) do
     with {:ok, body} <- do_body(body_kw),
          {name, arity} <- signature(head) do
@@ -164,9 +167,12 @@ defmodule Number42.Refactors.Ex.NearClones do
         %{
           file: path,
           line: line_of(meta),
+          kind: kind,
           name: name,
           arity: arity,
           ast: body,
+          def_ast: def_ast,
+          arg_strings: arg_strings(head),
           mass: TreeDiff.mass(norm),
           norm: norm,
           labels: label_histogram(norm),
@@ -179,6 +185,16 @@ defmodule Number42.Refactors.Ex.NearClones do
   end
 
   defp clause_fragment(_, _), do: []
+
+  # The head's argument patterns rendered as source strings, for a delegation
+  # rewrite (`def name(arg0, arg1), do: helper(arg0, arg1, …)`). A guarded head
+  # keeps its guard in the delegation.
+  defp arg_strings({:when, _, [inner | _]}), do: arg_strings(inner)
+
+  defp arg_strings({_name, _, args}) when is_list(args),
+    do: Enum.map(args, &Sourceror.to_string/1)
+
+  defp arg_strings(_), do: []
 
   # Multiset of node labels (the TED relabel key) in a normalized tree. The
   # half-symmetric-difference of two such histograms is a sound *lower bound* on
@@ -385,10 +401,13 @@ defmodule Number42.Refactors.Ex.NearClones do
     %{
       file: f.file,
       line: f.line,
+      kind: f.kind,
       name: f.name,
       arity: f.arity,
       mass: f.mass,
       ast: f.ast,
+      def_ast: f.def_ast,
+      arg_strings: f.arg_strings,
       similarity: similarity,
       diffs: diffs
     }

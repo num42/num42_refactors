@@ -87,6 +87,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a 16-way `notify_updated_or_show_errors`/`redirect_after_*` near-clone across
   the LiveView tree — with structural clusters correctly flagged non-mergeable).
 
+- **`MergeNearCloneFunctions`** (#393, default-OFF): the parametrising merge
+  built on `Ex.NearClones`'s detection — collapses a near-clone cluster of
+  `def`/`defp` bodies into one shared helper and rewrites each occurrence to a
+  thin delegation. The divergent values (a result atom, a literal threshold, a
+  label string) become trailing parameters; the lift is **value-based** (each
+  `from` value must occur exactly once in the body, else the slot is ambiguous
+  and the merge declines) so it's robust against the normalised-tree path not
+  mapping onto the raw AST. Two modes: **same-module** (the helper joins the
+  module, occurrences rewrite in place) and **cross-file** (resolved via
+  `prepare`/`source_files` — the survivor hosts a public helper; other modules
+  delegate qualified). Cross-file is sound about two hazards dogfooding
+  surfaced: (1) two byte-identical functions can each call *module-private*
+  helpers of the same name that differ per module — those calls are lifted to
+  `&fun/arity` capture parameters so each occurrence runs its own; (2) lifting
+  changes the function's arity, which would break every existing caller — so the
+  host keeps an **original-arity wrapper** forwarding its own captures, and only
+  the wider lifted clause is new (no call-site rewrites needed). Declines on a
+  structural divergence, a `:var` divergence, an ambiguous lift value, a
+  **multi-clause** function (merging one pattern-dispatched clause would drop the
+  others), or below the average-block-mass floor. The `mergeable` gate, not the
+  threshold, is the soundness boundary. 11 unit tests cover both modes, the
+  value lift, the private-call lift, the arity-preserving wrapper, idempotence,
+  and every decline gate; dogfooded on position-db (the `nest_sidebar_nodes` /
+  `build_position_chain_map` cross-file clones collapse to one definition each,
+  −22 lines, compiles clean).
+
 - **`ConvertLiveComponentToFunction`** (#308, default-OFF): downgrades a
   **stateless** `Phoenix.LiveComponent` to a `:html` function component — drops
   `use ..., :live_component` for `:html`, removes the identity `update/2`,
