@@ -39,10 +39,17 @@ defmodule Number42.Refactors.Ex.NearClones do
   ## Output
 
   Each `near_cluster` carries a `representative` (`file`/`line`/`name`/`arity`),
-  `mass`, a `mergeable` boolean (true iff no occurrence diff contains a
-  `:structural` divergence — i.e. every divergence is a liftable literal / call
-  / var / atom), and `occurrences`. Each occurrence keeps the **raw** body AST
-  so a rewriter could use the diff `path` to locate and lift the divergent node.
+  `mass` (the representative's), `avg_mass` (mean across occurrences), a
+  `mergeable` boolean, and `occurrences`. `mergeable` is true iff **both** hold:
+  no occurrence diff contains a `:structural` divergence (every divergence is a
+  liftable literal / call / var / atom) **and** `avg_mass` clears
+  `:min_merge_mass`. The average-mass floor is what stops a trivial one-liner
+  that recurs widely (a copy-pasted `{:noreply, assign(socket, …)}` clause) from
+  being flagged mergeable — it *is* a clone, detection reports it, but
+  extracting a 12-node block into a named helper reads worse than the inline
+  expression no matter how often it recurs. Each occurrence keeps the **raw**
+  body AST so a rewriter could use the diff `path` to locate and lift the
+  divergent node.
   """
 
   alias Number42.Refactors.AstHelpers
@@ -67,6 +74,7 @@ defmodule Number42.Refactors.Ex.NearClones do
             arity: non_neg_integer()
           },
           mass: pos_integer(),
+          avg_mass: float(),
           mergeable: boolean(),
           occurrences: [near_occurrence()]
         }
@@ -75,6 +83,18 @@ defmodule Number42.Refactors.Ex.NearClones do
   @default_mass_band 0.30
   @default_min_mass 10
   @default_min_occurrences 2
+  # Average-block-mass floor for the `mergeable` flag. The decisive question for
+  # "worth extracting into a named helper?" is the size of the *individual* block,
+  # not the total node-count saved across all copies. A trivial one-liner (mass
+  # ~12) recurring 16× nets a huge total savings (12·15) — the same as a fat
+  # 84-node block recurring 3× (84·2) — yet extracting the one-liner into
+  # `helper(socket, changeset)` reads *worse* than the inline expression. So the
+  # gate is the **average** occurrence mass (averaged, not the representative's,
+  # so a single fat outlier can't drag an otherwise-trivial near-clone over the
+  # line). Measured on position-db: the real merge target (`load_window…`, mass
+  # 84) clears 40 comfortably; the `notify_…` (12) and `broadcast_…` (13)
+  # one-liners fall below — detection still reports them, the merge declines.
+  @default_min_merge_mass 40
   # Bodies above this node count are excluded from the pairwise TED. Zhang-Shasha
   # is ~O(m⁴) per pair, so a handful of very large `def`s dominate the whole
   # scan — and a 120+-node function isn't a clean "parametrise into one helper"
@@ -218,6 +238,7 @@ defmodule Number42.Refactors.Ex.NearClones do
     mass_band = Keyword.get(opts, :mass_band, @default_mass_band)
     min_occ = Keyword.get(opts, :min_occurrences, @default_min_occurrences)
     max_mass = Keyword.get(opts, :max_mass, @default_max_mass)
+    min_merge_mass = Keyword.get(opts, :min_merge_mass, @default_min_merge_mass)
 
     indexed =
       fragments
@@ -230,7 +251,7 @@ defmodule Number42.Refactors.Ex.NearClones do
     indexed
     |> union_find_groups(edges)
     |> Enum.filter(fn group -> length(group) >= min_occ end)
-    |> Enum.map(&build_cluster/1)
+    |> Enum.map(&build_cluster(&1, min_merge_mass))
     |> Enum.sort_by(&(-&1.mass))
   end
 
@@ -315,7 +336,7 @@ defmodule Number42.Refactors.Ex.NearClones do
 
   # ---- cluster assembly ----------------------------------------------------
 
-  defp build_cluster(frags) do
+  defp build_cluster(frags, min_merge_mass) do
     rep = Enum.max_by(frags, fn f -> {f.mass, neg_locator(f)} end)
 
     occurrences =
@@ -323,12 +344,25 @@ defmodule Number42.Refactors.Ex.NearClones do
       |> Enum.map(fn f -> occurrence(f, rep) end)
       |> Enum.sort_by(&{&1.file, &1.line})
 
+    no_structural? = Enum.all?(occurrences, fn o -> not Enum.any?(o.diffs, &structural?/1) end)
+    avg_mass = average_mass(frags)
+
     %{
       representative: %{file: rep.file, line: rep.line, name: rep.name, arity: rep.arity},
       mass: rep.mass,
-      mergeable: Enum.all?(occurrences, fn o -> not Enum.any?(o.diffs, &structural?/1) end),
+      avg_mass: avg_mass,
+      mergeable: no_structural? and avg_mass >= min_merge_mass,
       occurrences: occurrences
     }
+  end
+
+  # Mean node count across the cluster's occurrences. This is the `mergeable`
+  # gate's basis: a substantial block is worth a named helper; a trivial one — no
+  # matter how often it recurs — is not. Averaging (vs the representative's mass)
+  # keeps one fat outlier from dragging an otherwise-trivial near-clone over the
+  # floor.
+  defp average_mass(frags) do
+    Enum.sum_by(frags, & &1.mass) / length(frags)
   end
 
   # Largest mass wins; ties broken to the earliest {file, line} for determinism.

@@ -28,7 +28,7 @@ defmodule Number42.Refactors.Ex.NearClonesTest do
         {"b.ex", mod("B", total_def("total", "1.07"))}
       ]
 
-      clusters = NearClones.from_sources(pairs, min_mass: 8, threshold: 0.85)
+      clusters = NearClones.from_sources(pairs, min_mass: 8, threshold: 0.85, min_merge_mass: 0)
 
       assert [cluster] = clusters
       assert length(cluster.occurrences) == 2
@@ -44,7 +44,7 @@ defmodule Number42.Refactors.Ex.NearClonesTest do
         {"b.ex", mod("B", total_def("total", "1.07"))}
       ]
 
-      [cluster] = NearClones.from_sources(pairs, min_mass: 8, threshold: 0.85)
+      [cluster] = NearClones.from_sources(pairs, min_mass: 8, threshold: 0.85, min_merge_mass: 0)
 
       other = Enum.find(cluster.occurrences, &(&1.diffs != []))
       assert [{:literal, _path, _from, _to}] = other.diffs
@@ -67,7 +67,7 @@ defmodule Number42.Refactors.Ex.NearClonesTest do
          """)}
       ]
 
-      [cluster] = NearClones.from_sources(pairs, min_mass: 8, threshold: 0.85)
+      [cluster] = NearClones.from_sources(pairs, min_mass: 8, threshold: 0.85, min_merge_mass: 0)
       assert cluster.mergeable
       assert Enum.all?(cluster.occurrences, &(&1.diffs == [] or &1.similarity == 1.0))
     end
@@ -147,6 +147,59 @@ defmodule Number42.Refactors.Ex.NearClonesTest do
       pairs = [{"a.ex", mod("A", total_def("total", "1.19"))}]
       clusters = NearClones.from_sources(pairs, min_mass: 8, threshold: 0.85)
       assert clusters == []
+    end
+  end
+
+  describe "min_merge_mass gate (the notify_updated_or_show_errors case)" do
+    # A trivial one-liner recurring widely IS a clone — it clusters — but
+    # extracting a 12-node block into a named helper reads worse than the inline
+    # expression no matter how often it recurs, so the average-mass floor
+    # withholds the `mergeable` flag the merge refactor gates on. This is the
+    # real position-db `notify_updated_or_show_errors` shape (mass ~12, occ 16).
+    defp one_liner(name),
+      do: "  defp #{name}(socket, changeset), do: {:noreply, assign(socket, form: changeset)}\n"
+
+    # A genuinely fat (~40-node) body — the `load_window…`-class merge target.
+    defp fat_def(name),
+      do: """
+        def #{name}(item_offset, args, limit) do
+          start = max(0, item_offset - div(limit, 2))
+          {entries, total} = list(args, offset: start, limit: limit)
+          rows = index_entries(entries, start)
+          top = if start == 0, do: :done, else: Cursor.encode(start)
+          bottom = if start + length(rows) >= total, do: :done, else: Cursor.encode(start + length(rows))
+          extra = Enum.map(rows, fn r -> {r.id, r.label} end)
+          {:ok, rows, %{bottom: bottom, top: top, extra: extra}}
+        end
+      """
+
+    test "a trivial body still clusters but is NOT mergeable under the mass floor" do
+      pairs =
+        for i <- 1..6, do: {"m#{i}.ex", mod("M#{i}", one_liner("notify_#{i}"))}
+
+      [cluster] = NearClones.from_sources(pairs, min_mass: 4, threshold: 0.85)
+
+      # detection still groups all six occurrences …
+      assert length(cluster.occurrences) == 6
+      # … but the block is too small to justify a named helper.
+      refute cluster.mergeable
+      assert cluster.avg_mass < 40
+    end
+
+    test "the same trivial cluster IS mergeable when min_merge_mass is lowered" do
+      pairs =
+        for i <- 1..6, do: {"m#{i}.ex", mod("M#{i}", one_liner("notify_#{i}"))}
+
+      [cluster] = NearClones.from_sources(pairs, min_mass: 4, threshold: 0.85, min_merge_mass: 0)
+      assert cluster.mergeable
+    end
+
+    test "a fat verbatim block recurring across files clears the floor" do
+      pairs = for i <- 1..3, do: {"s#{i}.ex", mod("S#{i}", fat_def("load_window_#{i}"))}
+
+      [cluster] = NearClones.from_sources(pairs, min_mass: 8, threshold: 0.85)
+      assert cluster.mergeable
+      assert cluster.avg_mass >= 40
     end
   end
 end
