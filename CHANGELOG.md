@@ -56,6 +56,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `#299 → #380` chain merges the brand-item containers and compiles clean).
   Builds on the existing `Heex.Tree`/`Fingerprint`/`Normalizer` infra.
 
+- **`TreeEditDistance` core + `Ex.TreeDiff` + `Ex.NearClones`** (#393): the
+  Elixir-AST analogue of #380's near-clone detection. The Zhang-Shasha engine
+  that #380 implemented for HEEx is hoisted into a **tree-agnostic
+  `Number42.Refactors.TreeEditDistance`** parameterised by an adapter behaviour
+  (`children/1`, `label/1`, `relabel_cost/2`, `divergences/3`) — the DP, the
+  post-order/keyroot preprocessing, the traceback, and the structural
+  insert/delete descriptors are all generic. `Heex.TreeDiff` is re-expressed as
+  a thin adapter over it with **no behaviour change** (its full test suite stays
+  green). A new `Ex.TreeDiff` adapter measures distance over **normalised Elixir
+  AST** — pipe-sugar inlined (`x |> f(y)` ≡ `f(x, y)`), metadata stripped, local
+  variables α-renamed to de-Bruijn indices, the *same* normalisation the
+  exact-hash detectors (`ExtractIntraModuleClone`/`ExtractExpressionClone`) hash
+  against — so two functions that differ only in local names or pipe style are
+  an *exact* clone, not a false near one. Its divergence descriptor speaks in
+  liftable kinds (`:literal`, `:call`, `:var`, `:atom`) versus `:structural`
+  (insert/delete/kind-change), so a downstream extract refactor can tell a
+  parametrisable divergence (a changed literal threshold) from an unliftable one
+  (an extra statement). `Ex.NearClones` clusters whole `def`/`defp` bodies:
+  enumerate bodies → drop below `:min_mass` / above `:max_mass` → mass-band +
+  **label-histogram** prefilters (both sound lower bounds on edit distance, so a
+  structurally-unrelated pair is pruned before the O(m⁴) Zhang-Shasha runs) →
+  pairwise similarity → single-linkage clustering at a configurable threshold →
+  per-occurrence typed diff against the representative, with a `mergeable`
+  boolean (true iff every divergence is liftable). Read-only analysis — surfaces
+  refactor targets and copy-paste diagnostics; an actual parametrising extract
+  refactor is a separate, default-OFF follow-up slice. 23 unit tests cover the
+  α-renaming/pipe normalisation, every distance/diff kind, clustering, and every
+  gate; dogfooded read-only on position-db (380 files, 17 s, 204 clusters — e.g.
+  a 16-way `notify_updated_or_show_errors`/`redirect_after_*` near-clone across
+  the LiveView tree — with structural clusters correctly flagged non-mergeable).
+
+- **`MergeNearCloneFunctions`** (#393, default-OFF): the parametrising merge
+  built on `Ex.NearClones`'s detection — collapses a near-clone cluster of
+  `def`/`defp` bodies into one shared helper and rewrites each occurrence to a
+  thin delegation. The divergent values (a result atom, a literal threshold, a
+  label string) become trailing parameters; the lift is **value-based** (each
+  `from` value must occur exactly once in the body, else the slot is ambiguous
+  and the merge declines) so it's robust against the normalised-tree path not
+  mapping onto the raw AST. Two modes: **same-module** (the helper joins the
+  module, occurrences rewrite in place) and **cross-file** (resolved via
+  `prepare`/`source_files` — the survivor hosts a public helper; other modules
+  delegate qualified). Cross-file is sound about two hazards dogfooding
+  surfaced: (1) two byte-identical functions can each call *module-private*
+  helpers of the same name that differ per module — those calls are lifted to
+  `&fun/arity` capture parameters so each occurrence runs its own; (2) lifting
+  changes the function's arity, which would break every existing caller — so the
+  host keeps an **original-arity wrapper** forwarding its own captures, and only
+  the wider lifted clause is new (no call-site rewrites needed). Declines on a
+  structural divergence, a `:var` divergence, an ambiguous lift value, a
+  **multi-clause** function (merging one pattern-dispatched clause would drop the
+  others), or below the average-block-mass floor. The `mergeable` gate, not the
+  threshold, is the soundness boundary. 11 unit tests cover both modes, the
+  value lift, the private-call lift, the arity-preserving wrapper, idempotence,
+  and every decline gate; dogfooded on position-db (the `nest_sidebar_nodes` /
+  `build_position_chain_map` cross-file clones collapse to one definition each,
+  −22 lines, compiles clean).
+
 - **`ConvertLiveComponentToFunction`** (#308, default-OFF): downgrades a
   **stateless** `Phoenix.LiveComponent` to a `:html` function component — drops
   `use ..., :live_component` for `:html`, removes the identity `update/2`,
