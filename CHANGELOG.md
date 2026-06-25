@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`ConvertLiveComponentToFunction`** (#308, default-OFF): downgrades a
+  **stateless** `Phoenix.LiveComponent` to a `:html` function component — drops
+  `use ..., :live_component` for `:html`, removes the identity `update/2`,
+  renames `render/1` to `def <basename>(assigns)`, emits `attr :name, :any` for
+  the assigns the render body reads — and rewrites its **same-file**
+  `<.live_component module={Mod} id=.. ..>` call sites to alias-qualified
+  `<Mod.fn ..>` (module + id dropped, attrs kept, `alias` added). The reverse of
+  `ExtractToPublicComponent`'s (#299) stateless classifier. Derive-or-decline:
+  declines on any `handle_event/3`, `send_update`, async/stream callback, a
+  non-passthrough `update/2`, or a non-live_component module. Slice 1 of #308:
+  it scans the corpus (via `prepare/1` + `source_files`) and **declines** when
+  the module has a `<.live_component module={Mod}>` caller in *another* file
+  (matched on the module's short name, so aliased and fully-qualified callers
+  both count) — converting it there without fixing those callers would break
+  them at runtime (a `render/1` dispatch on a function-component module that the
+  compiler can't catch). Cross-file caller rewriting is a follow-up (#308 slice
+  2). Twelve unit tests cover conversion, the same-file caller rewrite, every
+  decline gate, the cross-file gate, and idempotence. position-db dogfood: all
+  six stateless candidates have cross-file callers, so the gate correctly
+  declines every one (0 conversions, full pipeline compiles clean) — sound where
+  a naive convert-anyway would have broken three callers at runtime.
+
 - **`SplitRootConditionalComponent`** (#379, default-OFF): splits a
   function-component whose body is a root-level `if cond do ~H A else ~H B end`
   (optionally preceded by `assigns = setup`) into two pattern-matched clauses —

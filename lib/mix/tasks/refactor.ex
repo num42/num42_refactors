@@ -405,6 +405,7 @@ defmodule Mix.Tasks.Refactor do
   # the resolved file list through so explicit `mix refactor ./test/...`
   # actually constrains these refactors.
   @source_files_refactors [
+    Number42.Refactors.Ex.ConvertLiveComponentToFunction,
     Number42.Refactors.Ex.DelegateExactDuplicates,
     Number42.Refactors.Ex.DropRedundantAttrDefaults,
     Number42.Refactors.Ex.ExtractParametricClone,
