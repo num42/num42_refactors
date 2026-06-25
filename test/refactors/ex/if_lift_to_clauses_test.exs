@@ -1053,6 +1053,56 @@ defmodule Number42.Refactors.Ex.IfLiftToClausesTest do
     end
   end
 
+  describe "HEEx component bodies — keep the param binding (sigil reads it implicitly)" do
+    # A `~H` sigil expands to code that reads the `assigns` variable from the
+    # surrounding scope. That use is invisible to the AST walk (the sigil body
+    # is an opaque string), so without special handling the lift drops the
+    # `= assigns` binder and the clause head no longer provides `assigns` —
+    # the output fails to compile ("undefined variable assigns"). When a branch
+    # body contains a sigil, every param is treated as used so the binder stays.
+    test "pattern-match lift keeps `= assigns` when a branch is a ~H sigil" do
+      before_source = """
+      defmodule M do
+        def thing(assigns) do
+          if assigns.kind == :link do
+            ~H"<a>A</a>"
+          else
+            ~H"<button>B</button>"
+          end
+        end
+      end
+      """
+
+      result = apply_refactor(@subject, before_source)
+
+      # do-clause: pattern must bind back to `assigns`
+      assert result =~ ~r/def thing\(%\{kind: :link\} = assigns\)/
+      # catch-all clause: param must stay named `assigns`, not `_assigns`
+      assert result =~ ~r/def thing\(assigns\)/
+      refute result =~ "_assigns"
+    end
+
+    test "guard-form lift over a ~H body keeps the param named in the catch-all" do
+      before_source = """
+      defmodule M do
+        def thing(assigns) do
+          if is_map_key(assigns, :href) do
+            ~H"<a>A</a>"
+          else
+            ~H"<button>B</button>"
+          end
+        end
+      end
+      """
+
+      result = apply_refactor(@subject, before_source)
+
+      assert result =~ ~r/def thing\(assigns\) when is_map_key\(assigns, :href\)/
+      # the else catch-all still needs `assigns` for its own ~H
+      refute result =~ "_assigns"
+    end
+  end
+
   describe "idempotent" do
     test "is_* guard lift" do
       source = """
