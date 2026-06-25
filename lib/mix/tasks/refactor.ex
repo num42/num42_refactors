@@ -283,6 +283,7 @@ defmodule Mix.Tasks.Refactor do
     hits =
       files
       |> Enum.reject(&module_globbed_out?(module, &1, engine_opts))
+      |> Enum.reject(&(not File.exists?(&1)))
       |> Enum.flat_map(fn path ->
         source = File.read!(path)
         rewritten = Engine.apply_one(module, source, engine_opts)
@@ -719,6 +720,19 @@ defmodule Mix.Tasks.Refactor do
   end
 
   defp process_file(path, engine_opts, run_opts) do
+    # A cross-file refactor can delete a file during this run (e.g.
+    # MergeNearCloneComponents removes a near-clone clone module whose contents
+    # were merged into the survivor). The file list was snapshotted before the
+    # run, so a since-deleted path may still arrive here — treat it as nothing
+    # to do rather than crashing on `File.read!`.
+    if File.exists?(path) do
+      process_existing_file(path, engine_opts, run_opts)
+    else
+      :unchanged
+    end
+  end
+
+  defp process_existing_file(path, engine_opts, run_opts) do
     source = File.read!(path)
 
     %{

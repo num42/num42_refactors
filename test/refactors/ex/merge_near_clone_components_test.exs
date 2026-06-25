@@ -194,36 +194,6 @@ defmodule Number42.Refactors.Ex.MergeNearCloneComponentsTest do
       assert_unchanged(@subject, source, @enabled)
     end
 
-    test "declines when a dropped clone has a caller in another file" do
-      # With a corpus index showing brand_item_assets_container_2 is called from
-      # another file, merging would delete that def and break the cross-file
-      # caller. Cross-file caller rewriting is a follow-up — decline here.
-      source = twin_module()
-
-      prepared = %{
-        callers: %{"brand_item_assets_container_2" => MapSet.new(["lib/other.ex"])},
-        source_to_file: %{source => "lib/brand.ex"}
-      }
-
-      result = @subject.transform(source, enabled: true, prepared: prepared)
-      assert result == source
-    end
-
-    test "merges when the only callers are in the module's own file" do
-      source = twin_module()
-
-      prepared = %{
-        callers: %{
-          "brand_item_assets_container" => MapSet.new(["lib/brand.ex"]),
-          "brand_item_assets_container_2" => MapSet.new(["lib/brand.ex"])
-        },
-        source_to_file: %{source => "lib/brand.ex"}
-      }
-
-      result = @subject.transform(source, enabled: true, prepared: prepared)
-      refute result =~ "def brand_item_assets_container_2("
-    end
-
     test "declines a lone component with no near-clone twin" do
       source = """
       defmodule MyAppWeb.Solo do
@@ -241,6 +211,215 @@ defmodule Number42.Refactors.Ex.MergeNearCloneComponentsTest do
       """
 
       assert_unchanged(@subject, source, @enabled)
+    end
+  end
+
+  # ---- cross-file: near-clone single-def component MODULES across files -----
+
+  describe "cross-file merge of single-def component modules" do
+    # The real #380 shape: ExtractToPublicComponent emits each near-clone into
+    # its OWN file-module (one `def name(assigns)`), with cross-file callers.
+    # The merge keeps the larger as survivor, deletes the clone's file, and
+    # rewrites the clone's callers to the survivor (alias + tag + label).
+
+    defp images_module(mod, fn_name, root_tag, root_class, head_class, heading) do
+      """
+      defmodule #{mod} do
+        use MyAppWeb, :html
+        attr :brand_item, :any
+
+        def #{fn_name}(assigns) do
+          ~H\"\"\"
+          <#{root_tag} :if={@brand_item.assets != []} class="#{root_class}">
+            <p class="#{head_class}">#{heading}</p>
+            <ul class="space-y-3">
+              <li class="row"><figure class="thumb"><img src={@a1} /></figure></li>
+              <li class="row"><figure class="thumb"><img src={@a2} /></figure></li>
+              <li class="row"><figure class="thumb"><img src={@a3} /></figure></li>
+              <li class="row"><figure class="thumb"><img src={@a4} /></figure></li>
+              <li class="row"><figure class="thumb"><img src={@a5} /></figure></li>
+              <li class="row"><figure class="thumb"><img src={@a6} /></figure></li>
+            </ul>
+          </#{root_tag}>
+          \"\"\"
+        end
+      end
+      """
+    end
+
+    defp caller_module(mod_name, alias_mod, tag_fn) do
+      """
+      defmodule MyAppWeb.#{mod_name} do
+        use MyAppWeb, :live_view
+        alias #{alias_mod}
+
+        def render(assigns) do
+          ~H\"\"\"
+          <#{alias_mod |> String.split(".") |> List.last()}.#{tag_fn} brand_item={@brand_item} />
+          \"\"\"
+        end
+      end
+      """
+    end
+
+    defp setup_corpus do
+      survivor =
+        images_module(
+          "MyAppWeb.Components.BrandItemAssetsImages",
+          "brand_item_assets_images",
+          "div",
+          "py-3",
+          "mb-2",
+          "Dokumentationsbilder"
+        )
+
+      clone =
+        images_module(
+          "MyAppWeb.Components.BrandItemAssetsImages2",
+          "brand_item_assets_images_2",
+          "section",
+          "px-2 py-2",
+          "mb-1",
+          "Bilder"
+        )
+
+      caller_a =
+        caller_module(
+          "CardA",
+          "MyAppWeb.Components.BrandItemAssetsImages",
+          "brand_item_assets_images"
+        )
+
+      caller_b =
+        caller_module(
+          "CardB",
+          "MyAppWeb.Components.BrandItemAssetsImages2",
+          "brand_item_assets_images_2"
+        )
+
+      paths =
+        write_tmp(%{
+          "survivor.ex" => survivor,
+          "clone.ex" => clone,
+          "caller_a.ex" => caller_a,
+          "caller_b.ex" => caller_b
+        })
+
+      by_name = Map.new(paths, fn p -> {Path.basename(p), p} end)
+      {:ok, prepared} = @subject.prepare(source_files: paths, threshold: 0.75, min_mass: 10)
+      %{prepared: prepared, paths: by_name}
+    end
+
+    test "the survivor file gains attr :label and {@label}; clone file is deleted" do
+      %{prepared: prepared, paths: paths} = setup_corpus()
+
+      survivor_src = File.read!(paths["survivor.ex"])
+      result = @subject.transform(survivor_src, enabled: true, prepared: prepared)
+
+      assert result =~ ~r/attr :label/
+      assert result =~ "{@label}"
+      refute result =~ ">Dokumentationsbilder<"
+
+      refute File.exists?(paths["clone.ex"])
+    end
+
+    test "the clone's caller is rewritten to the survivor, passing its label" do
+      %{prepared: prepared, paths: paths} = setup_corpus()
+
+      survivor_src = File.read!(paths["survivor.ex"])
+      @subject.transform(survivor_src, enabled: true, prepared: prepared)
+
+      caller_b = File.read!(paths["caller_b.ex"])
+      refute caller_b =~ "BrandItemAssetsImages2"
+      assert caller_b =~ "BrandItemAssetsImages."
+      assert caller_b =~ ~r/label="Bilder"/
+    end
+
+    test "the survivor's own caller is untouched (no needless label)" do
+      %{prepared: prepared, paths: paths} = setup_corpus()
+
+      before_a = File.read!(paths["caller_a.ex"])
+      survivor_src = File.read!(paths["survivor.ex"])
+      @subject.transform(survivor_src, enabled: true, prepared: prepared)
+
+      assert File.read!(paths["caller_a.ex"]) == before_a
+    end
+
+    test "non-subset root classes are unified (union), not declined" do
+      %{prepared: prepared, paths: paths} = setup_corpus()
+
+      survivor_src = File.read!(paths["survivor.ex"])
+      result = @subject.transform(survivor_src, enabled: true, prepared: prepared)
+
+      # py-3 ∪ px-2 py-2 = {py-3, px-2, py-2} — all three tokens survive.
+      assert result =~ "py-3"
+      assert result =~ "px-2"
+      assert result =~ "py-2"
+    end
+
+    test "the dropped clone's own pass is a no-op (survivor owns the effects)" do
+      %{prepared: prepared, paths: paths} = setup_corpus()
+
+      clone_src = File.read!(paths["clone.ex"])
+      assert @subject.transform(clone_src, enabled: true, prepared: prepared) == clone_src
+    end
+
+    test "dry-run performs no file deletions or caller writes" do
+      %{prepared: prepared, paths: paths} = setup_corpus()
+
+      survivor_src = File.read!(paths["survivor.ex"])
+      before_b = File.read!(paths["caller_b.ex"])
+
+      @subject.transform(survivor_src, enabled: true, prepared: prepared, dry_run: true)
+
+      assert File.exists?(paths["clone.ex"])
+      assert File.read!(paths["caller_b.ex"]) == before_b
+    end
+
+    test "idempotent: a second survivor pass after merge is a no-op" do
+      %{prepared: prepared, paths: paths} = setup_corpus()
+
+      survivor_src = File.read!(paths["survivor.ex"])
+      merged = @subject.transform(survivor_src, enabled: true, prepared: prepared)
+
+      # Re-prepare the corpus AS IT NOW STANDS (clone gone), then re-run: the
+      # survivor has no twin left, so the merged source is returned unchanged.
+      remaining =
+        [paths["survivor.ex"], paths["caller_a.ex"], paths["caller_b.ex"]]
+        |> Enum.filter(&File.exists?/1)
+
+      File.write!(paths["survivor.ex"], merged)
+      {:ok, prepared2} = @subject.prepare(source_files: remaining, threshold: 0.75, min_mass: 10)
+
+      assert @subject.transform(merged, enabled: true, prepared: prepared2) == merged
+    end
+
+    test "merges nothing when no corpus is available (single-file fallback)" do
+      # No `:prepared` and a single source with one component def → the
+      # cross-file path can't fire; the same-module fallback finds no twin.
+      lone =
+        images_module(
+          "MyAppWeb.Components.Solo",
+          "solo",
+          "div",
+          "py-3",
+          "mb-2",
+          "Heading"
+        )
+
+      assert @subject.transform(lone, enabled: true) == lone
+    end
+  end
+
+  defp write_tmp(files) do
+    dir = Path.join(System.tmp_dir!(), "mncc-#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf!(dir) end)
+
+    for {name, src} <- files do
+      path = Path.join(dir, name)
+      File.mkdir_p!(Path.dirname(path))
+      File.write!(path, src)
+      path
     end
   end
 end

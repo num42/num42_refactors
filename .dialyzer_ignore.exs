@@ -167,10 +167,6 @@
   {"lib/number42/refactors/heex/scope.ex", :call_with_opaque},
   {"lib/number42/refactors/ex/extract_heex_component_by_seam.ex", :call_without_opaque},
   {"lib/number42/refactors/ex/extract_to_public_component.ex", :call_without_opaque},
-  # `MergeNearCloneComponents` builds class-token `MapSet`s (`class_set/1`) and
-  # caller-file `MapSet`s (corpus index) locally and compares them via
-  # `MapSet.subset?/2`; the concrete-struct-vs-opaque mismatch, same as above.
-  {"lib/number42/refactors/ex/merge_near_clone_components.ex", :call_without_opaque},
 
   # ---------------------------------------------------------------------------
   # Category C — dev-only generator deps absent from the PLT.

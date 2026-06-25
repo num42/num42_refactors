@@ -1,59 +1,73 @@
 defmodule Number42.Refactors.Ex.MergeNearCloneComponents do
   @moduledoc """
-  Merge two (or more) **sibling function components** that are *near*-clones into
-  one parametrised component, and rewrite every call site to the survivor.
+  Merge two (or more) function components that are *near*-clones into one
+  parametrised component, and rewrite every call site to the survivor.
 
-      def brand_item_assets_container(assigns) do
-        ~H"<div class=\"py-3\"><h2>Dokumentationsbilder</h2>…</div>"
-      end
-      def brand_item_assets_container_2(assigns) do
-        ~H"<section class=\"px-2 py-2\"><h2>Bilder</h2>…</section>"
-      end
-      ↓
+      # BrandItemAssetsImages          # BrandItemAssetsImages2
+      def brand_item_assets_images(…)   def brand_item_assets_images_2(…)
+        ~H"<div class=\"py-3\">           ~H"<section class=\"px-2 py-2\">
+             <h2>Dokumentationsbilder>        <h2>Bilder>…</section>"
+             …</div>"
+      ↓ (the two collapse into the survivor)
       attr :label, :string, default: "Dokumentationsbilder"
-      def brand_item_assets_container(assigns) do
-        ~H"<div class=\"py-3\"><h2>{@label}</h2>…</div>"
+      def brand_item_assets_images(assigns) do
+        ~H"<div class=\"py-3 px-2 py-2\"><h2>{@label}</h2>…</div>"
       end
-      # both call sites now call brand_item_assets_container, passing their label.
+      # the Images2 file is deleted; its caller now calls
+      # `<BrandItemAssetsImages.brand_item_assets_images … label=\"Bilder\" />`.
 
   Exact-hash clustering (`Heex.Clones`) cannot see these as one component — the
   root tag and a heading text differ, so they share no hash. `Heex.TreeDiff`
   measures the small structural distance and reports *which* nodes diverge; this
   refactor reconciles the handled divergence kinds into one parametrised `def`.
 
-  ## What it merges
+  ## Two modes
 
-  Two or more `def name(assigns) do ~H\"\"\"…\"\"\" end` function components in the
-  same module whose bodies are near-clones (`TreeDiff` similarity ≥ threshold)
-  and whose only divergences are of the **handled kinds**:
+    * **sibling defs** — two or more `def name(assigns) do ~H… end` in the *same*
+      module. The dropped clones' defs are removed in place and same-file call
+      sites rewritten.
+    * **cross-file component modules** — single-`def` component modules in their
+      *own* files (what `ExtractToPublicComponent` emits). The survivor's file is
+      rewritten, each clone's file is **deleted**, and the clones' call sites —
+      `alias` + `<Mod.fn …>` tag — are rewritten across the corpus (resolved via
+      `prepare/source_files`). This is the #380 target shape.
 
-    * **tag** — root/any element tag differs → normalise to the base tree's tag
-      (the base is the LARGER tree; equal mass → the first by source order).
-    * **class** — a `class` attr value differs → unify, the **longer** class set
-      wins, but only when one set is a subset of the other (a safe superset).
-    * **text** — a pure text node differs → lift to `attr :label` (the first
-      occurrence's text becomes the default), each call site passes its own.
+  ## What it merges (handled divergence kinds)
+
+    * **tag** — an element tag differs → normalise to the base tree's tag (base =
+      the LARGER tree; mass tie → the canonical name, the `foo` of a `foo`/`foo_2`
+      pair).
+    * **class** — a `class` attr value differs → **token union** of both sets
+      (base order preserved, member-only tokens appended). Never drops a class —
+      sound for both subset and non-subset cases.
+    * **text** — a pure text node differs → lift to `attr :label` (the base's text
+      is the default); each call site passes its own via `label="…"`.
 
   ## Derive-or-decline (default-OFF)
 
-  Opinionated and cross-file → default-OFF, opt-in per module:
+  Opinionated and cross-file → default-OFF, opt-in:
 
-      {Number42.Refactors.Ex.MergeNearCloneComponents, enabled: true}
+      {MergeNearCloneComponents, enabled: true, threshold: 0.85, min_mass: 12}
 
-  Declines (leaves the source untouched) when soundness can't be proven:
+  Declines (leaves everything untouched) when soundness can't be proven:
 
-    * No near-clone twin (a lone component, or all defs structurally distinct).
+    * No near-clone twin (a lone component, or all components structurally distinct).
     * A `:structural` divergence (an extra/missing child subtree, a differing
       `:if`/`:for`/eex header, a kind change, divergent child *markup* under a
       heading) — not mechanically parametrisable here.
     * More than one differing text node, or a differing attr other than `class`.
-    * Two `class` sets not in a subset relation (each has a class the other
-      lacks) — unifying would either drop styling or guess; decline instead.
+    * A dropped clone with a caller *outside* the readable corpus — it could not
+      be rewritten, so deleting the clone would break it.
+
+  `:threshold` (default 0.85) and `:min_mass` (default 12) tune the candidate
+  set; the divergence-kind gate above — not the threshold — is the soundness
+  boundary, so a lower threshold only widens candidates, never licences an
+  unsafe merge.
 
   ## Idempotence
 
-  A single already-parametrised component has no twin to merge → no-op. The
-  cluster needs ≥ 2 occurrences.
+  After a merge the survivor has no twin (and a dropped clone's file is gone), so
+  a second run is a no-op. A single already-parametrised component never merges.
   """
 
   use Number42.Refactors.Refactor
@@ -61,6 +75,7 @@ defmodule Number42.Refactors.Ex.MergeNearCloneComponents do
   alias Number42.Refactors.Heex.{Normalizer, TreeDiff}
 
   @default_threshold 0.85
+  @default_min_mass 12
   @label_attr "label"
 
   @impl Number42.Refactors.Refactor
@@ -86,62 +101,69 @@ defmodule Number42.Refactors.Ex.MergeNearCloneComponents do
   @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
 
-  # Corpus caller index: `%{component_name => MapSet of files}` over `<.name …>`
-  # and `<Mod.name …>` tags, plus `source => file`, so a merge can rewrite every
-  # call site of a dropped clone — not just the same-file ones.
+  # Corpus merge plan: scan every source for single-`def` function-component
+  # modules, cluster near-clones across files, and resolve each dropped clone's
+  # call sites. Keyed by survivor file path so the per-file `transform/2` knows
+  # its role (survivor / dropped clone / caller) in O(1). See `build_corpus_plan/3`.
   @impl Number42.Refactors.Refactor
   def prepare(opts) do
     case Keyword.get(opts, :source_files) do
-      files when is_list(files) and files != [] -> {:ok, build_caller_index(files)}
-      _ -> :no_cache
+      files when is_list(files) and files != [] ->
+        threshold = Keyword.get(opts, :threshold, @default_threshold)
+        min_mass = Keyword.get(opts, :min_mass, @default_min_mass)
+        {:ok, build_corpus_plan(files, threshold, min_mass)}
+
+      _ ->
+        :no_cache
     end
   end
 
   @impl Number42.Refactors.Refactor
   def transform(source, opts) do
     if Keyword.get(opts, :enabled, false) do
-      threshold = Keyword.get(opts, :threshold, @default_threshold)
-      Sourceror.parse_string(source) |> merge_or_passthrough(source, threshold, opts[:prepared])
+      dispatch(source, opts)
     else
       source
     end
   end
 
-  defp merge_or_passthrough({:ok, ast}, source, threshold, prepared) do
+  # With a corpus plan, dispatch on this file's role (survivor / dropped clone /
+  # caller). Without one (no `source_files`, or a one-off `mix refactor foo.ex`),
+  # fall back to the same-module sibling-def merge.
+  defp dispatch(source, opts) do
+    with %{} = prepared <- opts[:prepared],
+         file when is_binary(file) <- Map.get(prepared.source_to_file, source) do
+      role_dispatch(file, source, prepared, opts)
+    else
+      _ -> fallback_same_module(source, opts)
+    end
+  end
+
+  defp role_dispatch(file, source, prepared, opts) do
+    merges = Map.get(prepared, :merges, %{})
+
+    case Map.get(merges, file) do
+      %{} = merge -> apply_survivor(source, merge, opts)
+      _ -> source
+    end
+  end
+
+  defp fallback_same_module(source, opts) do
+    threshold = Keyword.get(opts, :threshold, @default_threshold)
+    Sourceror.parse_string(source) |> merge_or_passthrough(source, threshold)
+  end
+
+  defp merge_or_passthrough({:ok, ast}, source, threshold) do
     with {:ok, components} <- function_components(ast),
          {:ok, cluster} <- near_clone_cluster(components, threshold),
-         {:ok, plan} <- build_merge_plan(cluster),
-         :ok <- no_cross_file_callers?(plan, source, prepared) do
+         {:ok, plan} <- build_merge_plan(cluster) do
       apply_merge(plan, source)
     else
       _ -> source
     end
   end
 
-  defp merge_or_passthrough({:error, _}, source, _threshold, _prepared), do: source
-
-  # Decline when any dropped clone is called from a file other than this one.
-  # The merge deletes that clone's `def`; a `<.dropped …>` in another file would
-  # then fail to compile. Rewriting cross-file callers needs the engine to touch
-  # other files — out of `transform/2`'s single-source contract — so it is a
-  # follow-up. Without a corpus index (no `source_files`), only same-file callers
-  # exist by construction, so the gate passes.
-  defp no_cross_file_callers?(_plan, _source, nil), do: :ok
-
-  defp no_cross_file_callers?(plan, source, %{callers: callers, source_to_file: s2f}) do
-    own_file = Map.get(s2f, source)
-
-    cross_file? =
-      Enum.any?(plan.dropped, fn name ->
-        caller_files = Map.get(callers, Atom.to_string(name), MapSet.new())
-        not MapSet.subset?(caller_files, own_files(own_file))
-      end)
-
-    if cross_file?, do: :error, else: :ok
-  end
-
-  defp own_files(nil), do: MapSet.new()
-  defp own_files(file), do: MapSet.new([file])
+  defp merge_or_passthrough({:error, _}, source, _threshold), do: source
 
   # ---- detection: function components in the module ------------------------
 
@@ -286,21 +308,12 @@ defmodule Number42.Refactors.Ex.MergeNearCloneComponents do
 
   defp handled_kind?({:tag, _path, _from, _to}), do: true
   defp handled_kind?({:text, _path, _from, _to}), do: true
-  defp handled_kind?({:attr_value, _path, "class", from, to}), do: class_subset?(from, to)
+  # A `class` divergence is always mechanically reconcilable: subset → the longer
+  # set is the safe superset; non-subset → the token union (both sets merged).
+  # The non-subset union is the looser, opt-in-by-default-OFF heuristic — it never
+  # *drops* a class, only adds.
+  defp handled_kind?({:attr_value, _path, "class", _from, _to}), do: true
   defp handled_kind?(_), do: false
-
-  # "longer wins" is only safe when one class set is a subset of the other. Each
-  # value is `{:string, "a b c"}`; split on whitespace and compare as sets. A
-  # missing side (nil) is the empty set (subset of anything).
-  defp class_subset?(from, to) do
-    sa = class_set(from)
-    sb = class_set(to)
-    MapSet.subset?(sa, sb) or MapSet.subset?(sb, sa)
-  end
-
-  defp class_set(nil), do: MapSet.new()
-  defp class_set({:string, s}), do: s |> String.split(~r/\s+/, trim: true) |> MapSet.new()
-  defp class_set(_), do: MapSet.new()
 
   # Across all members there must be exactly ONE text-node path that ever
   # diverges — that is the node we parametrise as `@label`. Zero text
@@ -407,21 +420,23 @@ defmodule Number42.Refactors.Ex.MergeNearCloneComponents do
     end
   end
 
-  # Where a member's class set is a strict superset of the base's at some path,
-  # the unified body should carry the longer set. We rewrite the base body's
-  # class value at each such path to the longest class set seen across members.
+  # At every path where a `class` diverges, rewrite the base body's class to the
+  # **token union** across base + all members. Union is correct in both cases:
+  # subset → it equals the longer (superset) set; non-subset → it merges both
+  # without ever dropping a class. Base tokens keep their order; member-only
+  # tokens are appended in first-seen order.
   defp apply_class_unification(body, base, per_member, _label_path) do
     [root] = base.tree
 
     class_divergences(per_member)
-    |> Enum.reduce(body, fn {path, _name}, acc ->
+    |> Enum.reduce(body, fn path, acc ->
       case node_at(root, path) do
         {:element, _tag, attrs, _ch, _} ->
           base_class = class_value(attrs)
-          longest = longest_class_at(path, base, per_member)
+          union = unified_class_at(path, base, per_member)
 
-          if longest && longest != base_class,
-            do: replace_first_class(acc, base_class, longest),
+          if union && union != base_class,
+            do: replace_first_class(acc, base_class, union),
             else: acc
 
         _ ->
@@ -432,27 +447,37 @@ defmodule Number42.Refactors.Ex.MergeNearCloneComponents do
 
   defp class_divergences(per_member) do
     per_member
-    |> Enum.flat_map(fn {name, diffs} ->
-      for {:attr_value, path, "class", _from, _to} <- diffs, do: {path, name}
+    |> Enum.flat_map(fn {_name, diffs} ->
+      for {:attr_value, path, "class", _from, _to} <- diffs, do: path
     end)
     |> Enum.uniq()
   end
 
-  # The longest class string seen at `path` across the base and every member.
-  defp longest_class_at(path, base, per_member) do
+  # The token union of the base's class and every member's class at `path`, as a
+  # space-joined string preserving base order then appending member-only tokens.
+  defp unified_class_at(path, base, per_member) do
     [base_root] = base.tree
     base_class = base_root |> node_at(path) |> element_class()
+    base_tokens = class_tokens(base_class)
 
-    member_classes =
+    member_tokens =
       per_member
       |> Enum.flat_map(fn {_name, diffs} ->
-        for {:attr_value, ^path, "class", _from, {:string, v}} <- diffs, do: v
+        for {:attr_value, ^path, "class", _from, {:string, v}} <- diffs,
+            token <- class_tokens(v),
+            do: token
       end)
 
-    [base_class | member_classes]
-    |> Enum.reject(&is_nil/1)
-    |> Enum.max_by(&String.length/1, fn -> nil end)
+    extra = Enum.uniq(member_tokens) -- base_tokens
+
+    case base_tokens ++ extra do
+      [] -> nil
+      tokens -> Enum.join(tokens, " ")
+    end
   end
+
+  defp class_tokens(nil), do: []
+  defp class_tokens(s) when is_binary(s), do: String.split(s, ~r/\s+/, trim: true)
 
   defp element_class({:element, _tag, attrs, _ch, _}), do: class_value(attrs)
   defp element_class(_), do: nil
@@ -616,8 +641,10 @@ defmodule Number42.Refactors.Ex.MergeNearCloneComponents do
     "  attr :#{@label_attr}, :string, default: #{inspect(default)}"
   end
 
-  # Insert the `attr` line directly above its `def` (idiomatic pairing), with a
-  # blank line above the attr so it doesn't glue to the preceding `use`/`def`.
+  # Insert the `attr :label` line into the survivor's attr block. If the def is
+  # already preceded by one or more `attr` lines, append directly after the last
+  # of them (attrs stay grouped, no blank between them). Otherwise place it just
+  # above the `def`, with a blank above so it doesn't glue to a preceding `use`.
   defp insert_attr_before_def(source, name, attr) do
     lines = String.split(source, "\n", trim: false)
 
@@ -625,13 +652,37 @@ defmodule Number42.Refactors.Ex.MergeNearCloneComponents do
       nil ->
         source
 
-      i ->
-        insert =
-          if i > 0 and String.trim(Enum.at(lines, i - 1)) == "", do: [attr], else: ["", attr]
+      def_i ->
+        case last_attr_before(lines, def_i) do
+          nil ->
+            insert = if blank_above?(lines, def_i), do: [attr], else: ["", attr]
+            lines |> List.insert_at(def_i, Enum.join(insert, "\n")) |> Enum.join("\n")
 
-        lines |> List.insert_at(i, Enum.join(insert, "\n")) |> Enum.join("\n")
+          attr_i ->
+            lines |> List.insert_at(attr_i + 1, attr) |> Enum.join("\n")
+        end
     end
   end
+
+  # The index of the last `attr …` line in the contiguous run directly above the
+  # def (skipping blank lines), or nil if there is none.
+  defp last_attr_before(lines, def_i) do
+    def_i
+    |> Kernel.-(1)
+    |> Stream.iterate(&(&1 - 1))
+    |> Stream.take_while(&(&1 >= 0))
+    |> Enum.reduce_while(nil, fn i, _acc ->
+      line = Enum.at(lines, i)
+
+      cond do
+        String.trim(line) == "" -> {:cont, nil}
+        Regex.match?(~r/^\s*attr\s+/, line) -> {:halt, i}
+        true -> {:halt, nil}
+      end
+    end)
+  end
+
+  defp blank_above?(lines, i), do: i > 0 and String.trim(Enum.at(lines, i - 1)) == ""
 
   defp def_header_line?(line, name) do
     Regex.match?(~r/^\s*def\s+#{name}\s*\(/, line)
@@ -667,28 +718,296 @@ defmodule Number42.Refactors.Ex.MergeNearCloneComponents do
     end)
   end
 
-  # ---- corpus caller index (cross-file rewrite) ----------------------------
+  # ---- corpus plan (cross-file detection) ----------------------------------
 
-  defp build_caller_index(files) do
-    files
-    |> Enum.reduce(%{callers: %{}, source_to_file: %{}}, fn file, acc ->
-      case File.read(file) do
-        {:ok, content} ->
-          acc
-          |> put_in([:source_to_file, content], file)
-          |> Map.update!(:callers, &index_callers(&1, content, file))
+  # Read every corpus file, find single-`def` function-component modules, cluster
+  # near-clones across files, and produce a plan keyed by survivor file path.
+  defp build_corpus_plan(files, threshold, min_mass) do
+    contents =
+      files
+      |> Enum.flat_map(fn f ->
+        case File.read(f) do
+          {:ok, src} -> [{f, src}]
+          _ -> []
+        end
+      end)
 
-        _ ->
-          acc
-      end
+    source_to_file = Map.new(contents, fn {f, src} -> {src, f} end)
+    components = Enum.flat_map(contents, fn {f, src} -> corpus_components(f, src) end)
+    caller_index = build_caller_index(contents)
+
+    merges =
+      components
+      |> cross_file_clusters(threshold, min_mass)
+      |> Enum.flat_map(&cluster_to_merge(&1, caller_index, source_to_file))
+      |> Map.new(fn merge -> {merge.survivor_file, merge} end)
+
+    drop_files =
+      merges
+      |> Map.values()
+      |> Enum.flat_map(fn m -> Enum.map(m.drops, & &1.file) end)
+      |> MapSet.new()
+
+    %{source_to_file: source_to_file, merges: merges, drop_files: drop_files}
+  end
+
+  # Single-`def` function-component modules in one file: a `defmodule` whose body
+  # has exactly one `def name(assigns) do ~H… end`. Multi-def modules are left to
+  # the same-module fallback path.
+  defp corpus_components(file, source) do
+    case Sourceror.parse_string(source) do
+      {:ok, ast} ->
+        ast
+        |> Macro.prewalker()
+        |> Enum.flat_map(&module_component(&1, file))
+
+      _ ->
+        []
+    end
+  end
+
+  defp module_component({:defmodule, _, [name, [{_do, body}]]}, file) do
+    module = module_string(name)
+
+    case body |> body_to_exprs() |> Enum.flat_map(&as_component/1) do
+      [c] -> [Map.merge(c, %{file: file, module: module})]
+      _ -> []
+    end
+  end
+
+  defp module_component(_, _file), do: []
+
+  defp module_string({:__aliases__, _, parts}), do: Enum.map_join(parts, ".", &Atom.to_string/1)
+  defp module_string(other), do: Macro.to_string(other)
+
+  # Group corpus components into near-clone clusters: base = the larger tree;
+  # on a mass tie prefer the *canonical* name — one without a trailing `_<n>`
+  # suffix (the `foo` of a `foo` / `foo_2` pair), then lexicographic name, then
+  # file for full determinism. Members clear the threshold and the mass band.
+  # Each component lands in at most one cluster (greedy, base-anchored).
+  defp cross_file_clusters(components, threshold, min_mass) do
+    components
+    |> Enum.filter(&(&1.mass >= min_mass))
+    |> Enum.sort_by(fn c -> {-c.mass, suffix_rank(c.name), Atom.to_string(c.name), c.file} end)
+    |> form_clusters(threshold, [])
+  end
+
+  # 0 for a plain name, 1 for a `_<digit>`-suffixed one — so `foo` outranks
+  # `foo_2` as the survivor on a mass tie.
+  defp suffix_rank(name) do
+    if Atom.to_string(name) =~ ~r/_\d+$/, do: 1, else: 0
+  end
+
+  defp form_clusters([], _threshold, acc), do: Enum.reverse(acc)
+
+  defp form_clusters([base | rest], threshold, acc) do
+    base_norm = normalize_tree(base.tree)
+
+    {members, leftover} =
+      Enum.split_with(rest, fn c ->
+        TreeDiff.similarity(base_norm, normalize_tree(c.tree)) >= threshold
+      end)
+
+    case members do
+      [] -> form_clusters(rest, threshold, acc)
+      _ -> form_clusters(leftover, threshold, [%{base: base, members: members} | acc])
+    end
+  end
+
+  # Turn a cross-file cluster into a merge, or skip it ([]). Reconcile every
+  # member against the base (handled kinds only); decline the whole cluster on
+  # any structural / multi-text divergence. Each member becomes a drop with its
+  # own callers and label.
+  defp cluster_to_merge(%{base: base, members: members}, caller_index, source_to_file) do
+    base_norm = normalize_tree(base.tree)
+
+    with {:ok, per_member} <- reconcile_all(base_norm, members),
+         {:ok, label_path} <- single_text_divergence(per_member),
+         {:ok, drops} <-
+           resolve_drops(members, per_member, label_path, caller_index, source_to_file) do
+      [build_cross_file_merge(base, members, per_member, label_path, drops)]
+    else
+      _ -> []
+    end
+  end
+
+  # Each member → a drop with its caller sites. Decline (→ :error) when a member
+  # is called from a file NOT in the readable corpus: we could not rewrite that
+  # caller, so deleting the clone would break it.
+  defp resolve_drops(members, _per_member, label_path, caller_index, source_to_file) do
+    corpus_files = source_to_file |> Map.values() |> MapSet.new()
+
+    drops =
+      Enum.map(members, fn m ->
+        caller_files = Map.get(caller_index, m.name, MapSet.new())
+
+        %{
+          file: m.file,
+          module: m.module,
+          fn_name: m.name,
+          label: member_label(m, label_path),
+          callers: caller_sites(caller_files, m)
+        }
+      end)
+
+    if Enum.all?(drops, &drop_callers_all_readable?(&1, caller_index, corpus_files)),
+      do: {:ok, drops},
+      else: :error
+  end
+
+  # Every file that calls the dropped clone must be in the readable corpus — else
+  # we cannot rewrite it and deleting the clone would break it.
+  defp drop_callers_all_readable?(drop, caller_index, corpus_files) do
+    caller_index
+    |> Map.get(drop.fn_name, MapSet.new())
+    |> Enum.all?(&MapSet.member?(corpus_files, &1))
+  end
+
+  # The caller files of a dropped clone, excluding the clone's own file (the
+  # def-site, not a call site).
+  defp caller_sites(caller_files, member) do
+    caller_files
+    |> Enum.reject(&(&1 == member.file))
+    |> Enum.map(fn f -> %{file: f, tag_fn: member.name, dropped_module: member.module} end)
+  end
+
+  defp build_cross_file_merge(base, _members, per_member, label_path, drops) do
+    [base_root] = base.tree
+
+    merged_body =
+      base.body
+      |> maybe_parametrise_text(base, label_path)
+      |> apply_class_unification(base, per_member, label_path)
+
+    %{
+      survivor_file: base.file,
+      survivor_module: base.module,
+      survivor_fn: base.name,
+      arg: base.arg,
+      merged_body: merged_body,
+      label_default: if(label_path == :none, do: nil, else: text_at(base_root, label_path)),
+      drops: drops
+    }
+  end
+
+  # ---- corpus plan (cross-file apply, survivor-owned side-effects) ----------
+
+  # The survivor's pass owns ALL cross-file effects: delete each clone file,
+  # rewrite each clone's callers. Then return its own rewritten source. Gated on
+  # `dry_run` (the engine never writes/deletes other files for us).
+  defp apply_survivor(source, merge, opts) do
+    unless Keyword.get(opts, :dry_run, false) do
+      drop_clone_files(merge)
+      rewrite_caller_files(merge)
+    end
+
+    source
+    |> replace_def_body(merge.survivor_fn, merge.merged_body)
+    |> ensure_label_attr(%{survivor: merge.survivor_fn, label_default: merge.label_default})
+  end
+
+  defp drop_clone_files(merge) do
+    Enum.each(merge.drops, fn %{file: f} -> File.exists?(f) && File.rm(f) end)
+  end
+
+  # For each caller file of a dropped clone, swap the alias to the survivor and
+  # rewrite the `<DroppedMod.fn …>` tag to `<SurvivorMod.fn … label="…">`. Only
+  # written when the dropped tag is still present (idempotent re-run guard).
+  defp rewrite_caller_files(merge) do
+    survivor_alias = merge.survivor_module |> String.split(".") |> List.last()
+
+    merge.drops
+    |> Enum.flat_map(fn d -> Enum.map(d.callers, &Map.put(&1, :label, d.label)) end)
+    |> Enum.group_by(& &1.file)
+    |> Enum.each(fn {caller_file, hits} ->
+      rewrite_caller_file(caller_file, hits, merge, survivor_alias)
     end)
   end
 
+  defp rewrite_caller_file(caller_file, hits, merge, survivor_alias) do
+    case File.read(caller_file) do
+      {:ok, content} ->
+        new =
+          Enum.reduce(hits, content, fn hit, acc ->
+            if String.contains?(acc, Atom.to_string(hit.tag_fn)) do
+              acc
+              |> rewrite_qualified_call(hit, merge, survivor_alias)
+              |> swap_alias(hit.dropped_module, merge.survivor_module)
+            else
+              acc
+            end
+          end)
+
+        if new != content, do: File.write!(caller_file, new)
+
+      _ ->
+        :ok
+    end
+  end
+
+  # `<DroppedAlias.dropped_fn …>` → `<SurvivorAlias.survivor_fn … label="…">`.
+  defp rewrite_qualified_call(content, hit, merge, survivor_alias) do
+    dropped_alias = hit.dropped_module |> String.split(".") |> List.last()
+    label = hit.label
+
+    re =
+      ~r/<#{dropped_alias}\.#{hit.tag_fn}(?<attrs>(?:\{[^}]*\}|"[^"]*"|[^>])*?)\s*(?<close>\/?>)/
+
+    Regex.replace(re, content, fn _full, attrs, close ->
+      attrs = String.trim_trailing(attrs)
+      label_attr = label_attr_for(label, merge.label_default)
+      closer = if close == "/>", do: " />", else: ">"
+      "<#{survivor_alias}.#{merge.survivor_fn}#{attrs}#{label_attr}#{closer}"
+    end)
+  end
+
+  defp label_attr_for(label, label_default) do
+    if label && label != label_default && label != "",
+      do: ~s( #{@label_attr}="#{label}"),
+      else: ""
+  end
+
+  # Replace the dropped module's `alias` line with the survivor's (or drop it if
+  # the survivor is already aliased in this file).
+  defp swap_alias(content, dropped_module, survivor_module) do
+    dropped_alias = dropped_module |> String.split(".") |> List.last()
+
+    cond do
+      String.contains?(content, "alias #{survivor_module}\n") ->
+        # survivor already aliased → drop the dropped alias line
+        String.replace(content, ~r/^\s*alias\s+\S*#{dropped_alias}\b.*\n/m, "")
+
+      true ->
+        String.replace(
+          content,
+          ~r/alias\s+\S*#{dropped_alias}\b[^\n]*/,
+          "alias #{survivor_module}"
+        )
+    end
+  end
+
+  # Caller index over the corpus: `%{fn_name (atom) => MapSet of files}` for every
+  # `<Mod.fn …>` / `<.fn …>` component tag. Used to find a dropped clone's callers.
+  defp build_caller_index(contents) do
+    Enum.reduce(contents, %{}, fn {file, content}, acc ->
+      index_callers(acc, content, file)
+    end)
+  end
+
+  # Match a component tag in either form and capture the FULL function name:
+  #   `<.fn …>`        — local component (leading dot, no module)
+  #   `<Mod.Sub.fn …>` — qualified (capital-led dotted module, then `.fn`)
+  # A single greedy `[\w.]*` before the capture would swallow the function name
+  # into the module segment (capturing only a trailing `_2`), so the two forms
+  # are matched as explicit alternatives.
+  @caller_tag ~r/<(?:\.|[A-Z][\w.]*\.)([a-z_][a-z0-9_]*)[\s\/>]/
+
   defp index_callers(callers, content, file) do
-    ~r/<\.?[A-Za-z0-9_.]*\.?([a-z_][a-z0-9_]*)\s/
+    @caller_tag
     |> Regex.scan(content)
     |> Enum.reduce(callers, fn [_, name], acc ->
-      Map.update(acc, name, MapSet.new([file]), &MapSet.put(&1, file))
+      key = String.to_atom(name)
+      Map.update(acc, key, MapSet.new([file]), &MapSet.put(&1, file))
     end)
   end
 end
