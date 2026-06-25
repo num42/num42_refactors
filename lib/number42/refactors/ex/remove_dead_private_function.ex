@@ -91,6 +91,12 @@ defmodule Number42.Refactors.Ex.RemoveDeadPrivateFunction do
   `@deprecated`, `@dialyzer`, `@typedoc`, `@since`) immediately above
   the **first** clause goes with it.
 
+  An `alias`/`import only:` whose sole remaining user was the deleted
+  `defp` is then pruned from the rewritten source via
+  `AstHelpers.prune_dead_directives/1` (#307) — so the removal does not
+  leave an `unused alias`/`unused import` warning behind. A directive a
+  surviving function still uses is kept.
+
   ## Idempotence & determinism
 
   At most **one** dead `{name, arity}` is removed per pass — the first
@@ -136,8 +142,17 @@ defmodule Number42.Refactors.Ex.RemoveDeadPrivateFunction do
     Sourceror.parse_string(source) |> apply_to_parse_result(source)
   end
 
-  defp apply_to_parse_result({:ok, ast}, source),
-    do: ast |> first_module_patches() |> patch_or_passthrough(source)
+  # A deleted `defp` may have been the sole user of an `alias`/`import only:`
+  # (#307); once it is gone those directives are dead litter. Prune them on the
+  # rewritten source — re-parsing after the deletion so the now-removed `defp`
+  # no longer counts as a use. No-op when nothing was deleted (the directive is
+  # still live) or when the source is unchanged.
+  defp apply_to_parse_result({:ok, ast}, source) do
+    case ast |> first_module_patches() |> patch_or_passthrough(source) do
+      ^source -> source
+      rewritten -> prune_dead_directives(rewritten)
+    end
+  end
 
   defp apply_to_parse_result({:error, _}, source), do: source
 

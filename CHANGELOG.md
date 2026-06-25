@@ -23,6 +23,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `RemoveDeadPrivateFunction` now prunes `alias`/`import only:` directives left
+  dead by its own removal (#307). When the deleted `defp` was the sole user of a
+  directive, that directive is dead litter (an `unused alias`/`unused import`
+  warning); it is now removed via `AstHelpers.prune_dead_directives/1`, run on
+  the rewritten source so the now-gone `defp` no longer counts as a use. No-op
+  when nothing was deleted or a survivor still uses the directive. This completes
+  the caller-cleanup family: the lift refactors (`ExtractToPublicComponent` #299)
+  already prune directives orphaned *by a lift*; this covers directives orphaned
+  by a standalone dead-`defp` removal. The original #307 dogfood symptom
+  (orphans after a #299 lift) no longer reproduces on position-db — #299's own
+  prune already clears it (0 `unused alias`/`import` warnings across a 234-file
+  run, with and without this change); the unit tests cover the standalone path.
 - `ExtractErrorVocabulary` is now **enabled by default** — the opt-in gate is
   removed. A dogfood run surfaced one correctness bug, fixed at the root: a
   `{:error, atom}` tuple sitting inside a `@spec`/`@type`/`@callback` attribute
