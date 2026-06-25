@@ -95,6 +95,7 @@
   {"lib/number42/refactors/ex/sort_for_top_k.ex", :call},
   {"lib/number42/refactors/ex/sort_reverse_to_desc.ex", :call},
   {"lib/number42/refactors/ex/split_flag_argument.ex", :call},
+  {"lib/number42/refactors/ex/split_root_conditional_component.ex", :call},
   {"lib/number42/refactors/ex/try_rescue_with_safe_alternative.ex", :call},
   {"lib/number42/refactors/ex/use_map_join.ex", :call},
   {"lib/number42/refactors/ex/utc_now_truncate.ex", :call},
