@@ -52,7 +52,14 @@ defmodule Number42.Refactors.Ex.CanonicalStatementOrder do
 
   The three-stage key is a **total order**, which makes the topological
   output unique and therefore idempotent: a second pass rebuilds the
-  same graph and emits the same sequence.
+  same graph and emits the same sequence. The index tie-break is stable
+  within a single `transform/2` call (the canonical order is computed
+  from one fixed set of indices), and once a segment is emitted in
+  canonical order re-sorting it reproduces the same sequence.
+
+  Every reorderable segment of every def body is reordered in a single
+  `transform/2` call, so the whole source reaches its fixpoint at once
+  rather than relying on the engine's (capped) pass loop.
 
   ## Correctness foundation — the dependency DAG
 
@@ -154,44 +161,49 @@ defmodule Number42.Refactors.Ex.CanonicalStatementOrder do
   end
 
   defp apply_to_parse_result({:ok, ast}, source, min),
-    do: ast |> first_body_patch(source, min) |> patch_or_passthrough(source)
+    do: ast |> all_body_patches(source, min) |> patch_or_passthrough(source)
 
   defp apply_to_parse_result({:error, _}, source, _min), do: source
 
-  # Reorder at most one def body per pass — the first that actually
-  # reorders — so output stays deterministic. The engine's fixpoint loop
-  # picks up the rest on later passes.
-  @spec first_body_patch(Macro.t(), String.t(), pos_integer()) :: [map()]
-  defp first_body_patch(ast, source, min) do
+  # Reorder every reorderable segment of every def body in a single pass.
+  # Each def body occupies a disjoint source range, and within a body each
+  # barrier-delimited segment is disjoint too, so the patches never
+  # overlap and `Sourceror.patch_string/2` applies them all at once. This
+  # makes the refactor reach its fixpoint in ONE `transform/2` call rather
+  # than leaning on the engine's pass loop — which is capped, so a file
+  # with more reorderable bodies than the cap would otherwise be reported
+  # as non-converging.
+  @spec all_body_patches(Macro.t(), String.t(), pos_integer()) :: [map()]
+  defp all_body_patches(ast, source, min) do
     ast
     |> Macro.prewalker()
-    |> Enum.find_value([], fn
+    |> Enum.flat_map(fn
       {kind, _, [_head, body_kw]} when def_kind?(kind) ->
-        patch_for_def_body(body_kw, source, min)
+        patches_for_def_body(body_kw, source, min)
 
       _ ->
-        nil
+        []
     end)
   end
 
-  defp patch_for_def_body(body_kw, source, min) do
+  defp patches_for_def_body(body_kw, source, min) do
     with {:ok, body} <- fetch_do_body(body_kw),
          exprs when length(exprs) >= min <- body_to_exprs(body) do
-      patch_for_statements(exprs, source)
+      patches_for_statements(exprs, source)
     else
-      _ -> nil
+      _ -> []
     end
   end
 
-  # The trailing statement (return value) is pinned. Reorder only the
-  # leading statements, segmented at barriers.
-  defp patch_for_statements(exprs, source) do
+  # The trailing statement (return value) is pinned. Reorder every
+  # leading segment, segmented at barriers.
+  defp patches_for_statements(exprs, source) do
     {leading, _return} = Enum.split(exprs, -1)
 
     leading
     |> Enum.with_index()
     |> segments()
-    |> Enum.find_value(&segment_patch(&1, source))
+    |> Enum.flat_map(&List.wrap(segment_patch(&1, source)))
   end
 
   # Split the indexed leading statements into maximal runs of

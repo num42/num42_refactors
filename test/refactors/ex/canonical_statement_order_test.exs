@@ -431,6 +431,72 @@ defmodule Number42.Refactors.Ex.CanonicalStatementOrderTest do
     end
   end
 
+  describe "Slice 7 — regression: every body reorders in one pass (#422)" do
+    # Before the fix `transform/2` reordered only the FIRST reorderable
+    # def body per call, leaning on the engine's pass loop for the rest.
+    # On a file with more reorderable bodies than the engine's pass cap
+    # (`@max_passes`) the run never reached the later bodies and reported
+    # a false non-convergence. A single `transform/2` must now reach the
+    # fixpoint for the whole source: applying it twice equals applying it
+    # once even when several independent bodies all need reordering.
+    test "two independent bodies both sort in a single transform" do
+      source = """
+      defmodule M do
+        def f(input) do
+          x = Map.put(%{}, :x, input)
+          y = Map.put(%{}, :y, input)
+          z = Map.put(%{}, :z, input)
+
+          {x, y, z}
+        end
+
+        def g(input) do
+          a = Map.put(%{}, :a, input)
+          b = Map.put(%{}, :b, input)
+          c = Map.put(%{}, :c, input)
+
+          {a, b, c}
+        end
+      end
+      """
+
+      once = apply_refactor(@subject, source, @on)
+
+      # Both bodies must already be canonicalised after ONE pass — i.e.
+      # neither still sits in source order.
+      refute squeeze_body(once) =~ "x = Map.put(%{}, :x, input) y = Map.put(%{}, :y, input) z ="
+      refute squeeze_body(once) =~ "a = Map.put(%{}, :a, input) b = Map.put(%{}, :b, input) c ="
+
+      assert_idempotent(@subject, source, @on)
+      assert_compiles(once)
+    end
+
+    # Many bodies (> the engine's @max_passes of 5) — the original throttle
+    # needed one pass per body, so 6 bodies could never converge under the
+    # cap. One transform must settle all of them.
+    test "six independent bodies all sort in a single transform" do
+      bodies =
+        Enum.map_join(?a..?f, "\n\n", fn ch ->
+          n = <<ch>>
+
+          """
+            def #{n}(input) do
+              p = Map.put(%{}, :p, input)
+              q = Map.put(%{}, :q, input)
+              r = Map.put(%{}, :r, input)
+
+              {p, q, r}
+            end
+          """
+        end)
+
+      source = "defmodule M do\n#{bodies}\nend\n"
+
+      assert_idempotent(@subject, source, @on)
+      assert_compiles(apply_refactor(@subject, source, @on))
+    end
+  end
+
   # Compare just the def body, whitespace-squeezed.
   defp squeeze_body(source) do
     source
