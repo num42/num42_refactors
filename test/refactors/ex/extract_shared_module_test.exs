@@ -49,24 +49,24 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
 
       expected_a = """
       defmodule MyApp.Items do
-        defdelegate assign(scope, attrs), to: MyApp.Items.Shared
+        defdelegate assign(scope, attrs), to: MyApp.Items.Assignment
       end
       """
 
       expected_b = """
       defmodule MyApp.Items.Positions do
-        defdelegate assign(scope, attrs), to: MyApp.Items.Shared
+        defdelegate assign(scope, attrs), to: MyApp.Items.Assignment
       end
       """
 
       assert_rewrites(@subject, a, expected_a, prepared: plan)
       assert_rewrites(@subject, b, expected_b, prepared: plan)
 
-      shared_path = Path.join(tmp, "lib/my_app/items/shared.ex")
+      shared_path = Path.join(tmp, "lib/my_app/items/assignment.ex")
       assert File.exists?(shared_path)
 
       shared_source = File.read!(shared_path)
-      assert shared_source =~ "defmodule MyApp.Items.Shared"
+      assert shared_source =~ "defmodule MyApp.Items.Assignment"
       assert shared_source =~ "def assign(scope, attrs)"
       assert shared_source =~ "Map.put(:assigned, true)"
     end
@@ -121,7 +121,7 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
     test "LCP of exactly 1 segment is allowed (sammeleimer)", %{tmp: tmp} do
       a = """
       defmodule MyApp.Foo do
-        def shared(x, y) do
+        def compute(x, y) do
           x
           |> Kernel.+(y)
           |> Kernel.*(2)
@@ -131,7 +131,7 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
 
       b = """
       defmodule MyApp.Bar do
-        def shared(x, y) do
+        def compute(x, y) do
           x
           |> Kernel.+(y)
           |> Kernel.*(2)
@@ -143,12 +143,12 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
 
       expected_a = """
       defmodule MyApp.Foo do
-        defdelegate shared(x, y), to: MyApp.Shared
+        defdelegate compute(x, y), to: MyApp.Computation
       end
       """
 
       assert_rewrites(@subject, a, expected_a, prepared: plan)
-      assert File.exists?(Path.join(tmp, "lib/my_app/shared.ex"))
+      assert File.exists?(Path.join(tmp, "lib/my_app/computation.ex"))
     end
 
     test "modules with conflicting imports are skipped", %{tmp: tmp} do
@@ -196,9 +196,9 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
     test "defp clones are extracted as def in shared, originals get import", %{tmp: tmp} do
       a = """
       defmodule MyApp.Items.A do
-        def caller(x), do: helper(x, 0)
+        def compute(x), do: compute_helper(x, 0)
 
-        defp helper(x, y) do
+        defp compute_helper(x, y) do
           x
           |> Kernel.+(y)
           |> Kernel.*(2)
@@ -208,9 +208,9 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
 
       b = """
       defmodule MyApp.Items.B do
-        def caller(x), do: helper(x, 0)
+        def compute(x), do: compute_helper(x, 0)
 
-        defp helper(x, y) do
+        defp compute_helper(x, y) do
           x
           |> Kernel.+(y)
           |> Kernel.*(2)
@@ -223,17 +223,17 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
       result_a = apply_refactor(@subject, a, prepared: plan)
 
       # The defp is gone from the original; an import takes its place.
-      refute result_a =~ "defp helper"
-      assert result_a =~ "import MyApp.Items.Shared, only: [helper: 2]"
-      # The caller still references `helper(x, 0)` — resolved via import now.
-      assert result_a =~ "def caller(x), do: helper(x, 0)"
+      refute result_a =~ "defp compute_helper"
+      assert result_a =~ "import MyApp.Items.Computation, only: [compute_helper: 2]"
+      # The caller still references `compute_helper(x, 0)` — resolved via import now.
+      assert result_a =~ "def compute(x), do: compute_helper(x, 0)"
 
-      shared_path = Path.join(tmp, "lib/my_app/items/shared.ex")
+      shared_path = Path.join(tmp, "lib/my_app/items/computation.ex")
       assert File.exists?(shared_path)
 
       shared_source = File.read!(shared_path)
       # Migrated as public def so the import can pick it up.
-      assert shared_source =~ "def helper(x, y)"
+      assert shared_source =~ "def compute_helper(x, y)"
     end
   end
 
@@ -267,9 +267,9 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
       refute result_a =~ "%{scope: s}"
 
       assert result_a =~
-               ~r/def assign\(arg_0, arg_1\), do: MyApp\.Items\.Shared\.assign\(arg_0, arg_1\)/
+               ~r/def assign\(arg_0, arg_1\), do: MyApp\.Items\.Assignment\.assign\(arg_0, arg_1\)/
 
-      shared_source = File.read!(Path.join(tmp, "lib/my_app/items/shared.ex"))
+      shared_source = File.read!(Path.join(tmp, "lib/my_app/items/assignment.ex"))
 
       # Shared module preserves the pattern match.
       assert shared_source =~ "def assign(%{scope: s}, attrs)"
@@ -301,11 +301,11 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
       result_a = apply_refactor(@subject, a, prepared: plan)
 
       assert result_a =~
-               ~r/def compute\(arg_0, arg_1\), do: MyApp\.Items\.Shared\.compute\(arg_0, arg_1\)/
+               ~r/def compute\(arg_0, arg_1\), do: MyApp\.Items\.Computation\.compute\(arg_0, arg_1\)/
 
       refute result_a =~ "is_integer"
 
-      shared_source = File.read!(Path.join(tmp, "lib/my_app/items/shared.ex"))
+      shared_source = File.read!(Path.join(tmp, "lib/my_app/items/computation.ex"))
       assert shared_source =~ "when is_integer(x) and is_integer(y)"
     end
   end
@@ -314,17 +314,17 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
     test "multi-clause functions: all clauses go to shared, one wrapper in original", %{tmp: tmp} do
       a = """
       defmodule MyApp.Items.A do
-        def classify(0), do: :zero
-        def classify(n) when is_integer(n) and n > 0, do: :positive
-        def classify(n) when is_integer(n), do: :negative
+        def compute(0), do: :zero
+        def compute(n) when is_integer(n) and n > 0, do: :positive
+        def compute(n) when is_integer(n), do: :negative
       end
       """
 
       b = """
       defmodule MyApp.Items.B do
-        def classify(0), do: :zero
-        def classify(n) when is_integer(n) and n > 0, do: :positive
-        def classify(n) when is_integer(n), do: :negative
+        def compute(0), do: :zero
+        def compute(n) when is_integer(n) and n > 0, do: :positive
+        def compute(n) when is_integer(n), do: :negative
       end
       """
 
@@ -335,10 +335,10 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
       # Exactly one wrapper, all clauses gone from original.
       refute result_a =~ ":zero"
       refute result_a =~ ":positive"
-      assert result_a =~ ~r/def classify\(arg_0\), do: MyApp\.Items\.Shared\.classify\(arg_0\)/
+      assert result_a =~ ~r/def compute\(arg_0\), do: MyApp\.Items\.Computation\.compute\(arg_0\)/
 
-      shared_source = File.read!(Path.join(tmp, "lib/my_app/items/shared.ex"))
-      assert shared_source =~ "def classify(0)"
+      shared_source = File.read!(Path.join(tmp, "lib/my_app/items/computation.ex"))
+      assert shared_source =~ "def compute(0)"
       assert shared_source =~ ":zero"
       assert shared_source =~ ":positive"
       assert shared_source =~ ":negative"
@@ -375,7 +375,7 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
 
       _result_a = apply_refactor(@subject, a, prepared: plan)
 
-      shared_path = Path.join(tmp, "lib/my_app/items/shared.ex")
+      shared_path = Path.join(tmp, "lib/my_app/items/fetching.ex")
       assert File.exists?(shared_path)
 
       shared_source = File.read!(shared_path)
@@ -430,7 +430,7 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
       defmodule MyApp.Items.A do
         import Ecto.Query
 
-        def big(q) do
+        def build(q) do
           q
           |> where([x], x.id > 0)
           |> select([x], x.id)
@@ -442,7 +442,7 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
       defmodule MyApp.Items.B do
         import Ecto.Query
 
-        def big(q) do
+        def build(q) do
           q
           |> where([x], x.id > 0)
           |> select([x], x.id)
@@ -454,7 +454,7 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
 
       _ = apply_refactor(@subject, a, prepared: plan)
 
-      shared_path = Path.join(tmp, "lib/my_app/items/shared.ex")
+      shared_path = Path.join(tmp, "lib/my_app/items/builders.ex")
       assert File.exists?(shared_path)
 
       shared_source = File.read!(shared_path)
@@ -519,13 +519,13 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
     test "pipe-call rhs is counted at arity+1", %{tmp: tmp} do
       a = """
       defmodule MyApp.Items.A do
-        def run(items) do
+        def compute(items) do
           items
-          |> normalize(0)
+          |> compute_base(0)
           |> Enum.sum()
         end
 
-        defp normalize(items, base) do
+        defp compute_base(items, base) do
           Enum.map(items, fn x -> x + base end)
         end
       end
@@ -533,13 +533,13 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
 
       b = """
       defmodule MyApp.Items.B do
-        def run(items) do
+        def compute(items) do
           items
-          |> normalize(0)
+          |> compute_base(0)
           |> Enum.sum()
         end
 
-        defp normalize(items, base) do
+        defp compute_base(items, base) do
           Enum.map(items, fn x -> x + base end)
         end
       end
@@ -547,23 +547,23 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
 
       plan = prepared([{"a.ex", a}, {"b.ex", b}], write_root: tmp)
 
-      # Both `run/1` and `normalize/2` should land in the shared module
-      # — `normalize` migrates as a helper. If pipe-arity accounting
-      # were broken, `normalize` would be considered a dangling local
-      # call and the extraction would skip.
+      # Both `compute/1` and `compute_base/2` should land in the shared
+      # module — `compute_base` migrates as a helper. If pipe-arity
+      # accounting were broken, `compute_base` would be considered a
+      # dangling local call and the extraction would skip.
       result_a = apply_refactor(@subject, a, prepared: plan)
-      assert result_a =~ "defdelegate run(items)"
+      assert result_a =~ "defdelegate compute(items)"
 
-      shared_path = Path.join(tmp, "lib/my_app/items/shared.ex")
+      shared_path = Path.join(tmp, "lib/my_app/items/computation.ex")
       assert File.exists?(shared_path)
       shared_source = File.read!(shared_path)
-      assert shared_source =~ "def run(items)"
-      # `normalize/2` here happens to be a clone too (identical in both
+      assert shared_source =~ "def compute(items)"
+      # `compute_base/2` here happens to be a clone too (identical in both
       # modules), so it lands as a `def` in Shared (promoted from defp).
-      # The key invariant we're checking: the body of `run/1` is not
+      # The key invariant we're checking: the body of `compute/1` is not
       # rejected as unmigratable — pipe-arity accounting recognized
-      # `|> normalize(0)` as a valid call to `normalize/2`.
-      assert shared_source =~ "normalize(items, base)"
+      # `|> compute_base(0)` as a valid call to `compute_base/2`.
+      assert shared_source =~ "compute_base(items, base)"
     end
   end
 
@@ -582,7 +582,7 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
 
       a = """
       defmodule MyApp.Items.A do
-        def big(q) do
+        def build(q) do
           q
           |> List.wrap()
           |> Enum.map(& &1.id)
@@ -593,7 +593,7 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
 
       b = """
       defmodule MyApp.Items.B do
-        def big(q) do
+        def build(q) do
           q
           |> List.wrap()
           |> Enum.map(& &1.id)
@@ -611,15 +611,15 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
         )
 
       # Plan IS populated — both modules end up as losers pointing at
-      # MyApp.Items.Shared. (No file gets written; see assertion below.)
+      # MyApp.Items.Builders. (No file gets written; see assertion below.)
       assert Map.has_key?(plan, MyApp.Items.A)
       assert Map.has_key?(plan, MyApp.Items.B)
 
       [entry_a] = Map.fetch!(plan, MyApp.Items.A)
-      assert entry_a.target == MyApp.Items.Shared
-      assert entry_a.name == :big
+      assert entry_a.target == MyApp.Items.Builders
+      assert entry_a.name == :build
 
-      refute File.exists?(Path.join(sandbox, "lib/my_app/items/shared.ex"))
+      refute File.exists?(Path.join(sandbox, "lib/my_app/items/builders.ex"))
     end
   end
 
@@ -630,18 +630,19 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
     # writes overwriting earlier ones — so only the last group's
     # function survived.
     test "two clone groups merge into one shared module", %{tmp: tmp} do
-      # Clone group 1: `compute/1` between A and B.
-      # Clone group 2: `format/1` between A and B (same modules, distinct
-      # function). Both target MyApp.Items.Shared.
+      # Clone group 1: `compute_value/1` between A and B.
+      # Clone group 2: `compute_label/1` between A and B (same modules,
+      # distinct function). Both share the `compute` verb, so both target
+      # MyApp.Items.Computation.
       a = """
       defmodule MyApp.Items.A do
-        def compute(x) do
+        def compute_value(x) do
           x
           |> Kernel.+(1)
           |> Kernel.*(2)
         end
 
-        def format(x) do
+        def compute_label(x) do
           x
           |> Integer.to_string()
           |> String.pad_leading(4, "0")
@@ -651,13 +652,13 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
 
       b = """
       defmodule MyApp.Items.B do
-        def compute(x) do
+        def compute_value(x) do
           x
           |> Kernel.+(1)
           |> Kernel.*(2)
         end
 
-        def format(x) do
+        def compute_label(x) do
           x
           |> Integer.to_string()
           |> String.pad_leading(4, "0")
@@ -667,13 +668,13 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
 
       _plan = prepared([{"a.ex", a}, {"b.ex", b}], write_root: tmp)
 
-      shared_path = Path.join(tmp, "lib/my_app/items/shared.ex")
+      shared_path = Path.join(tmp, "lib/my_app/items/computation.ex")
       assert File.exists?(shared_path)
 
       shared_source = File.read!(shared_path)
       # Both functions must be present in the same file.
-      assert shared_source =~ "def compute(x)"
-      assert shared_source =~ "def format(x)"
+      assert shared_source =~ "def compute_value(x)"
+      assert shared_source =~ "def compute_label(x)"
     end
   end
 
@@ -685,13 +686,13 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
     test "function takes precedence; helper version is dropped", %{tmp: tmp} do
       a = """
       defmodule MyApp.Items.A do
-        def big(items) do
-          Enum.map(items, fn item -> small(item, :ok) end)
+        def compute(items) do
+          Enum.map(items, fn item -> compute_small(item, :ok) end)
         end
 
-        defp small(item, _flag) when is_map(item), do: item
+        defp compute_small(item, _flag) when is_map(item), do: item
 
-        defp small(item, flag) do
+        defp compute_small(item, flag) do
           %{item: item, flag: flag}
         end
       end
@@ -699,13 +700,13 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
 
       b = """
       defmodule MyApp.Items.B do
-        def big(items) do
-          Enum.map(items, fn item -> small(item, :ok) end)
+        def compute(items) do
+          Enum.map(items, fn item -> compute_small(item, :ok) end)
         end
 
-        defp small(item, _flag) when is_map(item), do: item
+        defp compute_small(item, _flag) when is_map(item), do: item
 
-        defp small(item, flag) do
+        defp compute_small(item, flag) do
           %{item: item, flag: flag}
         end
       end
@@ -713,24 +714,26 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
 
       _plan = prepared([{"a.ex", a}, {"b.ex", b}], write_root: tmp)
 
-      shared_path = Path.join(tmp, "lib/my_app/items/shared.ex")
+      shared_path = Path.join(tmp, "lib/my_app/items/computation.ex")
       assert File.exists?(shared_path)
 
       shared_source = File.read!(shared_path)
 
-      # `small/2` is a clone in its own right, so it lands as `def`
-      # (promoted from defp). The helper-migration path through `big/1`
-      # tried to insert `small/2` as a `defp` — that copy must be
-      # suppressed. Count how many `(def|defp) small(` occurrences
+      # `compute_small/2` is a clone in its own right, so it lands as `def`
+      # (promoted from defp). The helper-migration path through `compute/1`
+      # tried to insert `compute_small/2` as a `defp` — that copy must be
+      # suppressed. Count how many `(def|defp) compute_small(` occurrences
       # appear: should be exactly two clauses, all as `def`.
-      defs_count = shared_source |> String.split("def small(") |> length() |> Kernel.-(1)
-      defps_count = shared_source |> String.split("defp small(") |> length() |> Kernel.-(1)
+      defs_count = shared_source |> String.split("def compute_small(") |> length() |> Kernel.-(1)
+
+      defps_count =
+        shared_source |> String.split("defp compute_small(") |> length() |> Kernel.-(1)
 
       assert defs_count == 2,
-             "expected two `def small(` clauses, got #{defs_count}\n#{shared_source}"
+             "expected two `def compute_small(` clauses, got #{defs_count}\n#{shared_source}"
 
       assert defps_count == 0,
-             "expected zero `defp small(` clauses, got #{defps_count}\n#{shared_source}"
+             "expected zero `defp compute_small(` clauses, got #{defps_count}\n#{shared_source}"
     end
   end
 
@@ -749,16 +752,16 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
       defmodule MyApp.Items.A do
         def cycle(scope, id) do
           item = get_item!(scope, id)
-          next_unit = do_next(item.unit)
+          next_unit = compute_next(item.unit)
           update_item(scope, item, %{unit: next_unit})
         end
 
         defp get_item!(_scope, _id), do: %{unit: :piece}
         defp update_item(_scope, _item, _attrs), do: :ok
 
-        defp do_next(:piece), do: :flat
-        defp do_next(:flat), do: :linear
-        defp do_next(_), do: :piece
+        defp compute_next(:piece), do: :flat
+        defp compute_next(:flat), do: :linear
+        defp compute_next(_), do: :piece
       end
       """
 
@@ -768,13 +771,13 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
 
         def cycle(scope, id) do
           item = Items.get_item!(scope, id)
-          next_unit = do_next(item.unit)
+          next_unit = compute_next(item.unit)
           Items.update_item(scope, item, %{unit: next_unit})
         end
 
-        defp do_next(:piece), do: :flat
-        defp do_next(:flat), do: :linear
-        defp do_next(_), do: :piece
+        defp compute_next(:piece), do: :flat
+        defp compute_next(:flat), do: :linear
+        defp compute_next(_), do: :piece
       end
       """
 
@@ -782,36 +785,37 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
 
       result_b = apply_refactor(@subject, b, prepared: plan)
 
-      shared_path = Path.join(tmp, "lib/my_app/items/shared.ex")
+      shared_path = Path.join(tmp, "lib/my_app/items/computation.ex")
       assert File.exists?(shared_path), "shared module must exist"
       shared_source = File.read!(shared_path)
 
-      # The `defp do_next` was migrated as a public `def` — the only
+      # The `defp compute_next` was migrated as a public `def` — the only
       # safe migration shape, otherwise the import wouldn't pick it up.
-      assert shared_source =~ ~r/def do_next\(/, """
-      `do_next` should be migrated to Shared as a public `def`.
+      assert shared_source =~ ~r/def compute_next\(/, """
+      `compute_next` should be migrated to Shared as a public `def`.
       shared:
       #{shared_source}
       """
 
-      # The original `defp do_next` clauses must be gone from B —
+      # The original `defp compute_next` clauses must be gone from B —
       # otherwise we'd have both a local AND a (would-be) imported
       # definition, which is a compile error too.
-      refute result_b =~ ~r/defp do_next\(/, """
-      `defp do_next` should be removed from the original now that it
+      refute result_b =~ ~r/defp compute_next\(/, """
+      `defp compute_next` should be removed from the original now that it
       lives in Shared. Result:
       #{result_b}
       """
 
       # The caller `cycle/2` is NOT a clone (Module-qualified calls
       # diverge between A and B) and must stay put. After migration it
-      # still references `do_next(item.unit)` unqualified — so an
-      # `import MyApp.Items.Shared, only: [do_next: 1]` MUST have been
-      # injected, or the file won't compile.
-      assert result_b =~ ~r/import MyApp\.Items\.Shared,\s*only:\s*\[[^\]]*do_next:\s*1[^\]]*\]/,
+      # still references `compute_next(item.unit)` unqualified — so an
+      # `import MyApp.Items.Computation, only: [compute_next: 1]` MUST have
+      # been injected, or the file won't compile.
+      assert result_b =~
+               ~r/import MyApp\.Items\.Computation,\s*only:\s*\[[^\]]*compute_next:\s*1[^\]]*\]/,
              """
-             missing `import MyApp.Items.Shared, only: [do_next: 1]` —
-             caller `cycle/2` calls `do_next(item.unit)` unqualified and
+             missing `import MyApp.Items.Computation, only: [compute_next: 1]` —
+             caller `cycle/2` calls `compute_next(item.unit)` unqualified and
              would fail to compile. Result:
              #{result_b}
              """
@@ -831,25 +835,25 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
     test "either both migrate cleanly or original keeps caller intact", %{tmp: tmp} do
       a = """
       defmodule MyApp.Items.A do
-        def cycle(unit) do
-          do_next(unit)
+        def compute(unit) do
+          compute_next(unit)
         end
 
-        defp do_next(:piece), do: :flat
-        defp do_next(:flat), do: :linear
-        defp do_next(_), do: :piece
+        defp compute_next(:piece), do: :flat
+        defp compute_next(:flat), do: :linear
+        defp compute_next(_), do: :piece
       end
       """
 
       b = """
       defmodule MyApp.Items.B do
-        def cycle(unit) do
-          do_next(unit)
+        def compute(unit) do
+          compute_next(unit)
         end
 
-        defp do_next(:piece), do: :flat
-        defp do_next(:flat), do: :linear
-        defp do_next(_), do: :piece
+        defp compute_next(:piece), do: :flat
+        defp compute_next(:flat), do: :linear
+        defp compute_next(_), do: :piece
       end
       """
 
@@ -857,37 +861,38 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
 
       result_a = apply_refactor(@subject, a, prepared: plan)
 
-      shared_path = Path.join(tmp, "lib/my_app/items/shared.ex")
+      shared_path = Path.join(tmp, "lib/my_app/items/computation.ex")
       assert File.exists?(shared_path), "shared module must exist on disk"
       shared_source = File.read!(shared_path)
 
-      # The original `defp do_next` must NOT survive in the original if
-      # the helper has been migrated to Shared — otherwise we'd end up
+      # The original `defp compute_next` must NOT survive in the original
+      # if the helper has been migrated to Shared — otherwise we'd end up
       # with a duplicate definition or a caller pointing at a dead
       # local. If it did survive, no migration of the helper happened —
-      # in which case `cycle/1` must keep its body unchanged AND the
-      # local `defp do_next` must still be there.
-      helper_in_shared? = shared_source =~ ~r/def do_next\(/
-      helper_in_original? = result_a =~ ~r/defp do_next\(/
+      # in which case `compute/1` must keep its body unchanged AND the
+      # local `defp compute_next` must still be there.
+      helper_in_shared? = shared_source =~ ~r/def compute_next\(/
+      helper_in_original? = result_a =~ ~r/defp compute_next\(/
 
       caller_calls_local? =
-        result_a =~ ~r/def cycle\(unit\) do\s+do_next\(unit\)/ or
-          result_a =~ ~r/def cycle\(unit\),\s*do:\s*do_next\(unit\)/
+        result_a =~ ~r/def compute\(unit\) do\s+compute_next\(unit\)/ or
+          result_a =~ ~r/def compute\(unit\),\s*do:\s*compute_next\(unit\)/
 
       caller_is_delegate? =
-        result_a =~ ~r/defdelegate cycle\(unit\), to: MyApp\.Items\.Shared/
+        result_a =~ ~r/defdelegate compute\(unit\), to: MyApp\.Items\.Computation/
 
       caller_uses_import? =
-        result_a =~ ~r/import MyApp\.Items\.Shared.*do_next/s
+        result_a =~ ~r/import MyApp\.Items\.Computation.*compute_next/s
 
       cond do
         # Path 1: caller stayed local. Helper must also stay local
         # OR be importable from Shared.
         caller_calls_local? ->
           assert helper_in_original? or caller_uses_import?, """
-          caller `cycle/1` still calls `do_next(unit)` locally, but the
-          helper is gone from the original AND there's no
-          `import MyApp.Items.Shared, only: [do_next: 1]` to resolve it.
+          caller `compute/1` still calls `compute_next(unit)` locally, but
+          the helper is gone from the original AND there's no
+          `import MyApp.Items.Computation, only: [compute_next: 1]` to
+          resolve it.
           original:
           #{result_a}
           shared:
@@ -899,22 +904,22 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
         # must be gone (otherwise we have a dangling defp).
         caller_is_delegate? ->
           assert helper_in_shared?, """
-          caller `cycle/1` was rewritten to `defdelegate` but
-          `do_next/1` was not migrated to Shared.
+          caller `compute/1` was rewritten to `defdelegate` but
+          `compute_next/1` was not migrated to Shared.
           shared:
           #{shared_source}
           """
 
           refute helper_in_original?, """
-          caller `cycle/1` became a `defdelegate` but the original
-          still has `defp do_next` — that's dead code.
+          caller `compute/1` became a `defdelegate` but the original
+          still has `defp compute_next` — that's dead code.
           original:
           #{result_a}
           """
 
         true ->
           flunk("""
-          caller `cycle/1` is in an unexpected shape — neither the
+          caller `compute/1` is in an unexpected shape — neither the
           original local body, nor a `defdelegate`. Result:
           #{result_a}
           """)
@@ -933,7 +938,7 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
     test "second run preserves a function added by the first run", %{tmp: tmp} do
       a = """
       defmodule MyApp.Items.A do
-        def shared_op(x, y) do
+        def compute(x, y) do
           x
           |> Kernel.+(y)
           |> Kernel.*(2)
@@ -943,7 +948,7 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
 
       b = """
       defmodule MyApp.Items.B do
-        def shared_op(x, y) do
+        def compute(x, y) do
           x
           |> Kernel.+(y)
           |> Kernel.*(2)
@@ -953,16 +958,15 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
 
       _plan = prepared([{"a.ex", a}, {"b.ex", b}], write_root: tmp)
 
-      shared_path = Path.join(tmp, "lib/my_app/items/shared.ex")
+      shared_path = Path.join(tmp, "lib/my_app/items/computation.ex")
       assert File.exists?(shared_path)
 
       first_source = File.read!(shared_path)
-      assert first_source =~ "def shared_op(x, y)"
+      assert first_source =~ "def compute(x, y)"
 
-      # Second run with the *same* inputs. Now the Shared module
-      # already exists on disk; the planner must leave it alone (no
-      # new functions to add → unchanged) instead of rewriting it from
-      # scratch.
+      # Second run with the *same* inputs. Now the activity host already
+      # exists on disk; the planner must leave it alone (no new functions
+      # to add → unchanged) instead of rewriting it from scratch.
       _plan2 = prepared([{"a.ex", a}, {"b.ex", b}], write_root: tmp)
 
       second_source = File.read!(shared_path)
@@ -972,7 +976,7 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
     test "second run does not duplicate functions added by the first run", %{tmp: tmp} do
       a = """
       defmodule MyApp.Items.A do
-        def shared_op(x, y) do
+        def compute(x, y) do
           x
           |> Kernel.+(y)
           |> Kernel.*(2)
@@ -982,7 +986,7 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
 
       b = """
       defmodule MyApp.Items.B do
-        def shared_op(x, y) do
+        def compute(x, y) do
           x
           |> Kernel.+(y)
           |> Kernel.*(2)
@@ -994,16 +998,22 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
 
       _plan2 = prepared([{"a.ex", a}, {"b.ex", b}], write_root: tmp)
 
-      shared_source = File.read!(Path.join(tmp, "lib/my_app/items/shared.ex"))
+      shared_source = File.read!(Path.join(tmp, "lib/my_app/items/computation.ex"))
 
       defs_count =
-        shared_source |> String.split("def shared_op(x, y)") |> length() |> Kernel.-(1)
+        shared_source |> String.split("def compute(x, y)") |> length() |> Kernel.-(1)
 
       assert defs_count == 1,
-             "expected one `def shared_op(x, y)` clause, got #{defs_count}\n#{shared_source}"
+             "expected one `def compute(x, y)` clause, got #{defs_count}\n#{shared_source}"
     end
 
-    test "hand-written content in existing Shared file is preserved", %{tmp: tmp} do
+    # The refactor no longer mints/appends a content-free `.Shared`
+    # host (#426). A hand-written `.Shared` module is unrelated to the
+    # new activity-named host and must be left completely untouched —
+    # the `compute_*` clones land in their own `{LCP}.Computation`.
+    test "hand-written .Shared file is left untouched; clones go to the activity host", %{
+      tmp: tmp
+    } do
       shared_path = Path.join(tmp, "lib/my_app/items/shared.ex")
       File.mkdir_p!(Path.dirname(shared_path))
 
@@ -1018,7 +1028,7 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
 
       a = """
       defmodule MyApp.Items.A do
-        def shared_op(x, y) do
+        def compute(x, y) do
           x
           |> Kernel.+(y)
           |> Kernel.*(2)
@@ -1028,7 +1038,7 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
 
       b = """
       defmodule MyApp.Items.B do
-        def shared_op(x, y) do
+        def compute(x, y) do
           x
           |> Kernel.+(y)
           |> Kernel.*(2)
@@ -1038,29 +1048,27 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
 
       _plan = prepared([{"a.ex", a}, {"b.ex", b}], write_root: tmp)
 
-      shared_source = File.read!(shared_path)
+      # The hand-written Shared file is byte-for-byte unchanged.
+      assert File.read!(shared_path) == hand_written,
+             "hand-written .Shared file was modified:\n#{File.read!(shared_path)}"
 
-      assert shared_source =~ "def hand_written(x)",
-             "hand-written function was clobbered:\n#{shared_source}"
-
-      assert shared_source =~ "def shared_op(x, y)",
-             "extracted clone was not appended:\n#{shared_source}"
-
-      assert shared_source =~ "human-authored helper",
-             "hand-written comment was lost:\n#{shared_source}"
+      # The clones landed in the derived activity host instead.
+      activity_source = File.read!(Path.join(tmp, "lib/my_app/items/computation.ex"))
+      assert activity_source =~ "defmodule MyApp.Items.Computation"
+      assert activity_source =~ "def compute(x, y)"
     end
 
     test "name collision with different body: existing definition wins", %{tmp: tmp} do
-      shared_path = Path.join(tmp, "lib/my_app/items/shared.ex")
+      shared_path = Path.join(tmp, "lib/my_app/items/computation.ex")
       File.mkdir_p!(Path.dirname(shared_path))
 
-      # Existing Shared module already defines `shared_op/2`, but with
+      # Existing activity host already defines `compute/2`, but with
       # a totally different body. The refactor must NOT overwrite or
       # duplicate it — the existing definition wins, and the new
       # extraction is dropped for that name/arity.
       existing = """
-      defmodule MyApp.Items.Shared do
-        def shared_op(x, y) do
+      defmodule MyApp.Items.Computation do
+        def compute(x, y) do
           # different body — sentinel string for the assertion
           {:hand_written, x, y}
         end
@@ -1071,7 +1079,7 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
 
       a = """
       defmodule MyApp.Items.A do
-        def shared_op(x, y) do
+        def compute(x, y) do
           x
           |> Kernel.+(y)
           |> Kernel.*(2)
@@ -1081,7 +1089,7 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
 
       b = """
       defmodule MyApp.Items.B do
-        def shared_op(x, y) do
+        def compute(x, y) do
           x
           |> Kernel.+(y)
           |> Kernel.*(2)
@@ -1097,26 +1105,26 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
              "existing body was overwritten:\n#{shared_source}"
 
       defs_count =
-        shared_source |> String.split("def shared_op(x, y)") |> length() |> Kernel.-(1)
+        shared_source |> String.split("def compute(x, y)") |> length() |> Kernel.-(1)
 
       assert defs_count == 1,
-             "expected exactly one `def shared_op(x, y)` clause (existing wins), got #{defs_count}\n#{shared_source}"
+             "expected exactly one `def compute(x, y)` clause (existing wins), got #{defs_count}\n#{shared_source}"
     end
 
     test "existing defdelegate of same name/arity blocks the appended def (#243)", %{tmp: tmp} do
-      shared_path = Path.join(tmp, "lib/my_app/items/shared.ex")
+      shared_path = Path.join(tmp, "lib/my_app/items/computation.ex")
       File.mkdir_p!(Path.dirname(shared_path))
 
-      # The Shared module already delegates `shared_op/2` to another
+      # The activity host already delegates `compute/2` to another
       # winner (e.g. emitted by DelegateExactDuplicates in an earlier
       # pass and committed). The same-name/arity `defdelegate` already
-      # provides the function — appending a `def shared_op/2` here would
+      # provides the function — appending a `def compute/2` here would
       # create a DEAD second clause (the defdelegate matches first),
       # warning under --warnings-as-errors. The refactor must detect the
       # destination already provides the signature and decline. (#243)
       existing = """
-      defmodule MyApp.Items.Shared do
-        defdelegate shared_op(x, y), to: MyApp.Other.Impl
+      defmodule MyApp.Items.Computation do
+        defdelegate compute(x, y), to: MyApp.Other.Impl
       end
       """
 
@@ -1124,7 +1132,7 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
 
       a = """
       defmodule MyApp.Items.A do
-        def shared_op(x, y) do
+        def compute(x, y) do
           x
           |> Kernel.+(y)
           |> Kernel.*(2)
@@ -1134,7 +1142,7 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
 
       b = """
       defmodule MyApp.Items.B do
-        def shared_op(x, y) do
+        def compute(x, y) do
           x
           |> Kernel.+(y)
           |> Kernel.*(2)
@@ -1146,11 +1154,11 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
 
       shared_source = File.read!(shared_path)
 
-      assert shared_source =~ "defdelegate shared_op(x, y)",
+      assert shared_source =~ "defdelegate compute(x, y)",
              "existing defdelegate was clobbered:\n#{shared_source}"
 
-      refute shared_source =~ ~r/\bdef shared_op\(x, y\)/,
-             "a dead `def shared_op/2` was appended next to the defdelegate:\n#{shared_source}"
+      refute shared_source =~ ~r/\bdef compute\(x, y\)/,
+             "a dead `def compute/2` was appended next to the defdelegate:\n#{shared_source}"
     end
   end
 
@@ -1330,7 +1338,7 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
     test "function gets `extracted from` comment listing all source modules", %{tmp: tmp} do
       a = """
       defmodule MyApp.Items.A do
-        def shared_op(x, y) do
+        def compute(x, y) do
           x
           |> Kernel.+(y)
           |> Kernel.*(2)
@@ -1340,7 +1348,7 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
 
       b = """
       defmodule MyApp.Items.B do
-        def shared_op(x, y) do
+        def compute(x, y) do
           x
           |> Kernel.+(y)
           |> Kernel.*(2)
@@ -1350,21 +1358,21 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
 
       _plan = prepared([{"a.ex", a}, {"b.ex", b}], write_root: tmp)
 
-      shared_source = File.read!(Path.join(tmp, "lib/my_app/items/shared.ex"))
+      shared_source = File.read!(Path.join(tmp, "lib/my_app/items/computation.ex"))
 
       assert shared_source =~ "# extracted from: MyApp.Items.A, MyApp.Items.B",
-             "expected origin comment for shared_op:\n#{shared_source}"
+             "expected origin comment for compute:\n#{shared_source}"
     end
 
     test "transitively-migrated private helper gets origin comment", %{tmp: tmp} do
-      # `caller/1` is a clone between A and B and pulls in the
+      # `build_value/1` is a clone between A and B and pulls in the
       # helper `unique_compute/1`, which only exists in A. The
       # helper isn't its own clone group (different name in B) so
-      # it lands in Shared via the transitive-helper path, with a
+      # it lands in the host via the transitive-helper path, with a
       # source comment naming exactly its origin module.
       a = """
       defmodule MyApp.Items.A do
-        def caller(x) do
+        def build_value(x) do
           unique_compute(x)
           |> Kernel.+(1)
           |> Kernel.*(2)
@@ -1378,14 +1386,14 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
       end
       """
 
-      # B has an identical caller/1 (same AST → same hash → clone)
+      # B has an identical build_value/1 (same AST → same hash → clone)
       # but no `unique_compute/1` definition. The detector only
       # looks at AST shape, not at whether the call resolves; the
-      # helper is migratable from A's body alone, so it lands in
-      # Shared as a transitive helper sourced solely from A.
+      # helper is migratable from A's body alone, so it lands in the
+      # host as a transitive helper sourced solely from A.
       b = """
       defmodule MyApp.Items.B do
-        def caller(x) do
+        def build_value(x) do
           unique_compute(x)
           |> Kernel.+(1)
           |> Kernel.*(2)
@@ -1395,15 +1403,16 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
 
       _plan = prepared([{"a.ex", a}, {"b.ex", b}], write_root: tmp)
 
-      shared_source = File.read!(Path.join(tmp, "lib/my_app/items/shared.ex"))
+      shared_source = File.read!(Path.join(tmp, "lib/my_app/items/builders.ex"))
 
-      # caller/1 is a clone — both modules.
-      assert shared_source =~ "# extracted from: MyApp.Items.A, MyApp.Items.B\n  def caller(x)",
-             "expected origin comment over caller:\n#{shared_source}"
+      # build_value/1 is a clone — both modules.
+      assert shared_source =~
+               "# extracted from: MyApp.Items.A, MyApp.Items.B\n  def build_value(x)",
+             "expected origin comment over build_value:\n#{shared_source}"
 
       # unique_compute is a transitive helper from A only. It stays
-      # `defp` in Shared because it's only called from caller/1,
-      # which now also lives in Shared.
+      # `defp` in the host because it's only called from build_value/1,
+      # which now also lives in the host.
       assert shared_source =~
                ~r/# extracted from: MyApp\.Items\.A\n\s*defp? unique_compute\(x\)/,
              "expected origin comment over unique_compute helper:\n#{shared_source}"
@@ -1415,12 +1424,12 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
     # outright. New behaviour: if every clone module defines the
     # attribute identically AND the value is a structural literal
     # (no function calls), co-migrate the attribute into Shared.
-    test "value-literal attribute is migrated to Shared", %{tmp: tmp} do
+    test "value-literal attribute is migrated to the host", %{tmp: tmp} do
       a = """
       defmodule MyApp.Items.A do
         @sentinel_oz "0"
 
-        def caller(x) do
+        def build_value(x) do
           @sentinel_oz
           |> Kernel.<>(x)
           |> String.upcase()
@@ -1432,7 +1441,7 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
       defmodule MyApp.Items.B do
         @sentinel_oz "0"
 
-        def caller(x) do
+        def build_value(x) do
           @sentinel_oz
           |> Kernel.<>(x)
           |> String.upcase()
@@ -1442,13 +1451,13 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
 
       _plan = prepared([{"a.ex", a}, {"b.ex", b}], write_root: tmp)
 
-      shared_source = File.read!(Path.join(tmp, "lib/my_app/items/shared.ex"))
+      shared_source = File.read!(Path.join(tmp, "lib/my_app/items/builders.ex"))
 
       assert shared_source =~ ~s|@sentinel_oz "0"|,
              "expected @sentinel_oz attribute to be co-migrated:\n#{shared_source}"
 
-      assert shared_source =~ "def caller(x)",
-             "expected caller/1 in shared:\n#{shared_source}"
+      assert shared_source =~ "def build_value(x)",
+             "expected build_value/1 in host:\n#{shared_source}"
     end
 
     test "attribute defined identically in all modules — verify originals still keep it",
@@ -1460,7 +1469,7 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
       defmodule MyApp.Items.A do
         @retries 3
 
-        def caller(x) do
+        def build_value(x) do
           x
           |> Kernel.+(@retries)
           |> Kernel.*(2)
@@ -1474,7 +1483,7 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
       defmodule MyApp.Items.B do
         @retries 3
 
-        def caller(x) do
+        def build_value(x) do
           x
           |> Kernel.+(@retries)
           |> Kernel.*(2)
@@ -1484,7 +1493,7 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
 
       _plan = prepared([{"a.ex", a}, {"b.ex", b}], write_root: tmp)
 
-      shared_source = File.read!(Path.join(tmp, "lib/my_app/items/shared.ex"))
+      shared_source = File.read!(Path.join(tmp, "lib/my_app/items/builders.ex"))
 
       assert shared_source =~ "@retries 3",
              "expected @retries to be co-migrated:\n#{shared_source}"
@@ -1596,7 +1605,7 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
       defmodule MyApp.Items.A do
         @factor 7
 
-        def caller(x) do
+        def build_value(x) do
           step(x)
           |> Kernel.*(2)
         end
@@ -1609,7 +1618,7 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
       defmodule MyApp.Items.B do
         @factor 7
 
-        def caller(x) do
+        def build_value(x) do
           step(x)
           |> Kernel.*(2)
         end
@@ -1620,7 +1629,7 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
 
       _plan = prepared([{"a.ex", a}, {"b.ex", b}], write_root: tmp)
 
-      shared_source = File.read!(Path.join(tmp, "lib/my_app/items/shared.ex"))
+      shared_source = File.read!(Path.join(tmp, "lib/my_app/items/builders.ex"))
 
       assert shared_source =~ "@factor 7",
              "expected @factor to follow its referencing helper:\n#{shared_source}"
@@ -1675,7 +1684,28 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
       end
       """
 
-      plan = prepared([{"a.ex", a}, {"b.ex", b}], write_root: tmp)
+      # A real, maintained host already exists at the LCP — the clones
+      # are reused into it (Path A), and its pre-existing import of
+      # `foo_shared` must be extended, not clobbered, for `helper/1`.
+      shared = """
+      defmodule MyApp.Items.Shared do
+        def foo_shared(x), do: x
+      end
+      """
+
+      shared_path = Path.join(tmp, "lib/my_app/items/shared.ex")
+      File.mkdir_p!(Path.dirname(shared_path))
+      File.write!(shared_path, shared)
+
+      plan =
+        prepared(
+          [
+            {"lib/my_app/items/a.ex", a},
+            {"lib/my_app/items/b.ex", b},
+            {"lib/my_app/items/shared.ex", shared}
+          ],
+          write_root: tmp
+        )
 
       result_a = apply_refactor(@subject, a, prepared: plan)
 
@@ -1956,7 +1986,7 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
     test "mixed lib/ and test/ sources: only lib/ entries form the plan", %{tmp: tmp} do
       lib_a = """
       defmodule MyApp.A do
-        def shared_op(scope, attrs) do
+        def compute(scope, attrs) do
           scope
           |> Map.put(:attrs, attrs)
           |> Map.put(:assigned, true)
@@ -1966,7 +1996,7 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
 
       lib_b = """
       defmodule MyApp.B do
-        def shared_op(scope, attrs) do
+        def compute(scope, attrs) do
           scope
           |> Map.put(:attrs, attrs)
           |> Map.put(:assigned, true)
@@ -1978,7 +2008,7 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
       # and must NOT show up in the origin list.
       test_c = """
       defmodule MyApp.Test.C do
-        def shared_op(scope, attrs) do
+        def compute(scope, attrs) do
           scope
           |> Map.put(:attrs, attrs)
           |> Map.put(:assigned, true)
@@ -2038,17 +2068,17 @@ defmodule Number42.Refactors.Ex.ExtractSharedModuleTest do
 
       plan = prepared(sources, write_root: tmp)
 
-      real_path = Path.join(tmp, "lib/codeqa/ast/nodes/shared.ex")
-      naive_path = Path.join(tmp, "lib/code_qa/ast/nodes/shared.ex")
+      real_path = Path.join(tmp, "lib/codeqa/ast/nodes/assignment.ex")
+      naive_path = Path.join(tmp, "lib/code_qa/ast/nodes/assignment.ex")
 
       assert File.exists?(real_path),
-             "expected fresh Shared file at the real on-disk dir #{real_path}"
+             "expected fresh host file at the real on-disk dir #{real_path}"
 
       refute File.exists?(naive_path),
              "must not create a duplicate top-level dir from Macro.underscore"
 
       shared_src = File.read!(real_path)
-      assert shared_src =~ "defmodule CodeQA.AST.Nodes.Shared"
+      assert shared_src =~ "defmodule CodeQA.AST.Nodes.Assignment"
       assert shared_src =~ "def assign(scope, attrs)"
 
       assert Map.has_key?(plan, CodeQA.AST.Nodes)

@@ -846,7 +846,7 @@ defmodule Number42.Refactors.Ex.ExtractParametricCloneTest do
       defmodule MyApp.Components.A do
         import MyAppWeb.CoreComponents
 
-        def cuboid_color(item) do
+        def build_cuboid_color(item) do
           case item.color do
             nil ->
               "#808080"
@@ -867,7 +867,7 @@ defmodule Number42.Refactors.Ex.ExtractParametricCloneTest do
       defmodule MyApp.Components.B do
         import MyAppWeb.CoreComponents
 
-        def cuboid_color(item) do
+        def build_cuboid_color(item) do
           case item.color do
             nil ->
               "#808080"
@@ -891,7 +891,7 @@ defmodule Number42.Refactors.Ex.ExtractParametricCloneTest do
 
       _plan = ExtractParametricClone.build_plan(sources, min_mass: 5, write_root: tmp)
 
-      shared_path = Path.join(tmp, "lib/my_app/components/shared.ex")
+      shared_path = Path.join(tmp, "lib/my_app/components/builders.ex")
       assert File.exists?(shared_path), "shared module should have been written"
 
       shared_source = File.read!(shared_path)
@@ -965,6 +965,166 @@ defmodule Number42.Refactors.Ex.ExtractParametricCloneTest do
       refute rewritten =~ ~r/build_brand_shared\(/, """
       a `build_brand_shared/N` helper was synthesised — the refactor
       collapsed two semantically distinct functions. Result:
+      #{rewritten}
+      """
+    end
+  end
+
+  describe "pattern-position literals must never become holes (#426)" do
+    # Minimized from a real silent-break on whk_portal_umbrella
+    # `expose/equipment.ex`: two `defp`s mapping core-mass strings to
+    # labels were consolidated, turning the *clause-head literals* into
+    # free `param_N` variables. `param_1 -> param_2` matches anything and
+    # binds it — the first clause always fires, so every input returns
+    # `param_2`. It compiles and returns the wrong answer. Pattern-position
+    # literals are the same category error as map keys: load-bearing, never
+    # parametrisable.
+    test "case-clause head literals → group declined" do
+      source = """
+      defmodule MyApp.Expose do
+        defp fireplace_value(masses, key) do
+          case Map.get(masses, key) do
+            "keinSchornstein" -> "-"
+            "Schornstein" -> "Schornstein"
+            "vorbereiteterSchornstein" -> "vorbereiteter Schornstein"
+          end
+        end
+
+        defp roof_value(masses, key) do
+          case Map.get(masses, key) do
+            "keinDach" -> "-"
+            "Flachdach" -> "Flachdach"
+            "Satteldach" -> "Satteldach"
+          end
+        end
+      end
+      """
+
+      sources = [{"lib/my_app/expose.ex", source}]
+      plan = ExtractParametricClone.build_plan(sources, min_mass: 3)
+
+      rewritten = @subject.transform(source, prepared: plan)
+
+      assert rewritten == source, """
+      A clone group whose holes land in `case`-clause head (pattern)
+      position was consolidated. The clause-head literals became
+      `param_N` binding patterns — `param_1 -> param_2` matches anything,
+      so the first clause always fires and dispatch is destroyed. Result:
+      #{rewritten}
+      """
+    end
+
+    test "fn-clause head literals → group declined" do
+      source = """
+      defmodule MyApp.Mapper do
+        defp label_a(x) do
+          Enum.map(x, fn
+            :alpha -> "A"
+            :beta -> "B"
+          end)
+        end
+
+        defp label_b(x) do
+          Enum.map(x, fn
+            :gamma -> "G"
+            :delta -> "D"
+          end)
+        end
+      end
+      """
+
+      sources = [{"lib/my_app/mapper.ex", source}]
+      plan = ExtractParametricClone.build_plan(sources, min_mass: 3)
+
+      rewritten = @subject.transform(source, prepared: plan)
+
+      assert rewritten == source, """
+      `fn`-clause head literals were parametrised into binding patterns.
+      Result:
+      #{rewritten}
+      """
+    end
+
+    test "argument-position literals are still parametrised (guard is not over-broad)" do
+      source = """
+      defmodule MyApp.Greet do
+        def hi(name) do
+          IO.puts("hello " <> name <> " from A")
+        end
+
+        def yo(name) do
+          IO.puts("hello " <> name <> " from B")
+        end
+      end
+      """
+
+      sources = [{"lib/my_app/greet.ex", source}]
+      plan = ExtractParametricClone.build_plan(sources, min_mass: 3)
+
+      rewritten = @subject.transform(source, prepared: plan)
+
+      assert rewritten =~ ~r/_shared\(/, """
+      Argument-position literals ("from A"/"from B") are a legitimate
+      parametric clone — the pattern-position guard must not reject them.
+      Result:
+      #{rewritten}
+      """
+    end
+  end
+
+  describe "N>=k bare-literal junk signatures are declined (#426)" do
+    # A candidate that parametrises over many distinct bare literals is
+    # not a clone — it's two functions that happen to share a skeleton.
+    # Consolidating them mints a `*_shared(…, param_0, param_1, …, param_N)`
+    # signature carrying nothing but values, which reads worse than the
+    # originals. Decline once the deduped literal-hole count crosses the
+    # threshold.
+    test "two functions differing in six string literals → not consolidated" do
+      source = """
+      defmodule MyApp.Labels do
+        defp german(k) do
+          %{a: "eins", b: "zwei", c: "drei", d: "vier", e: "fuenf", f: "sechs", key: k}
+        end
+
+        defp english(k) do
+          %{a: "one", b: "two", c: "three", d: "four", e: "five", f: "six", key: k}
+        end
+      end
+      """
+
+      sources = [{"lib/my_app/labels.ex", source}]
+      plan = ExtractParametricClone.build_plan(sources, min_mass: 3)
+
+      rewritten = @subject.transform(source, prepared: plan)
+
+      assert rewritten == source, """
+      Two functions differing in six bare string literals were
+      consolidated into a junk `param_0..param_N` signature. Result:
+      #{rewritten}
+      """
+    end
+
+    test "a clone differing in a single literal still consolidates (threshold not too tight)" do
+      source = """
+      defmodule MyApp.Two do
+        def greet_a(name) do
+          IO.puts("hello " <> name <> " A")
+        end
+
+        def greet_b(name) do
+          IO.puts("hello " <> name <> " B")
+        end
+      end
+      """
+
+      sources = [{"lib/my_app/two.ex", source}]
+      plan = ExtractParametricClone.build_plan(sources, min_mass: 3)
+
+      rewritten = @subject.transform(source, prepared: plan)
+
+      assert rewritten =~ ~r/_shared\(/, """
+      A genuine clone differing in one literal must still consolidate —
+      the junk-signature gate must not reject small clones. Result:
       #{rewritten}
       """
     end

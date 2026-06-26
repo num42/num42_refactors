@@ -79,6 +79,8 @@ defmodule Number42.Refactors.Ex.ExtractRenamedClone do
 
   use Number42.Refactors.Refactor
 
+  alias Number42.Refactors.AstHelpers
+
   @default_min_mass 20
 
   @doc """
@@ -179,7 +181,7 @@ defmodule Number42.Refactors.Ex.ExtractRenamedClone do
   defp body_uses_module_attribute?(clauses),
     do: clauses |> Enum.any?(&clause_references_attribute?/1)
 
-  defp build_function_entry(module, kind, name, arity, clauses, min_mass) do
+  defp build_function_entry(module, kind, name, arity, clauses, path, min_mass) do
     cond do
       kind == :defp ->
         # Renamed-clone migration of `defp` would need every loser
@@ -201,11 +203,11 @@ defmodule Number42.Refactors.Ex.ExtractRenamedClone do
         []
 
       true ->
-        function_entry(module, kind, name, arity, clauses)
+        function_entry(module, kind, name, arity, clauses, path)
     end
   end
 
-  defp function_entry(module, kind, name, arity, clauses) do
+  defp function_entry(module, kind, name, arity, clauses, path) do
     # Plain-var clauses guarantee usable original arg names —
     # nicer to read in the wrapper than synthetic `arg_0`s.
     args = clause_arg_names(hd(clauses))
@@ -218,7 +220,8 @@ defmodule Number42.Refactors.Ex.ExtractRenamedClone do
         hash: hash_clauses(clauses),
         kind: kind,
         module: module,
-        name: name
+        name: name,
+        path: path
       }
     ]
   end
@@ -278,14 +281,20 @@ defmodule Number42.Refactors.Ex.ExtractRenamedClone do
     end
   end
 
+  # Mint a host only with a meaningful, activity-based name derived from
+  # the (differently-named) clones. A content-free `{LCP}.Shared` host
+  # names nothing — decline instead (#426). Renamed clones share a body
+  # but not a name, so the activity name only resolves when their names
+  # still agree on a leading verb (`render_a`/`render_b` → `.Rendering`).
   defp decide_target(entries) do
     parts_lists = entries |> Enum.map(&Module.split(&1.module))
     prefix = longest_common_prefix(parts_lists)
 
-    if prefix != [] do
-      {:ok, Module.concat(prefix ++ ["Shared"])}
-    else
-      :skip
+    function_names = entries |> Enum.map(& &1.name) |> Enum.uniq()
+
+    case AstHelpers.activity_module_segment(function_names) do
+      {:ok, segment} when prefix != [] -> {:ok, Module.concat(prefix ++ [segment])}
+      _ -> :skip
     end
   end
 
@@ -298,7 +307,7 @@ defmodule Number42.Refactors.Ex.ExtractRenamedClone do
     strip_when(head) |> kind_name_arity_or_skip(kind)
   end
 
-  defp extract_from_ast(ast, _source, min_mass) do
+  defp extract_from_ast(ast, path, min_mass) do
     ast
     |> Macro.prewalker()
     |> Enum.flat_map(fn
@@ -306,7 +315,7 @@ defmodule Number42.Refactors.Ex.ExtractRenamedClone do
         case alias_to_module(name_ast) do
           {:ok, mod} ->
             body_exprs = body_to_exprs(body)
-            functions_in_module(mod, body_exprs, min_mass)
+            functions_in_module(mod, body_exprs, path, min_mass)
 
           :error ->
             []
@@ -317,21 +326,21 @@ defmodule Number42.Refactors.Ex.ExtractRenamedClone do
     end)
   end
 
-  defp extract_from_parse_result({:ok, ast}, min_mass, source),
-    do: ast |> extract_from_ast(source, min_mass)
+  defp extract_from_parse_result({:ok, ast}, min_mass, path),
+    do: ast |> extract_from_ast(path, min_mass)
 
-  defp extract_from_parse_result({:error, _}, _min_mass, _source), do: []
+  defp extract_from_parse_result({:error, _}, _min_mass, _path), do: []
 
-  defp extract_module_info({_path, source}, min_mass),
-    do: Sourceror.parse_string(source) |> extract_from_parse_result(min_mass, source)
+  defp extract_module_info({path, source}, min_mass),
+    do: Sourceror.parse_string(source) |> extract_from_parse_result(min_mass, path)
 
-  defp functions_in_module(module, body_exprs, min_mass) do
+  defp functions_in_module(module, body_exprs, path, min_mass) do
     body_exprs
     |> Enum.filter(&def_clause?/1)
     |> Enum.group_by(&def_name_arity_or_skip/1)
     |> Enum.reject(fn {key, _} -> key == :skip end)
     |> Enum.flat_map(fn {{kind, name, arity}, clauses} ->
-      build_function_entry(module, kind, name, arity, clauses, min_mass)
+      build_function_entry(module, kind, name, arity, clauses, path, min_mass)
     end)
   end
 
@@ -467,22 +476,32 @@ defmodule Number42.Refactors.Ex.ExtractRenamedClone do
   end
 
   defp entries_for_target(sorted, target_module) do
-    winner = hd(sorted)
-    shared_name = winner.name
+    source_paths = sorted |> Enum.map(& &1.path) |> Enum.reject(&is_nil/1)
 
-    sorted
-    |> Enum.map(fn entry ->
-      {entry.module,
-       %{
-         args: entry.args,
-         arity: entry.arity,
-         kind: entry.kind,
-         name: entry.name,
-         shared_name: shared_name,
-         target: target_module,
-         winner_clauses: winner.clauses
-       }}
-    end)
+    # Sources spanning more than one umbrella app have no single correct
+    # host compile path — decline rather than write an unloadable host
+    # at the umbrella root (#426).
+    if AstHelpers.shared_host_ambiguous?(source_paths) do
+      []
+    else
+      winner = hd(sorted)
+      shared_name = winner.name
+
+      sorted
+      |> Enum.map(fn entry ->
+        {entry.module,
+         %{
+           args: entry.args,
+           arity: entry.arity,
+           kind: entry.kind,
+           name: entry.name,
+           shared_name: shared_name,
+           source_paths: source_paths,
+           target: target_module,
+           winner_clauses: winner.clauses
+         }}
+      end)
+    end
   end
 
   defp prepared_for_paths(nil, _opts), do: {:ok, %{}}
@@ -570,15 +589,6 @@ defmodule Number42.Refactors.Ex.ExtractRenamedClone do
   defp rewrite_with_plan_or_passthrough(nil, source), do: source
   defp rewrite_with_plan_or_passthrough(plan, source), do: source |> rewrite(plan)
 
-  defp shared_module_path(target_module, write_root) do
-    [first | tail] = Module.split(target_module)
-    root = Macro.underscore(first)
-    rest = Enum.map(tail, &Macro.underscore/1)
-
-    rel = Path.join(["lib", root | rest]) <> ".ex"
-    Path.join(write_root, rel)
-  end
-
   defp splice_before_module_end(source, addition) do
     lines = String.split(source, "\n")
     {prefix, suffix} = split_at_last_end(lines)
@@ -632,7 +642,10 @@ defmodule Number42.Refactors.Ex.ExtractRenamedClone do
   defp total_mass(clauses), do: clauses |> Enum.map(&clause_mass/1) |> Enum.sum()
 
   defp write_shared_module(target_module, group, write_root) do
-    path = shared_module_path(target_module, write_root)
+    source_paths =
+      group |> Enum.flat_map(fn {_loser, e} -> Map.get(e, :source_paths, []) end) |> Enum.uniq()
+
+    path = AstHelpers.shared_module_path(target_module, write_root, source_paths)
     File.mkdir_p!(Path.dirname(path))
 
     if File.exists?(path) do

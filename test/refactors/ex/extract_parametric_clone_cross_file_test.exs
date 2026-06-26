@@ -14,9 +14,12 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone.CrossFileTest do
   #     plus the per-clone rewrite.
   #
   #   * `:lcp_shared` — none of the clone modules has a qualifying
-  #     suffix and there's no intra-module concentration. We synthesise
-  #     a `{LCP}.Shared` module by writing a *fresh* file (same as
-  #     `ExtractSharedModule`).
+  #     suffix and there's no intra-module concentration. We derive a
+  #     host `{LCP}.<Activity>` from the clones' shared activity (e.g.
+  #     `emit` → `Notifications`, `fetch_user` → `Fetching`) and write a
+  #     *fresh* file for it (same as `ExtractSharedModule`). When the
+  #     functions share no derivable activity we **decline** instead of
+  #     minting a content-free host (#426: derive-or-decline).
   #
   # Both side-effects (write to disk) land under `:write_root` exactly
   # like `ExtractSharedModule`. Tests pass a per-test tmp_dir to keep
@@ -204,11 +207,11 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone.CrossFileTest do
   end
 
   # ---------------------------------------------------------------------
-  # :lcp_shared — fresh {LCP}.Shared module file is written
+  # :lcp_shared — fresh {LCP}.<Activity> module file is written
   # ---------------------------------------------------------------------
 
-  describe ":lcp_shared — fresh Shared module from LCP" do
-    test "1+1 clone, no qualifying suffix: writes {LCP}.Shared.ex; both modules import + rewrite",
+  describe ":lcp_shared — fresh activity host from LCP" do
+    test "1+1 clone, no qualifying suffix: writes {LCP}.<Activity>.ex; both modules import + rewrite",
          %{tmp: tmp} do
       a = """
       defmodule MyApp.Items.Foo do
@@ -239,15 +242,17 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone.CrossFileTest do
 
       plan = prepared(sources, write_root: tmp)
 
-      shared_path = Path.join(tmp, "lib/my_app/items/shared.ex")
-      assert File.exists?(shared_path), "expected fresh {LCP}.Shared file at #{shared_path}"
+      # `emit` derives the activity `Notifications` → host
+      # `MyApp.Items.Notifications` in `notifications.ex`.
+      shared_path = Path.join(tmp, "lib/my_app/items/notifications.ex")
+      assert File.exists?(shared_path), "expected fresh activity host at #{shared_path}"
 
       shared_src = File.read!(shared_path)
-      assert shared_src =~ "defmodule MyApp.Items.Shared"
+      assert shared_src =~ "defmodule MyApp.Items.Notifications"
       assert shared_src =~ ~r/def\s+emit_shared/
 
       result_a = @subject.transform(a, prepared: plan)
-      assert result_a =~ ~r/import\s+MyApp\.Items\.Shared/
+      assert result_a =~ ~r/import\s+MyApp\.Items\.Notifications/
       refute result_a =~ "Calendar.strftime"
     end
 
@@ -335,12 +340,13 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone.CrossFileTest do
 
     test "predicate function name keeps `?` after the `_shared` suffix", %{tmp: tmp} do
       # `?` and `!` are valid only at the END of an Elixir identifier.
-      # Naively appending `_shared` to `references_var?` produces
-      # `references_var?_shared`, which is a parse error. Strip the
+      # Naively appending `_shared` to `validate_var?` produces
+      # `validate_var?_shared`, which is a parse error. Strip the
       # marker, append `_shared`, then put the marker back.
+      # `validate_*` derives the activity `Validation`.
       a = """
       defmodule MyApp.Items.Foo do
-        def references_var?(ast, name) do
+        def validate_var?(ast, name) do
           ast |> Macro.prewalker() |> Enum.any?(&match?({^name, _, _}, &1)) and is_atom(name)
         end
       end
@@ -348,7 +354,7 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone.CrossFileTest do
 
       b = """
       defmodule MyApp.Items.Bar do
-        def references_var?(ast, name) do
+        def validate_var?(ast, name) do
           ast |> Macro.prewalker() |> Enum.any?(&match?({^name, _, _}, &1)) and is_atom(name)
         end
       end
@@ -367,16 +373,16 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone.CrossFileTest do
 
       plan = prepared(sources, write_root: tmp)
 
-      shared_path = Path.join(tmp, "lib/my_app/items/shared.ex")
+      shared_path = Path.join(tmp, "lib/my_app/items/validation.ex")
       assert File.exists?(shared_path)
 
       shared_src = File.read!(shared_path)
-      assert shared_src =~ ~r/def\s+references_var_shared\?/
-      refute shared_src =~ "references_var?_shared"
+      assert shared_src =~ ~r/def\s+validate_var_shared\?/
+      refute shared_src =~ "validate_var?_shared"
 
       result_a = @subject.transform(a, prepared: plan)
-      assert result_a =~ "references_var_shared?"
-      refute result_a =~ "references_var?_shared"
+      assert result_a =~ "validate_var_shared?"
+      refute result_a =~ "validate_var?_shared"
     end
 
     test "bang function name keeps `!` after the `_shared` suffix", %{tmp: tmp} do
@@ -409,7 +415,8 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone.CrossFileTest do
 
       _plan = prepared(sources, write_root: tmp)
 
-      shared_path = Path.join(tmp, "lib/my_app/items/shared.ex")
+      # `fetch_user` derives the activity `Fetching`.
+      shared_path = Path.join(tmp, "lib/my_app/items/fetching.ex")
       assert File.exists?(shared_path)
 
       shared_src = File.read!(shared_path)
@@ -458,8 +465,8 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone.CrossFileTest do
       sources_v2 = [
         {Path.join(tmp, "lib/my_app/items/foo.ex"), a_once},
         {Path.join(tmp, "lib/my_app/items/bar.ex"), b_once},
-        {Path.join(tmp, "lib/my_app/items/shared.ex"),
-         File.read!(Path.join(tmp, "lib/my_app/items/shared.ex"))}
+        {Path.join(tmp, "lib/my_app/items/notifications.ex"),
+         File.read!(Path.join(tmp, "lib/my_app/items/notifications.ex"))}
       ]
 
       plan2 = prepared(sources_v2, write_root: tmp)
@@ -481,15 +488,16 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone.CrossFileTest do
   # ExDNA-style regression cases
   # ---------------------------------------------------------------------
 
-  describe "regression — embedding_openai/embedding_ollama style" do
+  describe "regression — encode_openai/encode_ollama style" do
     # Two modules under the same parent define near-identical functions.
     # Without intra-concentration and without a qualifying suffix, we
-    # expect :lcp_shared to kick in and produce {Embedding}.Shared.
+    # expect :lcp_shared to kick in and, since `encode_*` derives the
+    # activity `Encoding`, produce {Embedding}.Encoding.
 
-    test "two embedding modules under common parent collapse via :lcp_shared", %{tmp: tmp} do
+    test "two encoding modules under common parent collapse via :lcp_shared", %{tmp: tmp} do
       a = """
       defmodule MyApp.Embedding.OpenAI do
-        def embed(text) do
+        def encode(text) do
           payload = %{model: "text-embedding-3-small", input: text}
           encoded = Jason.encode!(payload)
           encoded
@@ -499,7 +507,7 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone.CrossFileTest do
 
       b = """
       defmodule MyApp.Embedding.Ollama do
-        def embed(text) do
+        def encode(text) do
           payload = %{model: "nomic-embed-text", input: text}
           encoded = Jason.encode!(payload)
           encoded
@@ -520,15 +528,15 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone.CrossFileTest do
 
       plan = prepared(sources, min_mass: 4, write_root: tmp)
 
-      shared_path = Path.join(tmp, "lib/my_app/embedding/shared.ex")
-      assert File.exists?(shared_path), "expected {LCP}.Shared at #{shared_path}"
+      shared_path = Path.join(tmp, "lib/my_app/embedding/encoding.ex")
+      assert File.exists?(shared_path), "expected {LCP}.Encoding at #{shared_path}"
 
       shared_src = File.read!(shared_path)
-      assert shared_src =~ "defmodule MyApp.Embedding.Shared"
+      assert shared_src =~ "defmodule MyApp.Embedding.Encoding"
 
       # Caller A is rewritten + imports the shared module.
       result_a = @subject.transform(a, prepared: plan)
-      assert result_a =~ ~r/import\s+MyApp\.Embedding\.Shared/
+      assert result_a =~ ~r/import\s+MyApp\.Embedding\.Encoding/
       refute result_a =~ "Jason.encode!"
     end
   end
@@ -539,14 +547,15 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone.CrossFileTest do
 
   describe "alias qualification — body uses Source's aliases" do
     test "aliased call in body becomes fully qualified in the helper", %{tmp: tmp} do
-      # Both source modules `alias MyApp.Repo`. The Shared module
+      # Both source modules `alias MyApp.Repo`. The host module
       # itself never sees that alias declaration; the helper body must
       # qualify the call to `MyApp.Repo.all(...)` so it resolves there.
+      # `load_*` derives the activity `Fetching`.
       a = """
       defmodule MyApp.Items.Foo do
         alias MyApp.Repo
 
-        def list_things(scope) do
+        def load_things(scope) do
           scope
           |> Repo.all()
           |> Enum.map(fn x -> {:foo, x} end)
@@ -558,7 +567,7 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone.CrossFileTest do
       defmodule MyApp.Items.Bar do
         alias MyApp.Repo
 
-        def list_things(scope) do
+        def load_things(scope) do
           scope
           |> Repo.all()
           |> Enum.map(fn x -> {:bar, x} end)
@@ -579,7 +588,7 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone.CrossFileTest do
 
       _plan = prepared(sources, min_mass: 4, write_root: tmp)
 
-      shared_src = File.read!(Path.join(tmp, "lib/my_app/items/shared.ex"))
+      shared_src = File.read!(Path.join(tmp, "lib/my_app/items/fetching.ex"))
 
       # The helper body must use the FULL module path, not the alias.
       assert shared_src =~ "MyApp.Repo.all",
@@ -590,11 +599,12 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone.CrossFileTest do
     end
 
     test "multi-segment alias `alias A.B.C` is fully qualified", %{tmp: tmp} do
+      # `build_*` derives the activity `Builders`.
       a = """
       defmodule MyApp.Items.Foo do
         alias MyApp.Some.Deep.Module
 
-        def proc(x) do
+        def build_thing(x) do
           Module.work(x, "alpha")
         end
       end
@@ -604,7 +614,7 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone.CrossFileTest do
       defmodule MyApp.Items.Bar do
         alias MyApp.Some.Deep.Module
 
-        def proc(x) do
+        def build_thing(x) do
           Module.work(x, "beta")
         end
       end
@@ -622,7 +632,7 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone.CrossFileTest do
       end)
 
       _plan = prepared(sources, min_mass: 3, write_root: tmp)
-      shared_src = File.read!(Path.join(tmp, "lib/my_app/items/shared.ex"))
+      shared_src = File.read!(Path.join(tmp, "lib/my_app/items/builders.ex"))
       assert shared_src =~ "MyApp.Some.Deep.Module.work"
     end
   end
@@ -630,12 +640,13 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone.CrossFileTest do
   describe "import propagation — Ecto.Query and friends" do
     test "Ecto.Query macros (where/select) → import propagated to shared module",
          %{tmp: tmp} do
+      # `query_*` derives the activity `Fetching`.
       a = """
       defmodule MyApp.Items.Foo do
         import Ecto.Query
         alias MyApp.Repo
 
-        def list_active(scope) do
+        def query_active(scope) do
           scope
           |> where([i], i.status == "active")
           |> select([i], {:foo, i.id})
@@ -649,7 +660,7 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone.CrossFileTest do
         import Ecto.Query
         alias MyApp.Repo
 
-        def list_active(scope) do
+        def query_active(scope) do
           scope
           |> where([i], i.status == "active")
           |> select([i], {:bar, i.id})
@@ -670,7 +681,7 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone.CrossFileTest do
       end)
 
       _plan = prepared(sources, min_mass: 4, write_root: tmp)
-      shared_src = File.read!(Path.join(tmp, "lib/my_app/items/shared.ex"))
+      shared_src = File.read!(Path.join(tmp, "lib/my_app/items/fetching.ex"))
 
       assert shared_src =~ ~r/^\s*import\s+Ecto\.Query/m,
              "expected `import Ecto.Query` in shared module:\n#{shared_src}"
@@ -763,7 +774,8 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone.CrossFileTest do
       end)
 
       _plan = prepared(sources, min_mass: 5, write_root: tmp)
-      shared_src = File.read!(Path.join(tmp, "lib/my_app/items/shared.ex"))
+      # `emit` derives the activity `Notifications`.
+      shared_src = File.read!(Path.join(tmp, "lib/my_app/items/notifications.ex"))
 
       assert shared_src =~ ~r/def(p)?\s+format_time/,
              "expected `format_time` helper to be migrated:\n#{shared_src}"
@@ -858,7 +870,8 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone.CrossFileTest do
       end)
 
       _plan = prepared(sources, min_mass: 5, write_root: tmp)
-      shared_src = File.read!(Path.join(tmp, "lib/my_app/items/shared.ex"))
+      # `fetch` derives the activity `Fetching`.
+      shared_src = File.read!(Path.join(tmp, "lib/my_app/items/fetching.ex"))
 
       assert shared_src =~ ~r/@retries\s+3/,
              "expected `@retries 3` in shared module:\n#{shared_src}"
@@ -981,17 +994,18 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone.CrossFileTest do
 
       _plan = prepared(sources, write_root: tmp)
 
-      real_path = Path.join(tmp, "lib/codeqa/ast/nodes/shared.ex")
-      naive_path = Path.join(tmp, "lib/code_qa/ast/nodes/shared.ex")
+      # `emit` derives the activity `Notifications`.
+      real_path = Path.join(tmp, "lib/codeqa/ast/nodes/notifications.ex")
+      naive_path = Path.join(tmp, "lib/code_qa/ast/nodes/notifications.ex")
 
       assert File.exists?(real_path),
-             "expected fresh Shared file at the real on-disk dir #{real_path}"
+             "expected fresh host file at the real on-disk dir #{real_path}"
 
       refute File.exists?(naive_path),
              "must not create a duplicate top-level dir from Macro.underscore"
 
       shared_src = File.read!(real_path)
-      assert shared_src =~ "defmodule CodeQA.AST.Nodes.Shared"
+      assert shared_src =~ "defmodule CodeQA.AST.Nodes.Notifications"
     end
   end
 
@@ -1016,19 +1030,19 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone.CrossFileTest do
     end
 
     test "six `%__MODULE__{}` struct clones → struct!/2 helper that compiles", %{tmp: tmp} do
-      # Issue #5 repro: six modules with an identical `cast/1` building
-      # `%__MODULE__{}`. Extracting verbatim into a `*.Shared` module
-      # rebinds `__MODULE__` to the struct-less Shared module and fails
+      # Issue #5 repro: six modules with an identical `build_node/1` building
+      # `%__MODULE__{}`. Extracting verbatim into the activity host
+      # rebinds `__MODULE__` to the struct-less host module and fails
       # to compile. Option A: parametrise the module — emit
-      # `cast_shared(module, node) -> struct!(module, ...)` and have each
-      # caller pass `__MODULE__`.
+      # `build_node_shared(module, node) -> struct!(module, ...)` and have each
+      # caller pass `__MODULE__`. `build_*` derives the activity `Builders`.
       mk = fn name ->
         """
         defmodule CodeQA.AST.Nodes.#{name} do
           alias CodeQA.AST.Enrichment.Node
           defstruct [:tokens, :line_count, :children, :start_line, :end_line, :label]
 
-          def cast(%Node{} = node) do
+          def build_node(%Node{} = node) do
             %__MODULE__{
               tokens: node.tokens,
               line_count: node.line_count,
@@ -1056,7 +1070,7 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone.CrossFileTest do
 
       plan = prepared(sources, write_root: tmp)
 
-      [shared] = Path.wildcard(Path.join(tmp, "**/shared.ex"))
+      [shared] = Path.wildcard(Path.join(tmp, "**/builders.ex"))
       shared_src = File.read!(shared)
 
       # struct!/2 with the module as the first parameter, no bare
@@ -1064,24 +1078,25 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone.CrossFileTest do
       assert shared_src =~ "struct!(module"
       refute shared_src =~ "%__MODULE__"
 
-      # The lifted Shared module compiles — the original bug is gone.
-      assert_compiles!(shared_src, "Shared module")
+      # The lifted host module compiles — the original bug is gone.
+      assert_compiles!(shared_src, "host module")
 
       # Every caller passes its own `__MODULE__` and imports arity 2.
       Enum.each(sources, fn {_p, src} ->
         out = apply_refactor(@subject, src, prepared: plan)
-        assert out =~ "cast_shared(__MODULE__, node)"
-        assert out =~ "cast_shared: 2"
+        assert out =~ "build_node_shared(__MODULE__, node)"
+        assert out =~ "build_node_shared: 2"
       end)
     end
 
     test "bare `__MODULE__` (non-struct) cross-file clone → module var, compiles", %{tmp: tmp} do
       # `__MODULE__` outside a struct literal is parametrised the same
       # way: the bare reference becomes the threaded-in module var.
+      # `build_*` derives the activity `Builders`.
       mk = fn name ->
         """
         defmodule MyApp.Reg.#{name} do
-          def reg(x) do
+          def build_reg(x) do
             {__MODULE__, :tag, to_string(x), String.upcase(to_string(x))}
           end
         end
@@ -1100,26 +1115,28 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone.CrossFileTest do
 
       plan = prepared(sources, min_mass: 4, write_root: tmp)
 
-      [shared] = Path.wildcard(Path.join(tmp, "**/shared.ex"))
+      [shared] = Path.wildcard(Path.join(tmp, "**/builders.ex"))
       shared_src = File.read!(shared)
 
       # The helper takes the module first and uses it in the tuple;
       # no bare `__MODULE__` survives in the lifted body.
-      assert shared_src =~ "reg_shared(module"
+      assert shared_src =~ "build_reg_shared(module"
       refute shared_src =~ "__MODULE__"
-      assert_compiles!(shared_src, "Shared module (bare __MODULE__)")
+      assert_compiles!(shared_src, "host module (bare __MODULE__)")
 
       Enum.each(sources, fn {_p, src} ->
         out = apply_refactor(@subject, src, prepared: plan)
-        assert out =~ "reg_shared(__MODULE__"
+        assert out =~ "build_reg_shared(__MODULE__"
       end)
     end
 
     test "`__ENV__` in clone body → group skipped", %{tmp: tmp} do
+      # `build_*` would derive the activity `Builders` — so only the
+      # `__ENV__` skip prevents a host from being written.
       mk = fn name ->
         """
         defmodule MyApp.Items.#{name} do
-          def trace(x) do
+          def build_trace(x) do
             mod = __ENV__.module
             {mod, "tag", to_string(x), String.upcase(to_string(x))}
           end
@@ -1139,8 +1156,8 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone.CrossFileTest do
 
       _plan = prepared(sources, min_mass: 4, write_root: tmp)
 
-      refute File.exists?(Path.join(tmp, "lib/my_app/items/shared.ex")),
-             "expected no Shared module when clone body uses `__ENV__`"
+      refute File.exists?(Path.join(tmp, "lib/my_app/items/builders.ex")),
+             "expected no host module when clone body uses `__ENV__`"
     end
 
     test "`__CALLER__` in clone body → group skipped", %{tmp: tmp} do
@@ -1169,22 +1186,25 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone.CrossFileTest do
 
       _plan = prepared(sources, min_mass: 4, write_root: tmp)
 
-      refute File.exists?(Path.join(tmp, "lib/my_app/items/shared.ex")),
-             "expected no Shared module when clone body uses `__CALLER__`"
+      # `emit` would derive the activity `Notifications` — so only the
+      # `__CALLER__` skip prevents a host from being written.
+      refute File.exists?(Path.join(tmp, "lib/my_app/items/notifications.ex")),
+             "expected no host module when clone body uses `__CALLER__`"
     end
 
     test "a shared `__MODULE__` helper is itself parametrised and compiles", %{tmp: tmp} do
       # A `defp` that two modules share and that uses `__MODULE__` is a
       # clone in its own right: the differing literal becomes an ordinary
       # hole and `__MODULE__` becomes the threaded-in module var. The
-      # lifted Shared helper therefore compiles — `__MODULE__` is never
-      # left bare in the shared module.
+      # lifted host helper therefore compiles — `__MODULE__` is never
+      # left bare in the host module. `build_*` derives the activity
+      # `Builders`.
       mk = fn name, tag ->
         """
         defmodule MyApp.Wrap.#{name} do
-          def emit(x), do: wrap(x)
+          def emit(x), do: build_wrapper(x)
 
-          defp wrap(x) do
+          defp build_wrapper(x) do
             {__MODULE__, #{inspect(tag)}, to_string(x), String.upcase(to_string(x))}
           end
         end
@@ -1203,12 +1223,12 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone.CrossFileTest do
 
       _plan = prepared(sources, min_mass: 4, write_root: tmp)
 
-      [shared] = Path.wildcard(Path.join(tmp, "**/shared.ex"))
+      [shared] = Path.wildcard(Path.join(tmp, "**/builders.ex"))
       shared_src = File.read!(shared)
 
       assert shared_src =~ "module"
       refute shared_src =~ "__MODULE__"
-      assert_compiles!(shared_src, "Shared helper with __MODULE__")
+      assert_compiles!(shared_src, "host helper with __MODULE__")
     end
 
     test "ordinary clone (no lexical macros) still extracts and Shared compiles", %{tmp: tmp} do
@@ -1243,10 +1263,11 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone.CrossFileTest do
 
       _plan = prepared(sources, min_mass: 4, write_root: tmp)
 
-      shared_path = Path.join(tmp, "lib/my_app/items/shared.ex")
-      assert File.exists?(shared_path), "expected Shared module for ordinary clones"
+      # `emit` derives the activity `Notifications`.
+      shared_path = Path.join(tmp, "lib/my_app/items/notifications.ex")
+      assert File.exists?(shared_path), "expected host module for ordinary clones"
 
-      assert_compiles!(File.read!(shared_path), "shared module")
+      assert_compiles!(File.read!(shared_path), "host module")
     end
   end
 end
