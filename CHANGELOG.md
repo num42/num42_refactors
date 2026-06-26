@@ -164,6 +164,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   via the Engine's existing per-file `skipped_modules`, keeping the Engine
   path-blind.
 
+### Removed
+
+- **`TopologicallyClusterIndependentBindings` is removed.** It reordered pure,
+  independent bindings in a def body by *operation-family adjacency*, while
+  `CanonicalStatementOrder` reorders the same statements by a *normalised-AST
+  hash*. The two orderings are contradictory: on any window of 2+ independent
+  pure bindings each refactor undoes the other, so the engine's fixpoint loop
+  never converged — surfaced by a whk-portal convergence sweep (#422/#423
+  follow-up). The clustering pass was pure readability with no consumer
+  depending on its order, whereas the hash order is the canonical form the clone
+  detectors rely on, so the clustering pass yields. Removed module + tests.
+
 ### Changed
 
 - `RemoveDeadPrivateFunction` now prunes `alias`/`import only:` directives left
