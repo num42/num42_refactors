@@ -1679,4 +1679,114 @@ defmodule Number42.Refactors.AstHelpersTest do
       assert {:ok, _} = Code.string_to_quoted(pruned)
     end
   end
+
+  describe "shared_module_path/3 — umbrella compile path (#426)" do
+    test "flat project: host lands under the project lib/ dir" do
+      mod = Module.concat([MyApp, Items, Shared])
+      paths = ["lib/my_app/items/a.ex", "lib/my_app/items/b.ex"]
+
+      assert AstHelpers.shared_module_path(mod, "/proj", paths) ==
+               "/proj/lib/my_app/items/shared.ex"
+    end
+
+    test "umbrella: host lands on the owning app's compile path, not the umbrella root" do
+      mod = Module.concat([Exporters, Svg, Assets, Shared])
+
+      paths = [
+        "apps/whk_portal/lib/exporters/svg/assets/shower.ex",
+        "apps/whk_portal/lib/exporters/svg/assets/bath.ex"
+      ]
+
+      # The bug: this used to drop `apps/whk_portal/` and write to the
+      # umbrella-root `lib/`, which no child app compiles → CompileError.
+      assert AstHelpers.shared_module_path(mod, "/proj", paths) ==
+               "/proj/apps/whk_portal/lib/exporters/svg/assets/shared.ex"
+    end
+
+    test "absolute source paths: write_root is not double-prepended" do
+      mod = Module.concat([CodeQA, AST, Nodes, Shared])
+
+      paths = [
+        "/tmp/proj/lib/codeqa/ast/nodes.ex",
+        "/tmp/proj/lib/codeqa/ast/nodes/positions.ex"
+      ]
+
+      assert AstHelpers.shared_module_path(mod, "/tmp/proj", paths) ==
+               "/tmp/proj/lib/codeqa/ast/nodes/shared.ex"
+    end
+
+    test "no source path reveals a lib/ dir: historical flat fallback" do
+      mod = Module.concat([MyApp, Shared])
+
+      assert AstHelpers.shared_module_path(mod, "/proj", ["a.ex", "b.ex"]) ==
+               "/proj/lib/my_app/shared.ex"
+    end
+  end
+
+  describe "activity_module_segment/1 (#426)" do
+    test "table verb → activity noun" do
+      assert AstHelpers.activity_module_segment([:normalize_slug, :normalize_use]) ==
+               {:ok, "Normalization"}
+
+      assert AstHelpers.activity_module_segment([:render_a, :render_b]) == {:ok, "Rendering"}
+    end
+
+    test "newly-added verbs" do
+      assert AstHelpers.activity_module_segment([:save_design]) == {:ok, "Persistence"}
+      assert AstHelpers.activity_module_segment([:upsert_design_images]) == {:ok, "Persistence"}
+      assert AstHelpers.activity_module_segment([:list_projects_for]) == {:ok, "Listing"}
+      assert AstHelpers.activity_module_segment([:signed_audio_url]) == {:ok, "Signing"}
+      assert AstHelpers.activity_module_segment([:to_string]) == {:ok, "Conversion"}
+    end
+
+    test "embedding generalises beyond the table" do
+      assert AstHelpers.activity_module_segment([:assign_x, :assign_y]) == {:ok, "Assignment"}
+    end
+
+    test "predicate cluster → Predicates (even with differing names)" do
+      assert AstHelpers.activity_module_segment([:empty?, :blank?, :valid_op?]) ==
+               {:ok, "Predicates"}
+
+      assert AstHelpers.activity_module_segment([:literal_node?]) == {:ok, "Predicates"}
+    end
+
+    test "non-derivable names decline" do
+      assert AstHelpers.activity_module_segment([:points_str, :centroid]) == :decline
+      assert AstHelpers.activity_module_segment([:fireplace_value]) == :decline
+    end
+
+    test "names mapping to different activities decline" do
+      assert AstHelpers.activity_module_segment([:fetch_user, :format_label]) == :decline
+    end
+
+    test "mixed predicate + non-predicate is not a predicate cluster" do
+      # `compute_total` is not a predicate → falls through to activity
+      # mapping, which disagrees with the `?` name → decline.
+      assert AstHelpers.activity_module_segment([:empty?, :compute_total]) == :decline
+    end
+  end
+
+  describe "shared_host_ambiguous?/1 (#426)" do
+    test "single umbrella app → not ambiguous" do
+      refute AstHelpers.shared_host_ambiguous?([
+               "apps/whk_portal/lib/a/x.ex",
+               "apps/whk_portal/lib/a/y.ex"
+             ])
+    end
+
+    test "two umbrella apps → ambiguous" do
+      assert AstHelpers.shared_host_ambiguous?([
+               "apps/app_a/lib/x/a.ex",
+               "apps/app_b/lib/y/b.ex"
+             ])
+    end
+
+    test "flat project → not ambiguous" do
+      refute AstHelpers.shared_host_ambiguous?(["lib/my_app/a.ex", "lib/my_app/b.ex"])
+    end
+
+    test "synthetic paths (no lib) → not ambiguous" do
+      refute AstHelpers.shared_host_ambiguous?(["a.ex", "b.ex"])
+    end
+  end
 end

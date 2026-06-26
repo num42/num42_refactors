@@ -110,6 +110,8 @@ defmodule Number42.Refactors.Ex.ExtractSharedModule do
 
   use Number42.Refactors.Refactor
 
+  alias Number42.Refactors.AstHelpers
+
   @default_min_mass 20
 
   @excluded_path_prefixes ["test/", "dev/"]
@@ -148,6 +150,37 @@ defmodule Number42.Refactors.Ex.ExtractSharedModule do
   # On-disk paths of the (non-excluded) source files, used to derive the
   # real `lib/<dir>` layout instead of naively underscoring the namespace.
   defp source_paths(sources), do: sources |> Enum.map(fn {path, _src} -> path end)
+
+  # Every module defined across the source set. A pre-existing host
+  # module (e.g. a maintained `{LCP}.Shared`) is reused as a lift target
+  # even when the clone function name carries no derivable activity —
+  # reusing a real, named, maintained module is Path A (delegate-to-owner),
+  # not minting junk (#426).
+  defp source_modules(sources) do
+    sources
+    |> Enum.flat_map(fn {_path, src} ->
+      case Sourceror.parse_string(src) do
+        {:ok, ast} -> modules_in_ast(ast)
+        _ -> []
+      end
+    end)
+    |> MapSet.new()
+  end
+
+  defp modules_in_ast(ast) do
+    ast
+    |> Macro.prewalker()
+    |> Enum.flat_map(fn
+      {:defmodule, _, [name_ast, _]} ->
+        case alias_to_module(name_ast) do
+          {:ok, mod} -> [mod]
+          :error -> []
+        end
+
+      _ ->
+        []
+    end)
+  end
 
   @impl Number42.Refactors.Refactor
   def description, do: "Cross-file: extract exact duplicates into a {LCP}.Shared module"
@@ -563,10 +596,16 @@ defmodule Number42.Refactors.Ex.ExtractSharedModule do
 
   defp collect_attrs_used(clauses, helper_clauses) do
     (clauses ++ helper_clauses)
-    |> Enum.flat_map(fn {_, _, [_head, body_kw]} ->
-      body_kw
-      |> Keyword.values()
-      |> Enum.flat_map(&attr_refs_in/1)
+    |> Enum.flat_map(fn
+      {_, _, [_head, body_kw]} ->
+        body_kw
+        |> Keyword.values()
+        |> Enum.flat_map(&attr_refs_in/1)
+
+      # Bodiless multi-clause head (`def foo(x)` with no `do`) is
+      # `{kind, _, [head]}` — a 1-element arg list, no body to scan.
+      _ ->
+        []
     end)
     |> MapSet.new()
   end
@@ -627,16 +666,46 @@ defmodule Number42.Refactors.Ex.ExtractSharedModule do
     |> Enum.flat_map(&delete_patch_for/1)
   end
 
-  defp decide_target(entries) do
+  # Suffixes that mark a module as a shared-helper collection host. A
+  # module already carrying one of these at the clone LCP is a real,
+  # maintained host — reuse it (Path A), don't mint a sibling.
+  @host_suffixes ~w(Shared Helpers Helper Builders Formatting Normalization)
+
+  # Pick the lift target for a clone group:
+  #
+  #   1. Reuse a pre-existing host module at the LCP (a maintained
+  #      `{LCP}.Shared`/`.Helpers`/… that's already in the sources) —
+  #      reusing a named module is delegate-to-owner, not minting junk.
+  #   2. Else mint a new host ONLY with a meaningful, activity-based name
+  #      derived from the shared function (`compute_*` → `{LCP}.Computation`).
+  #      A content-free `{LCP}.Shared` host names nothing and multiplies
+  #      low-information sibling modules — decline when no activity is
+  #      derivable (#426). The name is deterministic, so a second run
+  #      targets the same module and idempotence holds via the existing
+  #      "target already among entries → no-op" path.
+  defp decide_target(entries, name, mods) do
     parts_lists = entries |> Enum.map(&Module.split(&1.module))
     prefix = longest_common_prefix(parts_lists)
 
-    if prefix != [] do
-      target = Module.concat(prefix ++ ["Shared"])
-      {:ok, target}
-    else
-      :skip
+    cond do
+      prefix == [] ->
+        :skip
+
+      existing_host_at_prefix(prefix, mods) != nil ->
+        {:ok, existing_host_at_prefix(prefix, mods)}
+
+      true ->
+        case AstHelpers.activity_module_segment([name]) do
+          {:ok, segment} -> {:ok, Module.concat(prefix ++ [segment])}
+          :decline -> :skip
+        end
     end
+  end
+
+  defp existing_host_at_prefix(prefix, mods) do
+    @host_suffixes
+    |> Enum.map(&Module.concat(prefix ++ [&1]))
+    |> Enum.find(&MapSet.member?(mods, &1))
   end
 
   defp def_clause?({kind, _, [_head, body_kw]}) when kind in [:def, :defp] and is_list(body_kw),
@@ -661,6 +730,7 @@ defmodule Number42.Refactors.Ex.ExtractSharedModule do
 
   defp do_build_plan(sources, min_mass, write_root, dry_run?) do
     paths = source_paths(sources)
+    mods = source_modules(sources)
 
     # Two-pass: first collect every loser-rewrite + the canonical entry
     # the shared module should host, *without* touching the filesystem.
@@ -672,7 +742,7 @@ defmodule Number42.Refactors.Ex.ExtractSharedModule do
       |> Enum.flat_map(&extract_module_info(&1, min_mass))
       |> group_by_clone()
       |> Enum.flat_map_reduce(%{}, fn group, specs_acc ->
-        case plan_for_group(group, write_root) do
+        case plan_for_group(group, write_root, mods) do
           {[], specs_update} -> {[], merge_specs(specs_acc, specs_update)}
           {entries, specs_update} -> {entries, merge_specs(specs_acc, specs_update)}
         end
@@ -1310,10 +1380,12 @@ defmodule Number42.Refactors.Ex.ExtractSharedModule do
     end
   end
 
-  defp plan_for_group({_key, [_only]}, _write_root), do: {[], %{}}
+  defp plan_for_group({_key, [_only]}, _write_root, _mods), do: {[], %{}}
 
-  defp plan_for_group({{name, arity, _hash}, entries}, write_root),
-    do: decide_target(entries) |> patches_for_target_or_empty(arity, entries, name, write_root)
+  defp plan_for_group({{name, arity, _hash}, entries}, write_root, mods),
+    do:
+      decide_target(entries, name, mods)
+      |> patches_for_target_or_empty(arity, entries, name, write_root)
 
   defp plan_from_sources([], _opts), do: :no_cache
   defp plan_from_sources(sources, opts), do: {:ok, build_plan(sources, opts)}

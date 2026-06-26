@@ -4,7 +4,8 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone.PickTargetTest do
   alias Number42.Refactors.Ex.ExtractParametricClone
 
   defp entries(modules), do: modules |> Enum.map(&entry/1)
-  defp entry(module), do: %{module: module}
+  defp entry(module), do: %{module: module, name: :emit}
+  defp entries_named(modules, name), do: modules |> Enum.map(&%{module: &1, name: name})
 
   describe "pick_target/1 — :intra (single file ≥ 2 occurrences)" do
     test "3 in Foo, 1 in Bar → :intra Foo" do
@@ -97,18 +98,24 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone.PickTargetTest do
       assert {:suffix, My.App.A.Formatter} = ExtractParametricClone.pick_target(es)
     end
 
-    test "no qualifying suffix → falls through to :lcp_shared" do
+    test "no qualifying suffix → falls through to an activity-named host" do
       es = entries([My.App.Foo, My.App.Bar, My.App.Baz])
 
-      assert {:lcp_shared, My.App.Shared} = ExtractParametricClone.pick_target(es)
+      assert {:lcp_shared, My.App.Notifications} = ExtractParametricClone.pick_target(es)
     end
   end
 
-  describe "pick_target/1 — :lcp_shared fallback" do
-    test "two distinct modules, no shared/helper/formatter suffix" do
+  describe "pick_target/1 — :lcp_shared fallback (activity-named, #426)" do
+    test "two distinct modules → host named after the clones' activity" do
       es = entries([My.App.Items, My.App.Items.Sub])
 
-      assert {:lcp_shared, My.App.Items.Shared} = ExtractParametricClone.pick_target(es)
+      assert {:lcp_shared, My.App.Items.Notifications} = ExtractParametricClone.pick_target(es)
+    end
+
+    test "non-derivable function name → declines (no content-free .Shared)" do
+      es = entries_named([My.App.Items, My.App.Items.Sub], :do_thing)
+
+      assert :skip = ExtractParametricClone.pick_target(es)
     end
 
     test "LCP < 1 segment — returns :skip" do

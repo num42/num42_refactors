@@ -42,6 +42,13 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
 
   @default_min_mass 25
 
+  # A candidate parametrising over this many *distinct* bare literals is
+  # not a clone — it's distinct functions sharing a skeleton. The helper
+  # signature degenerates to `*_shared(…, param_0, …, param_N)` carrying
+  # nothing but values, which reads worse than the originals. Decline
+  # once the deduped literal-hole count reaches this threshold (#426).
+  @max_literal_params 5
+
   @suffix_priority [:Format, :Formatter, :Helper, :Helpers, :Shared]
 
   @excluded_path_prefixes ["test/", "dev/"]
@@ -932,6 +939,40 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
 
   defp collect_pair_key_path(_, acc), do: acc
 
+  # Paths of `$hole` markers sitting in *pattern* (match) position:
+  # the LHS of a `case`/`fn`/`receive` clause head (`->`), the LHS of a
+  # `with`/`for` generator (`<-`), and the LHS of a bare match (`=`). A
+  # literal there is load-bearing dispatch, not a value — parametrising
+  # it turns `"Schornstein" -> …` into `param_1 -> …`, a binding pattern
+  # that matches anything (#426). Same category error as map keys.
+  defp collect_pattern_hole_paths(skeleton) do
+    {_, paths} =
+      Macro.prewalk(skeleton, MapSet.new(), fn
+        {:->, _, [head, _body]} = node, acc ->
+          {node, acc |> union_hole_paths(head)}
+
+        {:<-, _, [lhs, _rhs]} = node, acc ->
+          {node, acc |> union_hole_paths(lhs)}
+
+        {:=, _, [lhs, _rhs]} = node, acc ->
+          {node, acc |> union_hole_paths(lhs)}
+
+        node, acc ->
+          {node, acc}
+      end)
+
+    paths
+  end
+
+  defp union_hole_paths(acc, subtree) do
+    subtree
+    |> Macro.prewalker()
+    |> Enum.reduce(acc, fn
+      {:"$hole", _, [path]}, a -> MapSet.put(a, path)
+      _, a -> a
+    end)
+  end
+
   defp contains_binding_macro_call?(body_kw),
     do:
       body_kw
@@ -1495,6 +1536,31 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
     holes |> Enum.any?(&MapSet.member?(key_paths, &1.path))
   end
 
+  # A clone group is unsafe only when a *literal* hole lands in pattern
+  # position. A *variable* hole there (`slug` vs `use_val` clause-bound
+  # names) is already a binding pattern — the helper just unifies the
+  # name locally, which is sound. A literal hole becomes a fresh binding
+  # pattern that matches anything, destroying dispatch (#426).
+  defp holes_land_on_patterns?(skeleton, holes) do
+    pattern_paths = collect_pattern_hole_paths(skeleton)
+
+    holes
+    |> Enum.any?(fn hole ->
+      hole.kind == :literal and MapSet.member?(pattern_paths, hole.path)
+    end)
+  end
+
+  # Count of *distinct* bare-literal holes — the number of value-only
+  # params the helper signature would carry. Dedup by stripped value so
+  # one literal appearing in several spots counts once.
+  defp literal_param_count(holes) do
+    holes
+    |> Enum.filter(&(&1.kind == :literal))
+    |> Enum.map(&strip_meta_for_dedup(&1.values))
+    |> Enum.uniq()
+    |> length()
+  end
+
   defp import_call_candidate?(name),
     do:
       name not in [
@@ -1606,14 +1672,22 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
     end)
   end
 
+  # No existing owner or suffix host to land in. Mint a new module ONLY
+  # with a meaningful, activity-based name derived from the clones'
+  # function names. A content-free `{LCP}.Shared` host names nothing —
+  # decline instead of minting it (#426).
   defp lcp_shared_module(entries) do
     parts_lists = entries |> Enum.map(&Module.split(&1.module))
     prefix = longest_common_prefix(parts_lists)
 
-    if prefix != [] do
-      {:ok, Module.concat(prefix ++ ["Shared"])}
-    else
-      :skip
+    function_names = entries |> Enum.map(&Map.get(&1, :name)) |> Enum.uniq()
+
+    case AstHelpers.activity_module_segment(function_names) do
+      {:ok, segment} when prefix != [] ->
+        {:ok, Module.concat(prefix ++ [segment])}
+
+      _ ->
+        :skip
     end
   end
 
@@ -1865,35 +1939,52 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
 
     %{holes: holes, skeleton: skeleton} = AstDiff.tree_diff(asts)
 
-    if holes_land_on_map_keys?(skeleton, holes) do
-      # Map keys (and keyword-list keys) are nearly always semantically
-      # load-bearing. Two helpers that only differ in their map keys
-      # are not really clones — they construct different things.
-      # Consolidating them produces a misleading helper name and
-      # actively misleading parameter names (`%{name => …, logo_asset_id => …}`
-      # called for a mass-asset).
-      {[], state}
-    else
-      case pick_target(indexed_entries) do
-        :skip ->
-          {[], state}
+    cond do
+      holes_land_on_map_keys?(skeleton, holes) ->
+        # Map keys (and keyword-list keys) are nearly always semantically
+        # load-bearing. Two helpers that only differ in their map keys
+        # are not really clones — they construct different things.
+        # Consolidating them produces a misleading helper name and
+        # actively misleading parameter names (`%{name => …, logo_asset_id => …}`
+        # called for a mass-asset).
+        {[], state}
 
-        {:intra, target_module} ->
-          emit_intra_plan(indexed_entries, target_module, skeleton, holes, state)
+      holes_land_on_patterns?(skeleton, holes) ->
+        # A literal in a `case`/`fn`/`with`/`=` *pattern* position is
+        # dispatch, not a value. Parametrising it turns
+        # `"Schornstein" -> …` into `param_1 -> …` — a binding pattern
+        # that matches anything, so the first clause always fires and the
+        # function silently returns the wrong answer (#426). Same category
+        # error as map keys; decline the group.
+        {[], state}
 
-        {:suffix, target_module} ->
-          emit_cross_file_plan(:suffix, indexed_entries, target_module, skeleton, holes, state)
+      literal_param_count(holes) >= @max_literal_params ->
+        # Many distinct bare literals → a `*_shared(…, param_0..param_N)`
+        # junk signature. These are distinct functions sharing a
+        # skeleton, not a clone. Decline (#426).
+        {[], state}
 
-        {:lcp_shared, target_module} ->
-          emit_cross_file_plan(
-            :lcp_shared,
-            indexed_entries,
-            target_module,
-            skeleton,
-            holes,
-            state
-          )
-      end
+      true ->
+        case pick_target(indexed_entries) do
+          :skip ->
+            {[], state}
+
+          {:intra, target_module} ->
+            emit_intra_plan(indexed_entries, target_module, skeleton, holes, state)
+
+          {:suffix, target_module} ->
+            emit_cross_file_plan(:suffix, indexed_entries, target_module, skeleton, holes, state)
+
+          {:lcp_shared, target_module} ->
+            emit_cross_file_plan(
+              :lcp_shared,
+              indexed_entries,
+              target_module,
+              skeleton,
+              holes,
+              state
+            )
+        end
     end
   end
 

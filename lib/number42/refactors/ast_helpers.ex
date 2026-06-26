@@ -1,4 +1,5 @@
 defmodule Number42.Refactors.AstHelpers do
+  alias Number42.Refactors.Semantic
   alias Sourceror.Patch
 
   @moduledoc """
@@ -760,12 +761,210 @@ defmodule Number42.Refactors.AstHelpers do
   @spec shared_module_path(module(), Path.t(), [Path.t()]) :: Path.t()
   def shared_module_path(target_module, write_root, source_paths) do
     [first | tail] = Module.split(target_module)
-
-    root = lib_top_dir(first, source_paths)
     rest = Enum.map(tail, &Macro.underscore/1)
 
-    rel = Path.join(["lib", root | rest]) <> ".ex"
-    Path.join(write_root, rel)
+    case lib_prefix_and_top(source_paths) do
+      {:ok, prefix_segments, top_dir} ->
+        # Preserve the full on-disk prefix up to and including the owning
+        # `lib/` — in an umbrella that is `apps/<app>/lib`, so the host
+        # lands on the child app's compile path, not the umbrella root
+        # (#426). The prefix is in the source paths' own coordinate
+        # space: if those are absolute the host is fully determined and
+        # `write_root` is already baked in; only relative prefixes get
+        # joined onto `write_root`.
+        path = Path.join(prefix_segments ++ [top_dir | rest]) <> ".ex"
+
+        if Path.type(path) == :absolute, do: path, else: Path.join(write_root, path)
+
+      :error ->
+        # No source path reveals a `lib/<dir>` (e.g. tests passing
+        # synthetic `"a.ex"` paths) — historical flat fallback.
+        rel = Path.join(["lib", Macro.underscore(first) | rest]) <> ".ex"
+        Path.join(write_root, rel)
+    end
+  end
+
+  # Exact leading-verb → activity-noun table. A fast, fully deterministic
+  # path for the common verbs; covers verbs the embedding buckets oddly
+  # (`render`/`serialize` → `:format`) so they keep a faithful activity
+  # name. The `Semantic` embedding generalises beyond this table.
+  @verb_to_activity %{
+    "assign" => "Assignment",
+    "build" => "Builders",
+    "calculate" => "Calculation",
+    "compute" => "Computation",
+    "convert" => "Conversion",
+    "decode" => "Decoding",
+    "encode" => "Encoding",
+    "export" => "Exporting",
+    "fetch" => "Fetching",
+    "format" => "Formatting",
+    "generate" => "Generation",
+    "import" => "Importing",
+    "list" => "Listing",
+    "normalize" => "Normalization",
+    "parse" => "Parsing",
+    "persist" => "Persistence",
+    "render" => "Rendering",
+    "resolve" => "Resolution",
+    "save" => "Persistence",
+    "serialize" => "Serialization",
+    "sign" => "Signing",
+    "signed" => "Signing",
+    "store" => "Persistence",
+    "to" => "Conversion",
+    "transform" => "Transformation",
+    "upsert" => "Persistence",
+    "validate" => "Validation"
+  }
+
+  # `Semantic` verb bucket (closed 11-label set) → activity noun. The
+  # embedding maps any function name (not just table verbs) onto one of
+  # these buckets, so an unlisted verb still lands a faithful activity
+  # name (`draw_*` near `:format` → `.Formatting`).
+  @bucket_to_activity %{
+    build: "Builders",
+    compute: "Computation",
+    extract: "Extraction",
+    fetch: "Fetching",
+    filter: "Filtering",
+    format: "Formatting",
+    group: "Grouping",
+    normalize: "Normalization",
+    notify: "Notifications",
+    update: "Updates",
+    validate: "Validation"
+  }
+
+  @doc """
+  Derive a meaningful module-name segment for a host that would collect
+  the given shared function names, or decline.
+
+  Names after the *activity* the functions perform. A cluster of pure
+  `?`-predicates becomes `"Predicates"`. Otherwise each name is mapped to
+  an activity noun — first by an exact leading-verb table, then by the
+  `Semantic` static-embedding verb classifier (which generalises beyond
+  the table, e.g. `assign_*` → `:update` → `"Updates"`). Returns
+  `{:ok, segment}` only when every function resolves to the **same**
+  activity; otherwise `:decline`. This is the derive-or-decline gate that
+  replaces the content-free `{LCP}.Shared` host (#426).
+  """
+  @spec activity_module_segment([atom() | String.t()]) :: {:ok, String.t()} | :decline
+  def activity_module_segment([]), do: :decline
+
+  def activity_module_segment(function_names) do
+    cond do
+      Enum.all?(function_names, &predicate_name?/1) ->
+        # A cluster of `foo?/n` functions is a predicate collection — no
+        # verb, but `.Predicates` names it faithfully (#426).
+        {:ok, "Predicates"}
+
+      true ->
+        function_names
+        |> Enum.map(&activity_for_function/1)
+        |> Enum.uniq()
+        |> case do
+          [segment] when is_binary(segment) -> {:ok, segment}
+          _ -> :decline
+        end
+    end
+  end
+
+  defp predicate_name?(name), do: name |> to_string() |> String.ends_with?("?")
+
+  # An activity-noun string for one function name, or `:none` when its
+  # name carries no recognisable verb (`fireplace_value`, `to_label`).
+  defp activity_for_function(name) do
+    string = name |> to_string() |> String.trim_trailing("?") |> String.trim_trailing("!")
+    verb = string |> String.split("_") |> List.first()
+
+    case Map.fetch(@verb_to_activity, verb) do
+      {:ok, segment} -> segment
+      :error -> activity_from_embedding(string)
+    end
+  end
+
+  defp activity_from_embedding(string) do
+    case Semantic.classify(string) do
+      {:ok, bucket, _score} -> Map.get(@bucket_to_activity, bucket, :none)
+      :unknown -> :none
+    end
+  end
+
+  @doc """
+  Whether the source files span more than one `lib/` root — i.e. more
+  than one owning app in an umbrella. A cross-file host extracted from
+  sources living under different apps has no single correct compile
+  path; callers should **decline** the extraction rather than guess
+  (#426).
+
+  Returns `false` when all sources share a `lib/` prefix, or when none
+  reveals one (the synthetic-path fallback case).
+  """
+  @spec shared_host_ambiguous?([Path.t()]) :: boolean()
+  def shared_host_ambiguous?(source_paths) do
+    source_paths
+    |> Enum.map(&lib_prefix_of_path/1)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+    |> length()
+    |> Kernel.>(1)
+  end
+
+  # The segments of the most common on-disk `lib/` prefix among the
+  # source paths, plus the directory that immediately follows it. Returns
+  # `{:ok, prefix_segments, top_dir}` where `prefix_segments` ends in
+  # `"lib"` (e.g. `["apps", "whk_portal", "lib"]` for an umbrella, `["lib"]`
+  # for a flat project), or `:error` when no path is under any `lib/`.
+  defp lib_prefix_and_top(source_paths) do
+    source_paths
+    |> Enum.map(&prefix_and_top_of_path/1)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.frequencies()
+    |> Enum.max_by(fn {_pair, count} -> count end, fn -> nil end)
+    |> case do
+      {{prefix_segments, top_dir}, _count} -> {:ok, prefix_segments, top_dir}
+      nil -> :error
+    end
+  end
+
+  # `{prefix_up_to_and_incl_last_lib, dir_after_it}` for one path, or
+  # `nil` when the path has no `lib` segment with a child dir.
+  defp prefix_and_top_of_path(path) do
+    segments = Path.split(path)
+
+    case last_lib_index(segments) do
+      nil ->
+        nil
+
+      i ->
+        case Enum.at(segments, i + 1) do
+          nil -> nil
+          top_dir -> {Enum.take(segments, i + 1), top_dir}
+        end
+    end
+  end
+
+  # The prefix segments up to and including the last `lib` (the part that
+  # distinguishes one umbrella app from another), or `nil` if absent.
+  defp lib_prefix_of_path(path) do
+    segments = Path.split(path)
+
+    case last_lib_index(segments) do
+      nil -> nil
+      i -> Enum.take(segments, i + 1)
+    end
+  end
+
+  defp last_lib_index(segments) do
+    segments
+    |> Enum.with_index()
+    |> Enum.filter(fn {seg, _i} -> seg == "lib" end)
+    |> List.last()
+    |> case do
+      {_lib, i} -> i
+      nil -> nil
+    end
   end
 
   @doc """
@@ -1670,52 +1869,6 @@ defmodule Number42.Refactors.AstHelpers do
       latch_consume_starts(rest, subtokens, idx + 1, sub, 1)
     else
       :error
-    end
-  end
-
-  # Resolve the real top-level `lib/<dir>` for a namespace's first
-  # segment. Prefer the layout the source files already live in; fall
-  # back to `Macro.underscore` only when no source path reveals it.
-  defp lib_top_dir(first_segment, source_paths) do
-    case top_lib_dir_from_paths(source_paths) do
-      {:ok, dir} -> dir
-      :error -> Macro.underscore(first_segment)
-    end
-  end
-
-  # The most common `lib/<dir>` top-level directory among the on-disk
-  # source paths. Ties pick the first by Enum.max_by ordering; paths
-  # not under any `lib/` segment are ignored.
-  defp top_lib_dir_from_paths(source_paths) do
-    source_paths
-    |> Enum.map(&top_lib_dir_of_path/1)
-    |> Enum.reject(&is_nil/1)
-    |> Enum.frequencies()
-    |> Enum.max_by(fn {_dir, count} -> count end, fn -> nil end)
-    |> case do
-      {dir, _count} -> {:ok, dir}
-      nil -> :error
-    end
-  end
-
-  # The directory immediately following the *last* `lib` segment in the
-  # path. Handles both relative (`lib/codeqa/x.ex`) and absolute
-  # (`/tmp/proj/lib/codeqa/x.ex`) paths, and a `write_root` that itself
-  # contains a `lib` segment (last wins).
-  defp top_lib_dir_of_path(path) do
-    path
-    |> Path.split()
-    |> dir_after_last_lib()
-  end
-
-  defp dir_after_last_lib(segments) do
-    segments
-    |> Enum.with_index()
-    |> Enum.filter(fn {seg, _i} -> seg == "lib" end)
-    |> List.last()
-    |> case do
-      {_lib, i} -> Enum.at(segments, i + 1)
-      nil -> nil
     end
   end
 

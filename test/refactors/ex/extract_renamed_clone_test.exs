@@ -20,7 +20,8 @@ defmodule Number42.Refactors.Ex.ExtractRenamedCloneTest do
   describe "rewrites" do
     test "two modules, two names: shared module hosts the alphabetically-first name", %{tmp: tmp} do
       # MyApp.Items < MyApp.Items.Sub in module-name order, so
-      # MyApp.Items wins — `compute/2` is the shared name.
+      # MyApp.Items wins — `compute/2` is the shared name. Both names
+      # carry the `compute` verb, so the group resolves to .Computation.
       a = """
       defmodule MyApp.Items do
         def compute(x, y) do
@@ -33,7 +34,7 @@ defmodule Number42.Refactors.Ex.ExtractRenamedCloneTest do
 
       b = """
       defmodule MyApp.Items.Sub do
-        def derive(x, y) do
+        def compute_alt(x, y) do
           x
           |> Kernel.+(y)
           |> Kernel.*(2)
@@ -46,7 +47,7 @@ defmodule Number42.Refactors.Ex.ExtractRenamedCloneTest do
       # Source module: still hosts a wrapper under its original name.
       expected_a = """
       defmodule MyApp.Items do
-        def compute(x, y), do: MyApp.Items.Shared.compute(x, y)
+        def compute(x, y), do: MyApp.Items.Computation.compute(x, y)
       end
       """
 
@@ -54,20 +55,20 @@ defmodule Number42.Refactors.Ex.ExtractRenamedCloneTest do
       # shared (winning) name.
       expected_b = """
       defmodule MyApp.Items.Sub do
-        def derive(x, y), do: MyApp.Items.Shared.compute(x, y)
+        def compute_alt(x, y), do: MyApp.Items.Computation.compute(x, y)
       end
       """
 
       assert_rewrites(@subject, a, expected_a, prepared: plan)
       assert_rewrites(@subject, b, expected_b, prepared: plan)
 
-      shared_path = Path.join(tmp, "lib/my_app/items/shared.ex")
+      shared_path = Path.join(tmp, "lib/my_app/items/computation.ex")
       assert File.exists?(shared_path)
 
       shared_source = File.read!(shared_path)
-      assert shared_source =~ "defmodule MyApp.Items.Shared"
+      assert shared_source =~ "defmodule MyApp.Items.Computation"
       assert shared_source =~ "def compute(x, y)"
-      refute shared_source =~ "def derive(x, y)"
+      refute shared_source =~ "def compute_alt(x, y)"
     end
   end
 
