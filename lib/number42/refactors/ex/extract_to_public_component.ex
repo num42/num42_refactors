@@ -1185,8 +1185,18 @@ defmodule Number42.Refactors.Ex.ExtractToPublicComponent do
   defp heex_config(opts, key) do
     opts
     |> Keyword.get(:project_config, %{})
-    |> Map.get(:heex, %{})
+    |> heex_map()
     |> Map.get(key)
+  end
+
+  # `:heex` is documented as a map (`%{core_components_module: "…"}`); a
+  # keyword list is an easy misconfig that must degrade to "no heex config"
+  # rather than crash the whole run with a BadMapError.
+  defp heex_map(config) do
+    case Map.get(config, :heex, %{}) do
+      %{} = map -> map
+      _ -> %{}
+    end
   end
 
   defp excluded_source?(_src, nil), do: false

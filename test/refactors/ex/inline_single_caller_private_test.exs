@@ -485,6 +485,90 @@ defmodule Number42.Refactors.Ex.InlineSingleCallerPrivateTest do
         @on
       )
     end
+
+    # Regression: several independent single-caller helpers must all
+    # inline within ONE transform, not one-per-pass. With the old throttle
+    # a file holding more single-caller helpers than the engine's pass cap
+    # (@max_passes) never finished and was reported as non-converging;
+    # transform/2 now loops to its own fixpoint.
+    test "inlines several independent helpers in one transform" do
+      source = """
+      defmodule M do
+        def a(n), do: h1(n) + 1
+        def b(n), do: h2(n) + 1
+        def c(n), do: h3(n) + 1
+        defp h1(x), do: x * 2
+        defp h2(x), do: x * 3
+        defp h3(x), do: x * 4
+      end
+      """
+
+      once = apply_refactor(@subject, source, @on)
+
+      refute once =~ "defp h1"
+      refute once =~ "defp h2"
+      refute once =~ "defp h3"
+
+      assert_idempotent(@subject, source, @on)
+      assert_compiles(once)
+    end
+
+    # Regression: a chain where inlining one helper exposes the next as a
+    # single-caller. Re-parsing each step keeps this correct AND lets it
+    # fully resolve inside a single transform.
+    test "resolves a single-caller chain in one transform" do
+      source = """
+      defmodule M do
+        def f(n), do: h1(n)
+        defp h1(x), do: h2(x) + 1
+        defp h2(x), do: x * 2
+      end
+      """
+
+      once = apply_refactor(@subject, source, @on)
+
+      refute once =~ "defp h1"
+      refute once =~ "defp h2"
+
+      assert_idempotent(@subject, source, @on)
+      assert_compiles(once)
+    end
+  end
+
+  describe "regression — arg shadows a param name must not loop (whk floor_plan.ex)" do
+    # The single call site passes an argument expression that itself
+    # contains a variable with the same name as the helper's parameter
+    # (`width` here). The old prewalk-based substitution replaced the
+    # param `width` with the arg `width + pad`, then re-descended into the
+    # inserted arg, found `width` again, and substituted forever
+    # (412M+ reductions, never terminating). Substitution must splice the
+    # arg verbatim without re-traversing it.
+    test "param name appearing in the call-site arg terminates" do
+      before_source = """
+      defmodule M do
+        defp scale(width), do: width * 2 + base()
+        def render(width, pad), do: scale(width + pad)
+      end
+      """
+
+      # The assertion is simply that this returns at all (was an infinite
+      # loop). Correctness of the splice is covered by the output below.
+      result = apply_refactor(@subject, before_source, @on)
+      assert is_binary(result)
+      assert result =~ "width + pad"
+      refute result =~ "defp scale"
+    end
+
+    test "inlined output with shadowing arg compiles" do
+      before_source = """
+      defmodule InlineShadowSample do
+        defp scale(width), do: width * 2
+        def render(width, pad), do: scale(width + pad)
+      end
+      """
+
+      assert_compiles(apply_refactor(@subject, before_source, @on))
+    end
   end
 
   describe "output compiles" do

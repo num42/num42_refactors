@@ -711,8 +711,18 @@ defmodule Number42.Refactors.Ex.ProposeSharedHeexComponent do
   defp core_components_module(opts) do
     opts
     |> Keyword.get(:project_config, %{})
-    |> Map.get(:heex, %{})
+    |> heex_map()
     |> Map.get(:core_components_module)
+  end
+
+  # `:heex` is documented as a map (`%{core_components_module: "…"}`); a
+  # keyword list is an easy misconfig that must degrade to "no heex config"
+  # rather than crash the whole run with a BadMapError.
+  defp heex_map(config) do
+    case Map.get(config, :heex, %{}) do
+      %{} = map -> map
+      _ -> %{}
+    end
   end
 
   defp core_components_source?(source, module),

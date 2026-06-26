@@ -90,10 +90,14 @@ defmodule Number42.Refactors.Ex.InlineSingleCallerPrivate do
   ## Idempotence
 
   After inlining, the helper is gone and its single call site holds the
-  spliced body. A second pass finds no single-caller private for that
-  helper, so the output is stable. To stay deterministic we rewrite at
-  most **one** helper per pass (the first eligible one in source
-  order); the engine's fixpoint loop picks up the rest on later passes.
+  spliced body. Each step rewrites exactly **one** helper (the first
+  eligible in source order) and then re-parses; a single `transform/2`
+  call loops these steps to its own fixpoint, so it inlines every
+  eligible helper — including a chain where inlining one helper exposes
+  the next — and returns a source with nothing left to inline. A second
+  `transform/2` is therefore a no-op: idempotent in one call, independent
+  of the engine's (capped) pass loop. Re-parsing each step keeps call-site
+  counts fresh, which is what makes the two-caller protection below hold.
 
   ## Enabled by default
 
@@ -108,10 +112,10 @@ defmodule Number42.Refactors.Ex.InlineSingleCallerPrivate do
     can't be reproduced by a value substitution.
   - **fixpoint miscount** — the concern that inlining a helper `A` whose
     body calls `B` turns `B`'s single call site into two and then a
-    later pass still deletes `B`. It does not occur: the engine re-parses
-    between passes and this refactor rewrites at most one helper per pass
-    (see *Idempotence*), so `B`'s callers are recounted fresh on the next
-    pass — once `A` is inlined `B` reads as two-caller and is left alone.
+    later step still deletes `B`. It does not occur: each step rewrites
+    exactly one helper and re-parses (see *Idempotence*), so `B`'s callers
+    are recounted fresh before the next step — once `A` is inlined `B`
+    reads as two-caller and is left alone.
 
   With those, a full-suite dogfood run on position-db is green and
   matches the unrefactored baseline, so the conservative opt-in gate was
@@ -139,8 +143,33 @@ defmodule Number42.Refactors.Ex.InlineSingleCallerPrivate do
 
   @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
+
+  # One inline per step means the step count can't exceed the helper count
+  # in the file; this bound is a generous backstop so a degenerate input
+  # can never spin forever — far above any real helper count.
+  @max_inline_steps 10_000
+
   @impl Number42.Refactors.Refactor
-  def transform(source, _opts),
+  def transform(source, _opts), do: inline_to_fixpoint(source, @max_inline_steps)
+
+  # Inline single-caller privates until none remain, within this single
+  # `transform/2` call. Each step rewrites exactly one helper (the first
+  # eligible, in source order) and re-parses, so call sites are recounted
+  # fresh every step: inlining helper `A` whose body calls `B` turns `B`
+  # into a two-caller helper *before* the next step looks at it, so `B` is
+  # correctly left alone. Reaching the fixpoint here (rather than across
+  # the engine's capped pass loop) keeps a single transform idempotent even
+  # when a file holds a chain of single-caller helpers longer than the cap.
+  defp inline_to_fixpoint(source, 0), do: source
+
+  defp inline_to_fixpoint(source, steps_left) do
+    case one_inline(source) do
+      ^source -> source
+      next -> inline_to_fixpoint(next, steps_left - 1)
+    end
+  end
+
+  defp one_inline(source),
     do: Sourceror.parse_string(source) |> apply_to_parse_result(source)
 
   defp apply_to_parse_result({:ok, ast}, source),
@@ -467,15 +496,32 @@ defmodule Number42.Refactors.Ex.InlineSingleCallerPrivate do
   defp literal_value?(v) when is_atom(v) or is_number(v) or is_binary(v), do: true
   defp literal_value?(_), do: false
 
-  defp substitute_vars(body, subst) do
-    Macro.prewalk(body, fn
-      {name, _meta, ctx} = node when is_atom(name) and is_atom(ctx) ->
-        Map.get(subst, name, node)
+  # Replace each parameter variable with its call-site argument AST.
+  #
+  # This is a structural recursion, NOT `Macro.prewalk`: prewalk descends
+  # into the node it just returned, so substituting a param `p` with an arg
+  # that *contains a variable named like any param* (a near-universal name
+  # collision — a call site passing `padding` into a helper whose param is
+  # also `padding`) re-visits the inserted arg and substitutes again,
+  # looping forever (`p` -> `p + 1` -> `(p + 1) + 1` -> …). Arguments are
+  # already final ASTs from the call site, so an inserted arg must be
+  # spliced verbatim and never re-traversed.
+  defp substitute_vars({name, _meta, ctx} = node, subst) when is_atom(name) and is_atom(ctx),
+    do: Map.get(subst, name, node)
 
-      node ->
-        node
-    end)
-  end
+  defp substitute_vars({form, meta, args}, subst) when is_list(args),
+    do: {substitute_vars(form, subst), meta, Enum.map(args, &substitute_vars(&1, subst))}
+
+  defp substitute_vars({form, meta, arg}, subst),
+    do: {substitute_vars(form, subst), meta, arg}
+
+  defp substitute_vars({left, right}, subst),
+    do: {substitute_vars(left, subst), substitute_vars(right, subst)}
+
+  defp substitute_vars(list, subst) when is_list(list),
+    do: Enum.map(list, &substitute_vars(&1, subst))
+
+  defp substitute_vars(leaf, _subst), do: leaf
 
   # --- patching ---
 

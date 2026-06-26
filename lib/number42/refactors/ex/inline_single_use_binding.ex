@@ -70,11 +70,15 @@ defmodule Number42.Refactors.Ex.InlineSingleUseBinding do
 
   ## Idempotence & determinism
 
-  At most **one** binding is inlined per pass — the first eligible in
-  source order, in the first block that has one. After the rewrite the
-  binding is gone and its RHS sits at the single use site, so a re-run
-  finds nothing to inline there; the engine's fixpoint loop picks up
-  any remaining bindings on later passes.
+  Each step inlines exactly **one** binding — the first eligible in
+  source order, in the first block that has one — then re-parses. A
+  single `transform/2` call loops these steps to its own fixpoint, so it
+  inlines every eligible binding (including cascades, where inlining one
+  binding makes the next eligible) and returns a source with nothing left
+  to inline. A second `transform/2` is therefore a no-op — idempotent in
+  one call, independent of the engine's (capped) pass loop. Stepping one
+  binding at a time and re-parsing keeps every rewrite over fresh byte
+  ranges, so overlapping or cascading use sites never collide.
   """
 
   use Number42.Refactors.Refactor
@@ -99,8 +103,32 @@ defmodule Number42.Refactors.Ex.InlineSingleUseBinding do
   @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
 
+  # An inline-to-fixpoint can't exceed one step per binding in the file;
+  # this bound is a generous backstop so a degenerate input can never spin
+  # forever — far above any real binding count, so it never clips real work.
+  @max_inline_steps 10_000
+
   @impl Number42.Refactors.Refactor
-  def transform(source, _opts),
+  def transform(source, _opts), do: inline_to_fixpoint(source, @max_inline_steps)
+
+  # Inline bindings until none remain, within this single `transform/2`
+  # call. Each step rewrites exactly one binding (the first eligible, in
+  # source order) and re-parses, so cascades — where inlining one binding
+  # makes the next eligible — and overlapping use sites resolve naturally
+  # without ever applying two interacting patches at once. Reaching the
+  # fixpoint here (rather than across the engine's capped pass loop) keeps
+  # a single transform idempotent even when a file holds more inline-able
+  # bindings than the engine's pass cap.
+  defp inline_to_fixpoint(source, 0), do: source
+
+  defp inline_to_fixpoint(source, steps_left) do
+    case one_inline(source) do
+      ^source -> source
+      next -> inline_to_fixpoint(next, steps_left - 1)
+    end
+  end
+
+  defp one_inline(source),
     do: Sourceror.parse_string(source) |> apply_to_parse_result(source)
 
   defp apply_to_parse_result({:ok, ast}, source),
@@ -108,8 +136,9 @@ defmodule Number42.Refactors.Ex.InlineSingleUseBinding do
 
   defp apply_to_parse_result({:error, _}, source), do: source
 
-  # Inline at most one binding per pass — the first eligible across all
-  # statement blocks in the file — so output stays deterministic.
+  # Inline at most one binding per step — the first eligible across all
+  # statement blocks in the file — so each rewrite is deterministic; the
+  # `inline_to_fixpoint/2` loop applies the rest.
   defp first_block_patches(ast) do
     ast
     |> Macro.prewalker()

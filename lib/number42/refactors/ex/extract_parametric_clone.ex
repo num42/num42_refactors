@@ -2003,7 +2003,14 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
       definitions
       |> Enum.any?(&conflicting_defp?(&1, reachable_from_target, reachable_from_others))
 
-    migratable_clauses = migratable |> Enum.flat_map(& &1.clauses)
+    # Drop bodiless multi-clause heads (`defp foo(a, b)` with no `do`):
+    # their AST is `{:defp, _, [head]}` — a 1-element arg list, not
+    # `[head, body_kw]`. They carry no body to migrate and would crash
+    # every downstream consumer that destructures `[_head, body_kw]`
+    # (collect_attrs_used/2, clause_mass/1, …).
+    migratable_clauses =
+      migratable |> Enum.flat_map(& &1.clauses) |> Enum.filter(&def_clause?/1)
+
     {migratable_clauses, conflicting?}
   end
 

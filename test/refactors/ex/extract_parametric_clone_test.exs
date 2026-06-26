@@ -969,4 +969,49 @@ defmodule Number42.Refactors.Ex.ExtractParametricCloneTest do
       """
     end
   end
+
+  describe "regression — bodiless multi-clause head must not crash" do
+    # Minimized from a real crash on whk_portal/seeds.ex. A multi-clause
+    # `defp` whose first clause is a bodiless head declaration
+    # (`defp ensure_user_org(user, organization)` with no `do`) has AST
+    # `{:defp, _, [head]}` — a 1-element arg list, no `body_kw`. When that
+    # helper is *transitively* reachable from a clone candidate (here via
+    # `seed_user/4`) and from no other public def, it enters the
+    # migratable-helper closure and lands in `collect_attrs_used/2`, which
+    # destructured `[_h, body_kw]` and raised a FunctionClauseError —
+    # inside `build_plan/2`, so it killed the whole `mix refactor` run.
+    test "a bodiless head in the reachable helper closure does not raise" do
+      source = """
+      defmodule MyApp.Seeds do
+        defp seed_user(email, role, organization, name \\\\ %{}) do
+          case lookup(email) do
+            nil -> create_user(email, role, organization, name)
+            user -> ensure_user_org(user, organization)
+          end
+        end
+
+        defp ensure_user_org(user, organization)
+
+        defp seed_dump_users(organization) do
+          Enum.each(@dump_users, fn {email, first, last} ->
+            name = %{first_name: first, last_name: last}
+
+            email
+            |> seed_user(:user, organization, name)
+            |> ensure_user_project(organization)
+
+            superadmin_email(email)
+            |> seed_user(:superadmin, organization, %{first_name: first, last_name: last})
+          end)
+        end
+      end
+      """
+
+      sources = [{"lib/my_app/seeds.ex", source}]
+
+      # The crash was in build_plan/2 itself — asserting it returns at all
+      # is the guard.
+      assert is_map(ExtractParametricClone.build_plan(sources, min_mass: 25))
+    end
+  end
 end

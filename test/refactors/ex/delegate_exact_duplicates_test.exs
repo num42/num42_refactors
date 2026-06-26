@@ -654,4 +654,43 @@ defmodule Number42.Refactors.Ex.DelegateExactDuplicatesTest do
       assert result =~ "def other_caller(item)"
     end
   end
+
+  describe "regression — bodiless multi-clause head must not crash" do
+    # Real-world crash from whk_portal/seeds.ex: the closure-hash path
+    # (`defp_body_hashes/1` -> `hash_clauses/1` -> `normalize_clause/1`)
+    # fingerprints every local `defp` reachable from a clone candidate.
+    # A multi-clause helper whose first clause is a bodiless head
+    # (`defp ensure_org(user, org)` with no `do`) has AST
+    # `{:defp, _, [head]}` — no `body_kw` — and `normalize_clause/1`
+    # raised a FunctionClauseError, killing the whole `mix refactor` run.
+    test "a reachable defp with a bodiless head does not raise" do
+      shorter = """
+      defmodule MyApp.Items do
+        def recalc(user, org) do
+          ensure_org(user, org)
+        end
+
+        defp ensure_org(user, org)
+        defp ensure_org(user, nil), do: user
+        defp ensure_org(user, org), do: %{user | org: org}
+      end
+      """
+
+      longer = """
+      defmodule MyApp.Items.Positions do
+        def recalc(user, org) do
+          ensure_org(user, org)
+        end
+
+        defp ensure_org(user, org)
+        defp ensure_org(user, nil), do: user
+        defp ensure_org(user, org), do: %{user | org: org}
+      end
+      """
+
+      plan = prepared([{"shorter.ex", shorter}, {"longer.ex", longer}])
+
+      assert is_binary(apply_refactor(@subject, shorter, prepared: plan))
+    end
+  end
 end

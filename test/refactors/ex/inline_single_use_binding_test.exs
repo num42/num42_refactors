@@ -386,5 +386,65 @@ defmodule Number42.Refactors.Ex.InlineSingleUseBindingTest do
 
       assert_compiles(apply_refactor(@subject, source, @on))
     end
+
+    # Regression #423: a single transform must inline EVERY eligible
+    # binding, not one-per-pass. With the old throttle a file holding more
+    # eligible bindings than the engine's pass cap was reported as
+    # non-converging; `transform/2` now loops to its own fixpoint.
+    test "inlines several independent bindings in one transform (#423)" do
+      source = """
+      defmodule M do
+        def a(x) do
+          r = Map.get(x, :a)
+          to_string(r)
+        end
+
+        def b(x) do
+          s = Map.get(x, :b)
+          to_string(s)
+        end
+
+        def c(x) do
+          t = Map.get(x, :c)
+          to_string(t)
+        end
+      end
+      """
+
+      once = apply_refactor(@subject, source, @on)
+
+      # All three bindings gone after a SINGLE transform.
+      refute once =~ "r = Map.get"
+      refute once =~ "s = Map.get"
+      refute once =~ "t = Map.get"
+      assert once =~ "to_string(Map.get(x, :a))"
+      assert once =~ "to_string(Map.get(x, :c))"
+
+      assert_idempotent(@subject, source, @on)
+      assert_compiles(once)
+    end
+
+    # Regression #423: a cascade — inlining one binding makes the next
+    # eligible — must fully resolve within one transform.
+    test "resolves a cascade in one transform (#423)" do
+      source = """
+      defmodule M do
+        def run(x) do
+          a = Map.get(x, :a)
+          b = Map.get(a, :b)
+          to_string(b)
+        end
+      end
+      """
+
+      once = apply_refactor(@subject, source, @on)
+
+      refute once =~ "a = Map.get"
+      refute once =~ "b = Map.get"
+      assert once =~ "to_string(Map.get(Map.get(x, :a), :b))"
+
+      assert_idempotent(@subject, source, @on)
+      assert_compiles(once)
+    end
   end
 end

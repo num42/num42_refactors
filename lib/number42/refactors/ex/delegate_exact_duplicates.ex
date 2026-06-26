@@ -429,11 +429,19 @@ defmodule Number42.Refactors.Ex.DelegateExactDuplicates do
     |> :erlang.phash2()
   end
 
+  # A bodiless multi-clause head (`defp foo(a, b)` with no `do`) has AST
+  # `{:defp, _, [head]}` — no `body_kw`, so it carries nothing to hash and
+  # would crash `normalize_clause/1`. Drop it before hashing; the real
+  # clauses fingerprint the body on their own.
   defp hash_clauses(clauses),
     do:
       clauses
+      |> Enum.filter(&clause_has_body?/1)
       |> Enum.map(&normalize_clause/1)
       |> :erlang.phash2()
+
+  defp clause_has_body?({kind, _, [_head, _body_kw]}) when kind in [:def, :defp], do: true
+  defp clause_has_body?(_), do: false
 
   defp head_arg_names({_name, _, args}) when is_list(args) do
     args |> Enum.map(fn {n, _, _} -> n end)

@@ -817,6 +817,36 @@ defmodule Number42.Refactors.Ex.ExtractToPublicComponentTest do
     end
   end
 
+  describe "regression — malformed :heex config must not crash" do
+    # `:heex` is documented as a map (`%{core_components_module: "…"}`).
+    # Writing it as a keyword list is an easy misconfig — the rest of
+    # `.refactor.exs` is keyword-ish. The readers did `Map.get(:heex) |>
+    # Map.get(key)`, raising a BadMapError on a keyword list and killing
+    # the whole `mix refactor` run. A misconfig must degrade to "no heex
+    # config", not crash.
+    test "prepare/1 tolerates :heex as a keyword list" do
+      caller = """
+      defmodule MyAppWeb.UserListLive do
+        use MyAppWeb, :live_view
+
+        def render(assigns) do
+          ~H\"\"\"
+          <section><h1>x</h1></section>
+          \"\"\"
+        end
+      end
+      """
+
+      bad_config = %{heex: [core_components_module: "MyAppWeb.CoreComponents"]}
+
+      assert {:ok, _prepared} =
+               @subject.prepare(
+                 source_files: write_tmp(%{"caller.ex" => caller}),
+                 project_config: bad_config
+               )
+    end
+  end
+
   # ---- helpers -------------------------------------------------------------
 
   defp unique_tmp_dir do
