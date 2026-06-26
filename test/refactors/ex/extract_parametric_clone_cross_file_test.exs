@@ -343,7 +343,7 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone.CrossFileTest do
       # Naively appending `_shared` to `validate_var?` produces
       # `validate_var?_shared`, which is a parse error. Strip the
       # marker, append `_shared`, then put the marker back.
-      # `validate_*` derives the activity `Validation`.
+      # A `?`-predicate clone lands in the `Predicates` host (#426).
       a = """
       defmodule MyApp.Items.Foo do
         def validate_var?(ast, name) do
@@ -373,10 +373,11 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone.CrossFileTest do
 
       plan = prepared(sources, write_root: tmp)
 
-      shared_path = Path.join(tmp, "lib/my_app/items/validation.ex")
+      shared_path = Path.join(tmp, "lib/my_app/items/predicates.ex")
       assert File.exists?(shared_path)
 
       shared_src = File.read!(shared_path)
+      assert shared_src =~ "defmodule MyApp.Items.Predicates"
       assert shared_src =~ ~r/def\s+validate_var_shared\?/
       refute shared_src =~ "validate_var?_shared"
 

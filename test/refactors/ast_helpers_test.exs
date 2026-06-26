@@ -1723,6 +1723,49 @@ defmodule Number42.Refactors.AstHelpersTest do
     end
   end
 
+  describe "activity_module_segment/1 (#426)" do
+    test "table verb → activity noun" do
+      assert AstHelpers.activity_module_segment([:normalize_slug, :normalize_use]) ==
+               {:ok, "Normalization"}
+
+      assert AstHelpers.activity_module_segment([:render_a, :render_b]) == {:ok, "Rendering"}
+    end
+
+    test "newly-added verbs" do
+      assert AstHelpers.activity_module_segment([:save_design]) == {:ok, "Persistence"}
+      assert AstHelpers.activity_module_segment([:upsert_design_images]) == {:ok, "Persistence"}
+      assert AstHelpers.activity_module_segment([:list_projects_for]) == {:ok, "Listing"}
+      assert AstHelpers.activity_module_segment([:signed_audio_url]) == {:ok, "Signing"}
+      assert AstHelpers.activity_module_segment([:to_string]) == {:ok, "Conversion"}
+    end
+
+    test "embedding generalises beyond the table" do
+      assert AstHelpers.activity_module_segment([:assign_x, :assign_y]) == {:ok, "Assignment"}
+    end
+
+    test "predicate cluster → Predicates (even with differing names)" do
+      assert AstHelpers.activity_module_segment([:empty?, :blank?, :valid_op?]) ==
+               {:ok, "Predicates"}
+
+      assert AstHelpers.activity_module_segment([:literal_node?]) == {:ok, "Predicates"}
+    end
+
+    test "non-derivable names decline" do
+      assert AstHelpers.activity_module_segment([:points_str, :centroid]) == :decline
+      assert AstHelpers.activity_module_segment([:fireplace_value]) == :decline
+    end
+
+    test "names mapping to different activities decline" do
+      assert AstHelpers.activity_module_segment([:fetch_user, :format_label]) == :decline
+    end
+
+    test "mixed predicate + non-predicate is not a predicate cluster" do
+      # `compute_total` is not a predicate → falls through to activity
+      # mapping, which disagrees with the `?` name → decline.
+      assert AstHelpers.activity_module_segment([:empty?, :compute_total]) == :decline
+    end
+  end
+
   describe "shared_host_ambiguous?/1 (#426)" do
     test "single umbrella app → not ambiguous" do
       refute AstHelpers.shared_host_ambiguous?([

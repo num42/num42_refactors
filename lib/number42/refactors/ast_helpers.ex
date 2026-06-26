@@ -801,12 +801,20 @@ defmodule Number42.Refactors.AstHelpers do
     "format" => "Formatting",
     "generate" => "Generation",
     "import" => "Importing",
+    "list" => "Listing",
     "normalize" => "Normalization",
     "parse" => "Parsing",
+    "persist" => "Persistence",
     "render" => "Rendering",
     "resolve" => "Resolution",
+    "save" => "Persistence",
     "serialize" => "Serialization",
+    "sign" => "Signing",
+    "signed" => "Signing",
+    "store" => "Persistence",
+    "to" => "Conversion",
     "transform" => "Transformation",
+    "upsert" => "Persistence",
     "validate" => "Validation"
   }
 
@@ -832,8 +840,9 @@ defmodule Number42.Refactors.AstHelpers do
   Derive a meaningful module-name segment for a host that would collect
   the given shared function names, or decline.
 
-  Names after the *activity* the functions perform. Each name is mapped
-  to an activity noun — first by an exact leading-verb table, then by the
+  Names after the *activity* the functions perform. A cluster of pure
+  `?`-predicates becomes `"Predicates"`. Otherwise each name is mapped to
+  an activity noun — first by an exact leading-verb table, then by the
   `Semantic` static-embedding verb classifier (which generalises beyond
   the table, e.g. `assign_*` → `:update` → `"Updates"`). Returns
   `{:ok, segment}` only when every function resolves to the **same**
@@ -844,14 +853,24 @@ defmodule Number42.Refactors.AstHelpers do
   def activity_module_segment([]), do: :decline
 
   def activity_module_segment(function_names) do
-    function_names
-    |> Enum.map(&activity_for_function/1)
-    |> Enum.uniq()
-    |> case do
-      [segment] when is_binary(segment) -> {:ok, segment}
-      _ -> :decline
+    cond do
+      Enum.all?(function_names, &predicate_name?/1) ->
+        # A cluster of `foo?/n` functions is a predicate collection — no
+        # verb, but `.Predicates` names it faithfully (#426).
+        {:ok, "Predicates"}
+
+      true ->
+        function_names
+        |> Enum.map(&activity_for_function/1)
+        |> Enum.uniq()
+        |> case do
+          [segment] when is_binary(segment) -> {:ok, segment}
+          _ -> :decline
+        end
     end
   end
+
+  defp predicate_name?(name), do: name |> to_string() |> String.ends_with?("?")
 
   # An activity-noun string for one function name, or `:none` when its
   # name carries no recognisable verb (`fireplace_value`, `to_label`).
