@@ -487,6 +487,42 @@ defmodule Number42.Refactors.Ex.InlineSingleCallerPrivateTest do
     end
   end
 
+  describe "regression — arg shadows a param name must not loop (whk floor_plan.ex)" do
+    # The single call site passes an argument expression that itself
+    # contains a variable with the same name as the helper's parameter
+    # (`width` here). The old prewalk-based substitution replaced the
+    # param `width` with the arg `width + pad`, then re-descended into the
+    # inserted arg, found `width` again, and substituted forever
+    # (412M+ reductions, never terminating). Substitution must splice the
+    # arg verbatim without re-traversing it.
+    test "param name appearing in the call-site arg terminates" do
+      before_source = """
+      defmodule M do
+        defp scale(width), do: width * 2 + base()
+        def render(width, pad), do: scale(width + pad)
+      end
+      """
+
+      # The assertion is simply that this returns at all (was an infinite
+      # loop). Correctness of the splice is covered by the output below.
+      result = apply_refactor(@subject, before_source, @on)
+      assert is_binary(result)
+      assert result =~ "width + pad"
+      refute result =~ "defp scale"
+    end
+
+    test "inlined output with shadowing arg compiles" do
+      before_source = """
+      defmodule InlineShadowSample do
+        defp scale(width), do: width * 2
+        def render(width, pad), do: scale(width + pad)
+      end
+      """
+
+      assert_compiles(apply_refactor(@subject, before_source, @on))
+    end
+  end
+
   describe "output compiles" do
     test "inlined output is valid Elixir" do
       before_source = """

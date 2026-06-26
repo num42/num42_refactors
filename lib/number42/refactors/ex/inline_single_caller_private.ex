@@ -467,15 +467,32 @@ defmodule Number42.Refactors.Ex.InlineSingleCallerPrivate do
   defp literal_value?(v) when is_atom(v) or is_number(v) or is_binary(v), do: true
   defp literal_value?(_), do: false
 
-  defp substitute_vars(body, subst) do
-    Macro.prewalk(body, fn
-      {name, _meta, ctx} = node when is_atom(name) and is_atom(ctx) ->
-        Map.get(subst, name, node)
+  # Replace each parameter variable with its call-site argument AST.
+  #
+  # This is a structural recursion, NOT `Macro.prewalk`: prewalk descends
+  # into the node it just returned, so substituting a param `p` with an arg
+  # that *contains a variable named like any param* (a near-universal name
+  # collision — a call site passing `padding` into a helper whose param is
+  # also `padding`) re-visits the inserted arg and substitutes again,
+  # looping forever (`p` -> `p + 1` -> `(p + 1) + 1` -> …). Arguments are
+  # already final ASTs from the call site, so an inserted arg must be
+  # spliced verbatim and never re-traversed.
+  defp substitute_vars({name, _meta, ctx} = node, subst) when is_atom(name) and is_atom(ctx),
+    do: Map.get(subst, name, node)
 
-      node ->
-        node
-    end)
-  end
+  defp substitute_vars({form, meta, args}, subst) when is_list(args),
+    do: {substitute_vars(form, subst), meta, Enum.map(args, &substitute_vars(&1, subst))}
+
+  defp substitute_vars({form, meta, arg}, subst),
+    do: {substitute_vars(form, subst), meta, arg}
+
+  defp substitute_vars({left, right}, subst),
+    do: {substitute_vars(left, subst), substitute_vars(right, subst)}
+
+  defp substitute_vars(list, subst) when is_list(list),
+    do: Enum.map(list, &substitute_vars(&1, subst))
+
+  defp substitute_vars(leaf, _subst), do: leaf
 
   # --- patching ---
 
