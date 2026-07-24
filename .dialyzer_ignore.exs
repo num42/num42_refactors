@@ -146,7 +146,7 @@
   # expects the opaque `MapSet.t()`, so Dialyzer pins the concrete struct
   # and reports `call_without_opaque`. Same false positive, same scoping.
   {"lib/mix/tasks/refactor.ex", :call_without_opaque},
-  {"lib/number42/refactors/block_segmentation.ex", :call_without_opaque},
+  {"lib/number42/refactors/analysis/block_segmentation.ex", :call_without_opaque},
   {"lib/number42/refactors/ex/expand_short_form_functions.ex", :call_without_opaque},
   {"lib/number42/refactors/ex/extract_parametric_clone.ex", :call_without_opaque},
   {"lib/number42/refactors/ex/extract_renamed_clone.ex", :call_without_opaque},
@@ -163,8 +163,8 @@
   # values genuinely are `MapSet`s; same false positive, same per-file scoping.
   # `ExtractToPublicComponent` (#299) accumulates assign-name `MapSet`s through
   # the identical `Tree.walk/3` pattern (shared with the seam) and joins too.
-  {"lib/number42/refactors/heex/scope.ex", :call_without_opaque},
-  {"lib/number42/refactors/heex/scope.ex", :call_with_opaque},
+  {"lib/number42/refactors/analysis/heex/scope.ex", :call_without_opaque},
+  {"lib/number42/refactors/analysis/heex/scope.ex", :call_with_opaque},
   {"lib/number42/refactors/ex/extract_heex_component_by_seam.ex", :call_without_opaque},
   {"lib/number42/refactors/ex/extract_to_public_component.ex", :call_without_opaque},
 
