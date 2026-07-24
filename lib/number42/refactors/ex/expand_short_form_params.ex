@@ -1,5 +1,5 @@
 defmodule Number42.Refactors.Ex.ExpandShortFormParams do
-  alias Number42.Refactors.IdentifierExpansion
+  alias Number42.Refactors.Analysis.IdentifierExpansion
   alias Sourceror.Patch
 
   @moduledoc """

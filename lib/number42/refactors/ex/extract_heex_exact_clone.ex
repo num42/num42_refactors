@@ -17,8 +17,8 @@ defmodule Number42.Refactors.Ex.ExtractHeexExactClone do
   """
   use Number42.Refactors.Refactor
 
-  alias Number42.Refactors.Heex.Clones
-  alias Number42.Refactors.Heex.Tree
+  alias Number42.Refactors.Analysis.Heex.Clones
+  alias Number42.Refactors.Analysis.Heex.Tree
 
   @default_min_mass 8
 

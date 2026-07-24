@@ -29,7 +29,7 @@ defmodule Number42.Refactors.Ex.ExtractHeexComponentBySeam do
     * **assign leak ≤ `#{0.25}`** — of the assigns it reads, at most this
       fraction are also referenced outside the subtree (measured against
       tree siblings via byte-range containment);
-    * **no free non-assign variable** (`Number42.Refactors.Heex.Scope`) —
+    * **no free non-assign variable** (`Number42.Refactors.Analysis.Heex.Scope`) —
       a variable bound outside the cut (a `for` generator, a `:let` slot,
       a local assignment) would break the standalone component.
 
@@ -44,9 +44,11 @@ defmodule Number42.Refactors.Ex.ExtractHeexComponentBySeam do
       {Number42.Refactors.Ex.ExtractHeexComponentBySeam, enabled: true}
   """
 
-  @behaviour Number42.Refactors.Refactor
+  use Number42.Refactors.Refactor
+  use Number42.Refactors.Detection
 
-  alias Number42.Refactors.Heex.{AttrType, ComponentNaming, Scope, Tree}
+  alias Number42.Refactors.Analysis.Heex.{AttrType, ComponentNaming, Scope, Tree}
+  alias Number42.Refactors.Detection.Finding
 
   @min_nodes 6
   @min_lines 12
@@ -87,6 +89,9 @@ defmodule Number42.Refactors.Ex.ExtractHeexComponentBySeam do
 
   @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
+
+  @impl Number42.Refactors.Refactor
+  def detector, do: __MODULE__
 
   @impl Number42.Refactors.Refactor
   def priority, do: 10
@@ -328,6 +333,50 @@ defmodule Number42.Refactors.Ex.ExtractHeexComponentBySeam do
       idx ->
         {before, rest} = Enum.split(lines, idx)
         Enum.join(before ++ [components | rest], "\n")
+    end
+  end
+
+  @doc """
+  Detection-contract face of `find_candidates/2`.
+
+  Same analysis, rendered as `Number42.Refactors.Detection.Finding`
+  structs so the engine's detection-only mode and any other consumer can
+  read this refactor's candidates without knowing its local candidate
+  shape. The gate metrics travel in `:evidence`; `:confidence` stays
+  `nil` because the gate is a hard threshold with no notion of degree.
+  """
+  @impl Number42.Refactors.Detection
+  @spec detect(String.t(), keyword()) :: [Finding.t()]
+  def detect(source, opts \\ []) do
+    path = Keyword.get(opts, :path)
+
+    source
+    |> find_candidates(opts)
+    |> Enum.map(&to_finding(&1, path))
+  end
+
+  @impl Number42.Refactors.Detection
+  def detects, do: description()
+
+  defp to_finding(candidate, path) do
+    attrs = [
+      path: path,
+      refactor: __MODULE__,
+      description: "<#{candidate.tag}> subtree on a clean assign seam",
+      scope: %{function: candidate.enclosing_fn},
+      evidence: %{
+        assigns: candidate.assigns,
+        free_vars: candidate.free_vars,
+        leak: candidate.leak,
+        lines: candidate.lines,
+        nodes: candidate.nodes,
+        tag: candidate.tag
+      }
+    ]
+
+    case candidate.decline do
+      nil -> Finding.accept(candidate.kind, attrs)
+      reason -> Finding.decline(candidate.kind, reason, attrs)
     end
   end
 

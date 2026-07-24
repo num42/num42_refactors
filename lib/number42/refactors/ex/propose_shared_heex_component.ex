@@ -84,10 +84,10 @@ defmodule Number42.Refactors.Ex.ProposeSharedHeexComponent do
 
   use Number42.Refactors.Refactor
 
-  alias Number42.Refactors.Heex.Fingerprint
-  alias Number42.Refactors.Heex.Motif
-  alias Number42.Refactors.Heex.Scope
-  alias Number42.Refactors.Heex.Tree
+  alias Number42.Refactors.Analysis.Heex.Fingerprint
+  alias Number42.Refactors.Analysis.Heex.Motif
+  alias Number42.Refactors.Analysis.Heex.Scope
+  alias Number42.Refactors.Analysis.Heex.Tree
 
   @default_min_mass 8
   @default_min_occurrences 3

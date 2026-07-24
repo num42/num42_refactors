@@ -72,7 +72,7 @@ defmodule Number42.Refactors.Ex.MergeNearCloneComponents do
 
   use Number42.Refactors.Refactor
 
-  alias Number42.Refactors.Heex.{Normalizer, TreeDiff}
+  alias Number42.Refactors.Analysis.Heex.{Normalizer, TreeDiff}
 
   @default_threshold 0.85
   @default_min_mass 12
@@ -171,7 +171,7 @@ defmodule Number42.Refactors.Ex.MergeNearCloneComponents do
           name: atom(),
           arg: term(),
           body: String.t(),
-          tree: [Number42.Refactors.Heex.Tree.node_t()],
+          tree: [Number42.Refactors.Analysis.Heex.Tree.node_t()],
           mass: pos_integer()
         }
 
@@ -198,7 +198,7 @@ defmodule Number42.Refactors.Ex.MergeNearCloneComponents do
   defp as_component({:def, _, [head, kw]}) do
     with {name, [arg]} <- def_name_and_args(head),
          {:ok, sigil_body} <- lone_sigil_body(do_value(kw)),
-         {:ok, [_single] = tree} <- Number42.Refactors.Heex.Tree.parse_body(sigil_body) do
+         {:ok, [_single] = tree} <- Number42.Refactors.Analysis.Heex.Tree.parse_body(sigil_body) do
       # Only single-root bodies are merge candidates: a multi-root body (e.g. a
       # page emitting several components) has no single tag/class/text seam to
       # parametrise, and its mass is ambiguous to compare.

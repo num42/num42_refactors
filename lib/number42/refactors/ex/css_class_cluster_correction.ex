@@ -28,7 +28,7 @@ defmodule Number42.Refactors.Ex.CssClassClusterCorrection do
 
   ## Detection (all gates must hold)
 
-  Built on `Number42.Refactors.CssClassCooccurrence`, which supplies both
+  Built on `Number42.Refactors.Analysis.CssClassCooccurrence`, which supplies both
   signals the issue prescribes:
 
   1. **Exact-set clusters with support.** A *convention* `C` is a class set
@@ -81,8 +81,8 @@ defmodule Number42.Refactors.Ex.CssClassClusterCorrection do
 
   use Number42.Refactors.Refactor
 
-  alias Number42.Refactors.CssClassCooccurrence, as: Coocc
-  alias Number42.Refactors.Heex.Tree
+  alias Number42.Refactors.Analysis.CssClassCooccurrence, as: Coocc
+  alias Number42.Refactors.Analysis.Heex.Tree
   alias Sourceror.Patch
 
   @default_min_support 8

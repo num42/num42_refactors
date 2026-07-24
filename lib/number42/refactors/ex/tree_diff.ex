@@ -3,7 +3,7 @@ defmodule Number42.Refactors.Ex.TreeDiff do
   Tree-edit-distance over **normalized Elixir AST** — the basis for Elixir
   near-clone detection (`Ex.NearClones`), and the Elixir analogue of
   `Heex.TreeDiff`. A thin adapter over the tree-agnostic Zhang-Shasha core in
-  `Number42.Refactors.TreeEditDistance`.
+  `Number42.Refactors.Analysis.TreeEditDistance`.
 
   ## Why normalize first
 
@@ -55,10 +55,10 @@ defmodule Number42.Refactors.Ex.TreeDiff do
       refactor declines any cluster with a `:structural` divergence.
   """
 
-  @behaviour Number42.Refactors.TreeEditDistance.Adapter
+  @behaviour Number42.Refactors.Analysis.TreeEditDistance.Adapter
 
-  alias Number42.Refactors.AstHelpers
-  alias Number42.Refactors.TreeEditDistance
+  alias Number42.Refactors.Analysis.AstHelpers
+  alias Number42.Refactors.Analysis.TreeEditDistance
 
   defguardp is_literal(v)
             when is_integer(v) or is_float(v) or is_binary(v) or is_boolean(v) or is_nil(v)

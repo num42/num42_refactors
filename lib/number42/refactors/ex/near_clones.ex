@@ -52,7 +52,7 @@ defmodule Number42.Refactors.Ex.NearClones do
   divergent node.
   """
 
-  alias Number42.Refactors.AstHelpers
+  alias Number42.Refactors.Analysis.AstHelpers
   alias Number42.Refactors.Ex.TreeDiff
 
   @type near_occurrence :: %{

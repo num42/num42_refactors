@@ -68,7 +68,7 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlock do
   ## Helper naming
 
   The helper is named after what it *does* and *produces*, via
-  `Number42.Refactors.HelperNaming`: a verb inferred from the block's
+  `Number42.Refactors.Analysis.HelperNaming`: a verb inferred from the block's
   dominant call joined to the live-out object — `fetch_brands`,
   `compute_masses_and_options`, `validate_unit`. When no verb is
   inferable the object alone is used (`source_and_formula`), then the
@@ -108,7 +108,7 @@ defmodule Number42.Refactors.Ex.ExtractFunctionFromBlock do
 
   use Number42.Refactors.Refactor
 
-  alias Number42.Refactors.HelperNaming
+  alias Number42.Refactors.Analysis.HelperNaming
 
   @control_flow_forms ~w(raise throw exit with case cond if unless try for fn receive)a
 

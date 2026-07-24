@@ -68,7 +68,7 @@ defmodule Number42.Refactors.Ex.MergeNearCloneFunctions do
 
   use Number42.Refactors.Refactor
 
-  alias Number42.Refactors.AstHelpers
+  alias Number42.Refactors.Analysis.AstHelpers
   alias Number42.Refactors.Ex.NearClones
 
   @default_threshold 0.85

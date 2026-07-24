@@ -67,9 +67,19 @@ defmodule Number42.Refactors.Ex.ExtractToPublicComponent do
   """
 
   use Number42.Refactors.Refactor
+  use Number42.Refactors.Detection
 
-  alias Number42.Refactors.AstHelpers
-  alias Number42.Refactors.Heex.{AttrType, ComponentNaming, Motif, Scope, StructureMotif, Tree}
+  alias Number42.Refactors.Analysis.AstHelpers
+  alias Number42.Refactors.Detection.Finding
+
+  alias Number42.Refactors.Analysis.Heex.{
+    AttrType,
+    ComponentNaming,
+    Motif,
+    Scope,
+    StructureMotif,
+    Tree
+  }
 
   @min_nodes 6
   @min_lines 12
@@ -134,6 +144,9 @@ defmodule Number42.Refactors.Ex.ExtractToPublicComponent do
   def reformat_after?, do: true
 
   @impl Number42.Refactors.Refactor
+  def detector, do: __MODULE__
+
+  @impl Number42.Refactors.Refactor
   def priority, do: 10
 
   @impl Number42.Refactors.Refactor
@@ -155,6 +168,51 @@ defmodule Number42.Refactors.Ex.ExtractToPublicComponent do
   end
 
   # ---- detection -----------------------------------------------------------
+
+  @doc """
+  Detection-contract face of `find_candidates/2`.
+
+  Same analysis, rendered as `Number42.Refactors.Detection.Finding`
+  structs so the engine's detection-only mode can read this refactor's
+  candidates without knowing its local candidate shape. The motif, size
+  and assign metrics travel in `:evidence`; `:confidence` stays `nil`
+  because the gate is a hard threshold with no notion of degree.
+  """
+  @impl Number42.Refactors.Detection
+  @spec detect(String.t(), keyword()) :: [Finding.t()]
+  def detect(source, opts \\ []) do
+    path = Keyword.get(opts, :path)
+
+    source
+    |> find_candidates(opts)
+    |> Enum.map(&to_finding(&1, path))
+  end
+
+  @impl Number42.Refactors.Detection
+  def detects, do: description()
+
+  defp to_finding(candidate, path) do
+    attrs = [
+      line: candidate.line,
+      path: candidate.file || path,
+      refactor: __MODULE__,
+      description: "<#{candidate.tag}> subtree extractable to a public component",
+      evidence: %{
+        assigns: candidate.assigns,
+        component_kind: candidate.component_kind,
+        free_vars: candidate.free_vars,
+        lines: candidate.lines,
+        motif: candidate.motif,
+        nodes: candidate.nodes,
+        tag: candidate.tag
+      }
+    ]
+
+    case candidate.decline do
+      nil -> Finding.accept(candidate.component_kind, attrs)
+      reason -> Finding.decline(candidate.component_kind, reason, attrs)
+    end
+  end
 
   @doc """
   Diagnostic: every candidate subtree in `source`, each annotated with its

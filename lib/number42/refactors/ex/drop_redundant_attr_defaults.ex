@@ -62,7 +62,7 @@ defmodule Number42.Refactors.Ex.DropRedundantAttrDefaults do
 
   use Number42.Refactors.Refactor
 
-  alias Number42.Refactors.Heex.Tree
+  alias Number42.Refactors.Analysis.Heex.Tree
 
   @type literal ::
           {:string, String.t()}

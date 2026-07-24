@@ -133,7 +133,7 @@ defmodule Number42.Refactors.Ex.InlineSingleCallerPrivate do
 
   use Number42.Refactors.Refactor
 
-  alias Number42.Refactors.AstHelpers
+  alias Number42.Refactors.Analysis.AstHelpers
 
   @attached_attrs ~w(doc spec impl deprecated dialyzer typedoc since)a
 

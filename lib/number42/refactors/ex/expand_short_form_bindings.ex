@@ -66,7 +66,7 @@ defmodule Number42.Refactors.Ex.ExpandShortFormBindings do
 
   use Number42.Refactors.Refactor
 
-  alias Number42.Refactors.IdentifierExpansion
+  alias Number42.Refactors.Analysis.IdentifierExpansion
 
   @impl Number42.Refactors.Refactor
   def description, do: "Expand short-form local bindings to long forms"

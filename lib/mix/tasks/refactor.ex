@@ -42,6 +42,8 @@ defmodule Mix.Tasks.Refactor do
       mix refactor --auto             # commit each unit (file or refactor) automatically
       mix refactor --auto --test      # run tests between units, only commit if green
       mix refactor --auto --compile   # run mix compile between units, only commit if green
+      mix refactor --detect           # report candidate sites, rewrite nothing
+      mix refactor --detect --declined  # also show the candidates the gates rejected
 
   `--only` accepts the short module suffix (`AliasUsage`), the snake-case
   filename stem (`alias_usage`), or the fully-qualified module name. Pass
@@ -90,6 +92,23 @@ defmodule Mix.Tasks.Refactor do
   afterwards if needed.
   Combines with `--stop` (halt after the first refactor that has any
   hits), `--dry-run` (don't write), `--only`, `--log`, and `--test`.
+
+  `--detect` runs the **Detection layer on its own** (see
+  `Number42.Refactors.Detection`): each refactor that declares a
+  `detector/0` locates its candidate sites and reports them, and no
+  `transform/2` runs at all. Nothing is written and no plan is built —
+  this is a linter, not a preview of a rewrite, which is what separates
+  it from `--dry-run`.
+
+  Output is one line per finding (`path:line [kind] description`),
+  ordered by path and line so it is stable enough to diff in CI. By
+  default only accepted candidates are listed; `--declined` adds the
+  rejected ones with the gate's reason, which is how you tell "found
+  nothing here" apart from "found something and declined it, because…".
+
+  Only refactors whose candidate-finding has been split out of
+  `transform/2` are visible to this mode; the rest are skipped rather
+  than guessed at. The header line reports how many detectors ran.
 
   `--auto` (`-a`) turns the run into a sequence of atomic git commits.
   After each unit (a file in the default mode, a refactor in
@@ -148,6 +167,7 @@ defmodule Mix.Tasks.Refactor do
 
   use Mix.Task
 
+  alias Number42.Refactors.Detection.Finding
   alias Number42.Refactors.Engine
   import Mix.Tasks.Refactor.Shared, only: [expand_inputs_shared: 1, glob_match?: 2]
 
@@ -170,7 +190,9 @@ defmodule Mix.Tasks.Refactor do
     ci: :boolean,
     step_by_step: :boolean,
     auto: :boolean,
-    compile: :boolean
+    compile: :boolean,
+    detect: :boolean,
+    declined: :boolean
   ]
   @aliases [s: :stop, l: :log, t: :test, c: :check, y: :step_by_step, a: :auto, n: :compile]
 
@@ -223,6 +245,42 @@ defmodule Mix.Tasks.Refactor do
 
     validate_run_opts!(run_opts)
 
+    if Keyword.get(opts, :detect, false) do
+      report_detection(files, engine_opts, Keyword.get(opts, :declined, false))
+    else
+      run_pipeline(files, engine_opts, run_opts)
+    end
+  end
+
+  # Detection-only run: report findings, write nothing. This is the
+  # Detection layer (see `Number42.Refactors.Detection`) driven on its
+  # own — no transform, no plan, no file touched.
+  defp report_detection(files, engine_opts, show_declined?) do
+    modules = Engine.detected_modules(engine_opts)
+    findings = Engine.detect(files, engine_opts)
+
+    {accepted, declined} = Enum.split_with(findings, & &1.accepted?)
+    shown = if show_declined?, do: findings, else: accepted
+
+    Mix.shell().info([
+      :bright,
+      "Detection: #{length(modules)} detector(s) over #{length(files)} file(s)\n"
+    ])
+
+    Enum.each(shown, &Mix.shell().info(Finding.to_line(&1)))
+
+    Mix.shell().info([
+      :bright,
+      "\n#{length(accepted)} accepted, #{length(declined)} declined",
+      :reset,
+      declined_hint(show_declined?, declined)
+    ])
+  end
+
+  defp declined_hint(false, [_ | _]), do: " — pass --declined to see the declined ones"
+  defp declined_hint(_show_declined?, _declined), do: ""
+
+  defp run_pipeline(files, engine_opts, run_opts) do
     {changed_files, reformat_triggered?} =
       if run_opts.step? do
         process_step_by_step(files, engine_opts, run_opts)

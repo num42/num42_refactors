@@ -39,7 +39,7 @@ defmodule Number42.Refactors.Ex.SplitLowCohesionModule do
      functions belong together if they are linked, regardless of who
      calls whom.
   2. Run greedy modularity-maximising community detection
-     (`Number42.Refactors.CommunityDetection`). Plain connected
+     (`Number42.Refactors.Analysis.CommunityDetection`). Plain connected
      components is too blunt — a single shared helper bridges every
      island into one component. Modularity instead measures intra-
      community density *beyond chance*, so a lone bridge edge between
@@ -126,9 +126,11 @@ defmodule Number42.Refactors.Ex.SplitLowCohesionModule do
   """
 
   use Number42.Refactors.Refactor
+  use Number42.Refactors.Detection
 
-  alias Number42.Refactors.CommunityDetection
-  alias Number42.Refactors.VocabularyClassifier
+  alias Number42.Refactors.Analysis.CommunityDetection
+  alias Number42.Refactors.Analysis.VocabularyClassifier
+  alias Number42.Refactors.Detection.Finding
 
   @default_min_modularity 0.3
   @default_max_cut_ratio 0.25
@@ -213,6 +215,76 @@ defmodule Number42.Refactors.Ex.SplitLowCohesionModule do
     end
   end
 
+  @impl Number42.Refactors.Refactor
+  def detector, do: __MODULE__
+
+  @doc """
+  Every module this refactor considered splitting, with the verdict.
+
+  Cross-file by nature: cohesion is measured over the whole call graph,
+  so there is no single-file answer and only `detect_corpus/2` exists.
+
+  This module was already half-converted — `build_plan/2` has always
+  returned a `:declined` bucket carrying the reason and the modularity
+  score. Detection reads both buckets and renders them as findings, so
+  the audit trail `report/1` produced for humans becomes machine-readable.
+
+  ## Detection must not write
+
+  `build_plan/2` writes one `.ex` per moved cluster unless `dry_run:
+  true`. A detector that skipped that flag would create files just by
+  looking, so `dry_run: true` is forced here and cannot be overridden by
+  the caller's opts.
+  """
+  @impl Number42.Refactors.Detection
+  @spec detect_corpus([{String.t(), String.t()}], keyword()) :: [Finding.t()]
+  def detect_corpus(sources, opts) do
+    %{splits: splits, declined: declined} =
+      build_plan(sources, Keyword.put(opts, :dry_run, true))
+
+    accepted = splits |> Map.values() |> Enum.map(&split_finding/1)
+
+    (accepted ++ Enum.map(declined, &declined_finding/1))
+    |> Enum.sort_by(&{&1.path || "", &1.scope[:module]})
+  end
+
+  @impl Number42.Refactors.Detection
+  def detects, do: description()
+
+  defp split_finding(split) do
+    moved = split.moved
+
+    Finding.accept(:low_cohesion_module,
+      path: split.home_path,
+      refactor: __MODULE__,
+      scope: %{module: split.home},
+      description:
+        "#{inspect(split.home)} splits into #{length(moved)} submodule(s): " <>
+          Enum.map_join(moved, ", ", &inspect(&1.module)),
+      evidence: %{
+        clusters: length(moved),
+        home_functions: MapSet.size(split.home_keys),
+        moved_functions: moved |> Enum.map(&MapSet.size(&1.keys)) |> Enum.sum(),
+        targets: Enum.map(moved, & &1.module)
+      }
+    )
+  end
+
+  # Modularity stays in `evidence` rather than `confidence`: Newman
+  # modularity runs roughly -0.5..1.0, so it is a measurement, not the
+  # normalised 0.0..1.0 gate strength `confidence` is specced for.
+  defp declined_finding(%{module: module, reason: reason} = declined) do
+    Finding.decline(:low_cohesion_module, reason,
+      path: Map.get(declined, :path),
+      refactor: __MODULE__,
+      scope: %{module: module},
+      evidence: %{
+        clusters: Map.get(declined, :clusters, 0),
+        modularity: Map.get(declined, :modularity)
+      }
+    )
+  end
+
   @doc """
   Build the corpus-wide split plan from `[{path, source}]` tuples.
 
@@ -220,7 +292,7 @@ defmodule Number42.Refactors.Ex.SplitLowCohesionModule do
 
       %{
         splits: %{home_module => split()},
-        declined: [%{module:, reason:, modularity: float | nil,
+        declined: [%{module:, path:, reason:, modularity: float | nil,
                      clusters: non_neg_integer()}]
       }
 
@@ -311,11 +383,21 @@ defmodule Number42.Refactors.Ex.SplitLowCohesionModule do
         ast
         |> Macro.prewalker()
         |> Enum.flat_map(&analyze_module(&1, path, thresholds, write_root, paths))
+        |> Enum.map(&stamp_declined_path(&1, path))
 
       {:error, _} ->
         []
     end
   end
+
+  # The ~15 `declined/2,3` call sites sit deep inside the per-module
+  # analysis and do not carry the path; stamp it once here, where the
+  # source it came from is still in scope. A declined entry without a
+  # path cannot be grouped per file by the detection layer.
+  defp stamp_declined_path({:declined, entry}, path),
+    do: {:declined, Map.put(entry, :path, path)}
+
+  defp stamp_declined_path(other, _path), do: other
 
   defp analyze_module(
          {:defmodule, _, [name_ast, [{_do, body}]]},

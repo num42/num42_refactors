@@ -27,6 +27,9 @@ defmodule Number42.Refactors.Engine do
   `Code.format_string!/2` call would not.
   """
 
+  alias Number42.Refactors.Detection
+  alias Number42.Refactors.Detection.Finding
+
   @max_passes 5
 
   @type opts :: [
@@ -63,6 +66,53 @@ defmodule Number42.Refactors.Engine do
   def apply_one(module, source, opts \\ []) do
     module_opts = build_module_opts(module, opts)
     apply_refactor(module, source, with_prepared(module, module_opts))
+  end
+
+  @doc """
+  Run **detection only** over a corpus: report findings, change nothing.
+
+  This is the standalone Detection layer (see
+  `Number42.Refactors.Detection`) driven across every pipeline refactor
+  that declares a `detector/0`. No `transform/2` is invoked, no file is
+  written, no plan is built — the result is a diagnostic.
+
+  Refactors without a detector are skipped rather than guessed at; their
+  candidate-finding still lives inside `transform/2` and there is no way
+  to reach it without rewriting. `detected_modules/1` reports which
+  refactors this mode can actually see.
+
+  Returns findings sorted by `{path, line, refactor}` so output is stable
+  across runs, which is what makes it usable in CI.
+  """
+  @spec detect(nil | [Path.t()], opts()) :: [Finding.t()]
+  def detect(paths, opts \\ []) do
+    sources = paths |> corpus_sources() |> Enum.sort_by(fn {path, _source} -> path end)
+
+    opts
+    |> detected_modules()
+    |> Enum.flat_map(fn module ->
+      Detection.run(module.detector(), sources, build_module_opts(module, opts))
+    end)
+    |> Enum.sort_by(&{&1.path || "", &1.line || 0, &1.refactor})
+  end
+
+  @doc """
+  The pipeline refactors that expose a runnable detector.
+
+  A refactor qualifies when it implements the optional `detector/0`
+  callback and the named module implements the `Detection` behaviour.
+  Everything else is invisible to `detect/2` — deliberately, since
+  inventing a detector for a refactor whose candidate-finding is still
+  fused into `transform/2` would mean re-implementing its gate.
+  """
+  @spec detected_modules(opts()) :: [module()]
+  def detected_modules(opts \\ []) do
+    opts
+    |> pipeline_modules()
+    |> Enum.filter(fn module ->
+      Code.ensure_loaded?(module) and function_exported?(module, :detector, 0) and
+        Detection.detector?(module.detector())
+    end)
   end
 
   @doc """

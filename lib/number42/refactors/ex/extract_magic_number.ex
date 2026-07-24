@@ -82,9 +82,11 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
   """
 
   use Number42.Refactors.Refactor
+  use Number42.Refactors.Detection
 
-  alias Number42.Refactors.IdentifierExpansion
-  alias Number42.Refactors.LiteralNaming
+  alias Number42.Refactors.Analysis.IdentifierExpansion
+  alias Number42.Refactors.Analysis.LiteralNaming
+  alias Number42.Refactors.Detection.Finding
   alias Sourceror.Patch
 
   @idiomatic [0, 1, 2, 0.0, 1.0, 0.5]
@@ -106,6 +108,115 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
 
   @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
+
+  @impl Number42.Refactors.Refactor
+  def detector, do: __MODULE__
+
+  @doc """
+  Every repeated numeric literal group in `source`, with the gate's
+  verdict on each.
+
+  Detection here is a three-stage gate, and all three stages report
+  rather than discard:
+
+    * **occurrence threshold** — a value appearing fewer than
+      `min_occurrences` times is declined, not dropped;
+    * **unambiguity** — occurrences that disagree on what the value
+      *means* (`batch_size: 5` vs `max_concurrency: 5`) are declined,
+      since naming the group would stamp one site's meaning on another;
+    * **nameability** — a group whose only derivable name is the bare
+      value (`int_240`) is declined, because the indirection carries no
+      information the literal does not.
+
+  Shares `collect_occurrences/2`, `LiteralNaming.unambiguous?/1` and
+  `IdentifierExpansion.nameable?/2` with the rewrite path, so a finding
+  cannot disagree with what `transform/2` would do.
+  """
+  @impl Number42.Refactors.Detection
+  @spec detect(String.t(), keyword()) :: [Finding.t()]
+  def detect(source, opts \\ []) do
+    min = Keyword.get(opts, :min_occurrences, @default_min_occurrences)
+    path = Keyword.get(opts, :path)
+
+    case Sourceror.parse_string(source) do
+      {:ok, ast} -> findings_for_ast(ast, min, path)
+      {:error, _} -> []
+    end
+  end
+
+  @impl Number42.Refactors.Detection
+  def detects, do: description()
+
+  defp findings_for_ast(ast, min, path) do
+    ast
+    |> qualified_module_bodies()
+    |> Enum.flat_map(fn {module, body} -> module_findings(body, min, path, module) end)
+  end
+
+  defp module_findings(body, min, path, module) do
+    body
+    |> pruned_exprs()
+    |> occurrences_for_exprs()
+    |> Enum.sort_by(fn {_value, hits} -> hit_position(hd(hits)) end)
+    |> Enum.map(&group_finding(&1, min, path, module))
+  end
+
+  # Nested modules and quote bodies are off-limits, so both the detection
+  # and the rewrite path walk the same pruned expression list.
+  defp pruned_exprs(body) do
+    body |> body_to_exprs() |> Enum.map(&prune_nested_modules/1) |> Enum.map(&prune_quotes/1)
+  end
+
+  # The same exclusion set the rewrite path builds, so detection sees
+  # exactly the candidate groups `module_patches/2` does.
+  defp occurrences_for_exprs(exprs) do
+    excluded =
+      [
+        attribute_value_nodes(exprs),
+        pattern_literal_nodes(exprs),
+        capture_arity_nodes(exprs),
+        LiteralNaming.directive_nodes(exprs, &is_number/1)
+      ]
+      |> Enum.reduce(&MapSet.union/2)
+
+    collect_occurrences(exprs, excluded)
+  end
+
+  defp group_finding({value, hits}, min, path, module) do
+    attrs = [
+      line: hits |> hd() |> hit_position() |> elem(0),
+      path: path,
+      refactor: __MODULE__,
+      scope: %{module: module},
+      description: "numeric literal #{inspect(value)} repeated #{length(hits)}×",
+      evidence: %{
+        occurrences: length(hits),
+        min_occurrences: min,
+        value: value
+      }
+    ]
+
+    case decline_reason(value, hits, min) do
+      nil -> Finding.accept(:magic_number, attrs)
+      reason -> Finding.decline(:magic_number, reason, attrs)
+    end
+  end
+
+  defp decline_reason(value, hits, min) do
+    cond do
+      length(hits) < min ->
+        "appears #{length(hits)}× (< min_occurrences #{min})"
+
+      not LiteralNaming.unambiguous?(hits) ->
+        "occurrences disagree on meaning"
+
+      not IdentifierExpansion.nameable?(value, LiteralNaming.name_opts(hits)) ->
+        "no informative name derivable"
+
+      true ->
+        nil
+    end
+  end
 
   @impl Number42.Refactors.Refactor
   def transform(source, opts) do
@@ -137,21 +248,10 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
   end
 
   defp module_patches(body, min) do
-    exprs =
-      body |> body_to_exprs() |> Enum.map(&prune_nested_modules/1) |> Enum.map(&prune_quotes/1)
+    exprs = pruned_exprs(body)
 
-    excluded =
-      [
-        attribute_value_nodes(exprs),
-        pattern_literal_nodes(exprs),
-        capture_arity_nodes(exprs),
-        LiteralNaming.directive_nodes(exprs, &is_number/1)
-      ]
-      |> Enum.reduce(&MapSet.union/2)
-
-    occurrences = collect_occurrences(exprs, excluded)
-
-    occurrences
+    exprs
+    |> occurrences_for_exprs()
     |> Enum.filter(fn {_value, hits} -> length(hits) >= min end)
     |> assign_names()
     |> emit_patches(exprs)

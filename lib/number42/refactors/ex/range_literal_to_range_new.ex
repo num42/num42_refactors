@@ -48,7 +48,7 @@ defmodule Number42.Refactors.Ex.RangeLiteralToRangeNew do
 
   use Number42.Refactors.Refactor
 
-  import Number42.Refactors.AstHelpers, only: [slice_node: 2]
+  import Number42.Refactors.Analysis.AstHelpers, only: [slice_node: 2]
 
   alias Sourceror.Patch
 

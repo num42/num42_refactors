@@ -125,7 +125,27 @@ defmodule Number42.Refactors.Refactor do
   """
   @callback prepare(opts :: keyword()) :: {:ok, term()} | :no_cache
 
-  @optional_callbacks reformat_after?: 0, explanation: 0, prepare: 1, priority: 0, patches: 3
+  @doc """
+  The `Number42.Refactors.Detection` module that locates this refactor's
+  candidate sites.
+
+  Naming a detector lets the engine run detection *without* instantiating
+  the transform — that is what `mix refactor --detect` uses to report
+  findings while changing nothing. A refactor that implements the
+  detection behaviour itself returns `__MODULE__`.
+
+  Optional callback. A refactor that has not had its candidate-finding
+  split out of `transform/2` yet simply does not implement it, and is
+  skipped by detection-only runs.
+  """
+  @callback detector() :: module()
+
+  @optional_callbacks reformat_after?: 0,
+                      explanation: 0,
+                      prepare: 1,
+                      priority: 0,
+                      patches: 3,
+                      detector: 0
 
   @doc """
   Marks the using module as a refactor and registers it for discovery.
@@ -138,8 +158,8 @@ defmodule Number42.Refactors.Refactor do
     quote do
       @behaviour Number42.Refactors.Refactor
 
-      import Number42.Refactors.AstHelpers
-      import Number42.Refactors.IdentifierExpansion
+      import Number42.Refactors.Analysis.AstHelpers
+      import Number42.Refactors.Analysis.IdentifierExpansion
 
       Module.register_attribute(__MODULE__, :is_refactor, persist: true)
       @is_refactor true
