@@ -80,7 +80,7 @@ defmodule Number42.Refactors.EngineDetectTest do
       findings = Engine.detect([path])
 
       assert findings != []
-      assert Enum.all?(findings, &(&1.path == path))
+      assert Enum.all?(findings, &(&1.path == path)), "every finding must carry its file"
     end
 
     test "attributes each finding to the refactor that produced it", %{path: path} do
@@ -125,11 +125,25 @@ defmodule Number42.Refactors.EngineDetectTest do
       assert Enum.all?(findings, &(&1.refactor == ExtractToPublicComponent))
     end
 
-    test "returns an empty list for a source with no templates", %{dir: dir} do
+    test "the template detectors report nothing for a source with no templates", %{dir: dir} do
       plain = Path.join(dir, "plain.ex")
       File.write!(plain, "defmodule Plain do\n  def hello, do: :world\nend\n")
 
-      assert Engine.detect([plain]) == []
+      findings =
+        Engine.detect([plain],
+          only_modules: [ExtractHeexComponentBySeam, ExtractToPublicComponent]
+        )
+
+      assert findings == []
+    end
+
+    test "every finding carries the path it was found in, accepted or declined", %{dir: dir} do
+      plain = Path.join(dir, "plain.ex")
+      File.write!(plain, "defmodule Plain do\n  def hello, do: :world\nend\n")
+
+      findings = Engine.detect([plain])
+
+      assert Enum.all?(findings, &(&1.path == plain))
     end
 
     test "returns an empty list for an empty corpus" do

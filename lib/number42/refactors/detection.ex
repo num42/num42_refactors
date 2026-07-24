@@ -114,8 +114,14 @@ defmodule Number42.Refactors.Detection do
     quote do
       @behaviour Number42.Refactors.Detection
 
+      # The zero-opts head lives separately from `detect_corpus/2` rather
+      # than as a default argument: an overriding module defines only
+      # `detect_corpus/2`, and a default arg there would clash with this
+      # injected clause ("previous clause always matches").
+      def detect_corpus(sources), do: detect_corpus(sources, [])
+
       @impl Number42.Refactors.Detection
-      def detect_corpus(sources, opts \\ []) do
+      def detect_corpus(sources, opts) do
         sources
         |> Enum.sort_by(fn {path, _source} -> path end)
         |> Enum.flat_map(fn {path, source} ->
@@ -123,7 +129,7 @@ defmodule Number42.Refactors.Detection do
         end)
       end
 
-      defoverridable detect_corpus: 2
+      defoverridable detect_corpus: 1, detect_corpus: 2
     end
   end
 
