@@ -147,28 +147,11 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
   @impl Number42.Refactors.Detection
   def detects, do: description()
 
-  # Walks `defmodule` nodes carrying the enclosing module path down, so a
-  # nested `defmodule Inner` is reported as `Outer.Inner` rather than the
-  # bare relative segment the AST holds.
   defp findings_for_ast(ast, min, path) do
-    collect_module_findings(ast, min, path, [])
+    ast
+    |> qualified_module_bodies()
+    |> Enum.flat_map(fn {module, body} -> module_findings(body, min, path, module) end)
   end
-
-  defp collect_module_findings({:defmodule, _, [name_ast, [{_do, body}]]}, min, path, prefix) do
-    module = Module.concat(prefix ++ alias_segments(name_ast))
-
-    own = module_findings(body, min, path, module)
-
-    nested =
-      Enum.flat_map(
-        body_to_exprs(body),
-        &collect_module_findings(&1, min, path, prefix ++ alias_segments(name_ast))
-      )
-
-    own ++ nested
-  end
-
-  defp collect_module_findings(_other, _min, _path, _prefix), do: []
 
   defp module_findings(body, min, path, module) do
     body
@@ -234,10 +217,6 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
         nil
     end
   end
-
-  defp alias_segments({:__aliases__, _, segments}), do: segments
-  defp alias_segments(other) when is_atom(other), do: [other]
-  defp alias_segments(_other), do: []
 
   @impl Number42.Refactors.Refactor
   def transform(source, opts) do

@@ -55,6 +55,9 @@ defmodule Number42.Refactors.Ex.ExtractIntraModuleClone do
   """
 
   use Number42.Refactors.Refactor
+  use Number42.Refactors.Detection
+
+  alias Number42.Refactors.Detection.Finding
 
   @default_min_mass 20
 
@@ -73,6 +76,100 @@ defmodule Number42.Refactors.Ex.ExtractIntraModuleClone do
 
   @impl Number42.Refactors.Refactor
   def reformat_after?, do: true
+
+  @impl Number42.Refactors.Refactor
+  def detector, do: __MODULE__
+
+  @doc """
+  Identical-body clause groups within each module, with the verdict.
+
+  Accepted groups are the ones the rewrite collapses into delegations.
+  Declined groups are pairs that *are* byte-identical clones but fall
+  below `:min_mass` — previously they were filtered out before anything
+  recorded them, so a micro-clone was indistinguishable from no clone.
+
+  Reported per group rather than per loser: the group is the unit the
+  rewrite reasons about (one source of truth, N delegating losers).
+  """
+  @impl Number42.Refactors.Detection
+  @spec detect(String.t(), keyword()) :: [Finding.t()]
+  def detect(source, opts \\ []) do
+    min_mass = Keyword.get(opts, :min_mass, @default_min_mass)
+    path = Keyword.get(opts, :path)
+
+    case Sourceror.parse_string(source) do
+      {:ok, ast} -> findings_for_ast(ast, min_mass, path)
+      {:error, _} -> []
+    end
+  end
+
+  @impl Number42.Refactors.Detection
+  def detects, do: description()
+
+  defp findings_for_ast(ast, min_mass, path) do
+    ast
+    |> qualified_module_bodies()
+    |> Enum.flat_map(fn {module, body} ->
+      module_findings(body, min_mass, path, module)
+    end)
+  end
+
+  defp module_findings(body, min_mass, path, module) do
+    exprs = body_to_exprs(body)
+
+    accepted =
+      exprs
+      |> clone_groups(min_mass)
+      |> Enum.reject(&match?([_only], &1))
+      |> Enum.map(&group_finding(&1, path, module, min_mass))
+
+    # Same grouping with the mass floor lifted; anything that becomes a
+    # group only once the floor is gone is a genuine clone the gate
+    # rejected on size.
+    below_mass =
+      exprs
+      |> clone_groups(0)
+      |> Enum.reject(&match?([_only], &1))
+      |> Enum.reject(fn group -> clause_mass(hd(group)) >= min_mass end)
+      |> Enum.map(&below_mass_finding(&1, path, module, min_mass))
+
+    accepted ++ below_mass
+  end
+
+  defp group_finding([source | losers] = group, path, module, min_mass) do
+    Finding.accept(:intra_module_clone,
+      line: clause_line(source),
+      path: path,
+      refactor: __MODULE__,
+      scope: %{module: module, function: name_of(source)},
+      description:
+        "#{length(losers)} clause(s) share #{name_of(source)}/#{arity_of(source)}'s body",
+      evidence: evidence(group, min_mass)
+    )
+  end
+
+  defp below_mass_finding([source | _] = group, path, module, min_mass) do
+    mass = clause_mass(source)
+
+    Finding.decline(:intra_module_clone, "body mass #{mass} < min_mass #{min_mass}",
+      line: clause_line(source),
+      path: path,
+      refactor: __MODULE__,
+      scope: %{module: module, function: name_of(source)},
+      evidence: evidence(group, min_mass)
+    )
+  end
+
+  defp evidence([source | losers], min_mass) do
+    %{
+      arity: arity_of(source),
+      clones: length(losers),
+      mass: clause_mass(source),
+      min_mass: min_mass,
+      names: Enum.map([source | losers], &name_of/1)
+    }
+  end
+
   @impl Number42.Refactors.Refactor
   def transform(source, opts) do
     min_mass = Keyword.get(opts, :min_mass, @default_min_mass)
@@ -196,31 +293,38 @@ defmodule Number42.Refactors.Ex.ExtractIntraModuleClone do
   defp patch_or_passthrough(patches, source), do: Sourceror.patch_string(source, patches)
 
   defp patches_for_module(body_exprs, min_mass) do
-    clauses = body_exprs |> Enum.filter(&def_clause?/1)
+    body_exprs
+    |> clone_groups(min_mass)
+    |> Enum.flat_map(fn
+      [_only] ->
+        []
 
-    multi_clause_keys = multi_clause_keys(clauses)
-
-    eligible =
-      clauses
-      |> Enum.reject(fn clause ->
-        MapSet.member?(multi_clause_keys, name_arity(clause)) or
-          body_uses_module_attribute?(clause)
-      end)
-      |> Enum.filter(&(clause_mass(&1) >= min_mass))
-
-    eligible
-    |> Enum.group_by(fn c -> {arity_of(c), body_hash(c)} end)
-    |> Enum.flat_map(fn {_key, group} ->
-      case group do
-        [_only] ->
-          []
-
-        [source | losers] ->
-          source_name = name_of(source)
-          losers |> Enum.flat_map(&patch_for_loser(&1, source_name))
-      end
+      [source | losers] ->
+        source_name = name_of(source)
+        losers |> Enum.flat_map(&patch_for_loser(&1, source_name))
     end)
   end
+
+  # Clauses grouped by {arity, body_hash} after the three exclusion gates
+  # (multi-clause head, module-attribute use, mass floor). Shared by the
+  # rewrite and the detection path so the two cannot disagree on what
+  # counts as a clone group.
+  defp clone_groups(body_exprs, min_mass) do
+    clauses = body_exprs |> Enum.filter(&def_clause?/1)
+    multi_clause_keys = multi_clause_keys(clauses)
+
+    clauses
+    |> Enum.reject(fn clause ->
+      MapSet.member?(multi_clause_keys, name_arity(clause)) or
+        body_uses_module_attribute?(clause)
+    end)
+    |> Enum.filter(&(clause_mass(&1) >= min_mass))
+    |> Enum.group_by(fn c -> {arity_of(c), body_hash(c)} end)
+    |> Enum.sort_by(fn {_key, group} -> clause_line(hd(group)) end)
+    |> Enum.map(fn {_key, group} -> group end)
+  end
+
+  defp clause_line({_kind, meta, _args}), do: Keyword.get(meta, :line, 0)
 
   defp plain_var?({:\\, _, _}), do: false
 

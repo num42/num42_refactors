@@ -161,6 +161,42 @@ defmodule Number42.Refactors.Analysis.AstHelpers do
   def body_to_exprs(single), do: [single]
 
   @doc """
+  Every `defmodule` in `ast` as `{qualified_module, body}` pairs.
+
+  The AST holds a nested module's name as the *relative* alias segment it
+  was written with, so a naive `Macro.prewalker/1` sweep reports
+  `defmodule Inner` inside `defmodule Outer` as `Inner`. This walks the
+  nesting and concatenates the enclosing segments, yielding
+  `Outer.Inner` — the name that actually resolves at runtime.
+
+  Use this anywhere a result is attributed to "the module it was found
+  in"; the bare prewalk gives a misleading answer for nested modules.
+
+      iex> {:ok, ast} = Sourceror.parse_string("defmodule A do\\n  defmodule B do\\n  end\\nend")
+      iex> #{__MODULE__}.qualified_module_bodies(ast) |> Enum.map(&elem(&1, 0))
+      [A, A.B]
+  """
+  @spec qualified_module_bodies(Macro.t()) :: [{module(), Macro.t()}]
+  def qualified_module_bodies(ast), do: collect_module_bodies(ast, [])
+
+  defp collect_module_bodies({:defmodule, _, [name_ast, [{_do, body}]]}, prefix) do
+    segments = prefix ++ module_alias_segments(name_ast)
+
+    nested =
+      body
+      |> body_to_exprs()
+      |> Enum.flat_map(&collect_module_bodies(&1, segments))
+
+    [{Module.concat(segments), body} | nested]
+  end
+
+  defp collect_module_bodies(_other, _prefix), do: []
+
+  defp module_alias_segments({:__aliases__, _, segments}), do: segments
+  defp module_alias_segments(atom) when is_atom(atom), do: [atom]
+  defp module_alias_segments(_other), do: []
+
+  @doc """
   Pull the function/macro name out of a call expression. Looks at the
   *outermost* call — for a pipe, that's the last stage; for a remote
   call, that's the function part of the dot:
