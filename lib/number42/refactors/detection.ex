@@ -137,6 +137,11 @@ defmodule Number42.Refactors.Detection do
   """
   @spec run(module(), [{String.t(), String.t()}], keyword()) :: [Finding.t()]
   def run(module, sources, opts \\ []) do
+    # Load before probing: `function_exported?/3` answers `false` for a
+    # module that simply has not been loaded yet, which would silently
+    # look like "detector implements neither entry point".
+    Code.ensure_loaded?(module)
+
     cond do
       function_exported?(module, :detect_corpus, 2) ->
         module.detect_corpus(sources, opts)
