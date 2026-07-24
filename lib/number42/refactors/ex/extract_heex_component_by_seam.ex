@@ -44,8 +44,7 @@ defmodule Number42.Refactors.Ex.ExtractHeexComponentBySeam do
       {Number42.Refactors.Ex.ExtractHeexComponentBySeam, enabled: true}
   """
 
-  @behaviour Number42.Refactors.Refactor
-
+  use Number42.Refactors.Refactor
   use Number42.Refactors.Detection
 
   alias Number42.Refactors.Analysis.Heex.{AttrType, ComponentNaming, Scope, Tree}
