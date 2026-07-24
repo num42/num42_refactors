@@ -56,13 +56,22 @@ defmodule Number42.Refactors.Ex.InlineSingleCallerPrivate do
   - captures `&helper/arity` (both Sourceror AST forms),
   - any `apply/2,3` that names the helper, even dynamically.
 
-  We have no shared call-graph helper yet (issue #34), so this scan is
-  intentionally local and conservative:
+  Use counting is delegated to `AstHelpers.collect_calls/1`, the shared
+  call-graph layer (issue #34, #400) that `RemoveDeadPrivateFunction` and
+  `SplitLowCohesionModule` also consume. That layer already corrects pipe
+  arity, recognises both capture AST forms, and emits a dynamic-dispatch
+  sentinel for an unresolvable `apply/3`. Deriving the count from it
+  rather than from a private walk means the conservatism is defined in
+  one place and cannot drift per refactor — an undercount here would
+  delete a function that is still called.
+
+  On top of that count this refactor stays conservative:
 
   - If the sole use is a **capture** `&helper/1` → skip (a capture
     can't be substituted with an inlined body).
-  - If **any** `apply` references the name → skip (we can't tell
-    statically how many times it fires).
+  - If a **dynamic dispatch** appears anywhere in the module → skip. It
+    could reach any local function, so "exactly one caller" is not a
+    knowable fact.
   - If **any** use is a **pipe-form call** → skip. v1 does not splice an
     inlined body into a pipe stage; counting the pipe caller (rather
     than missing it) also prevents deleting a `defp` that pipe callers
@@ -123,6 +132,8 @@ defmodule Number42.Refactors.Ex.InlineSingleCallerPrivate do
   """
 
   use Number42.Refactors.Refactor
+
+  alias Number42.Refactors.AstHelpers
 
   @attached_attrs ~w(doc spec impl deprecated dialyzer typedoc since)a
 
@@ -347,23 +358,42 @@ defmodule Number42.Refactors.Ex.InlineSingleCallerPrivate do
   # --- use counting (module-local call graph) ---
 
   # Returns the list of direct-call nodes for `{name, arity}`, but only
-  # when the helper's *sole* use is exactly that one direct call. Any
-  # capture, apply, pipe-form call, or extra direct call collapses the
-  # result to `[]`.
+  # when the helper's *sole* use is exactly that one direct call.
+  #
+  # The *decision* comes from `AstHelpers.collect_calls/1` (the shared
+  # call-graph layer, #400): it counts every reference form — direct,
+  # pipe-arity-corrected, capture — and flags unresolvable dispatch. If it
+  # sees anything other than exactly one reference to `{name, arity}`, or
+  # any dynamic dispatch at all, the helper is not inlinable.
+  #
+  # The local walk that follows only *locates* the direct-call nodes for
+  # substitution; it no longer decides safety. A form the shared layer
+  # counts but this walk cannot locate (a capture, a pipe stage) therefore
+  # yields a count of 1 with zero located nodes → `[]` → skip, which is
+  # the safe direction.
   defp uses(body_exprs, name, arity) do
+    scannable =
+      Enum.reject(body_exprs, &(own_definition?(&1, name, arity) or module_attribute?(&1)))
+
+    calls = Enum.flat_map(scannable, &AstHelpers.collect_calls/1)
+
+    if AstHelpers.dynamic_dispatch?(calls) or Enum.count(calls, &(&1 == {name, arity})) != 1 do
+      []
+    else
+      locate_direct_calls(scannable, name, arity)
+    end
+  end
+
+  # Locate the direct-call nodes the substitution needs. Returns `[]` when
+  # the single counted reference is not a plain direct call (capture or
+  # pipe form), which declines the inline.
+  defp locate_direct_calls(scannable, name, arity) do
     {direct_calls, capture?, apply?, pipe?} =
-      body_exprs
-      |> Enum.reject(&(own_definition?(&1, name, arity) or module_attribute?(&1)))
-      |> Enum.reduce({[], false, false, false}, fn expr, acc ->
+      Enum.reduce(scannable, {[], false, false, false}, fn expr, acc ->
         scan_uses(expr, name, arity, acc)
       end)
 
-    cond do
-      capture? -> []
-      apply? -> []
-      pipe? -> []
-      true -> direct_calls
-    end
+    if capture? or apply? or pipe?, do: [], else: direct_calls
   end
 
   defp own_definition?({kind, _, [head | _]}, name, arity) when def_or_macro_kind?(kind) do
