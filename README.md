@@ -1,7 +1,7 @@
 # Number42.Refactors
 
-AST-based refactor engine for Elixir — pluggable, idempotent
-rewrites driven by [Sourceror][sourceror].
+AST-based refactor engine for Elixir — pluggable, idempotent rewrites
+driven by [Sourceror][sourceror].
 
 > ⚠️ **No semantic-equivalence guarantee.** Refactors aim to keep
 > behaviour intact, but this is not formally proven. Treat every run
@@ -11,33 +11,79 @@ rewrites driven by [Sourceror][sourceror].
 > Status: pre-release. Extracted from an internal project; the public
 > API is settling. Expect cosmetic changes before `v1.0`.
 
-- **Was es ist:** ein Mix-Task plus ~60 modulare Refactors, die deinen
-  Code automatisch in idiomatisches Elixir umschreiben (`Enum.into → Map.new`,
-  `length(x) == 0 → x == []`, geteilte HEEx-Klone in `CoreComponents` ziehen, …).
-- **Was es nicht ist:** kein Formatter (das macht `mix format`), kein Linter
-  (das macht Credo), kein Compiler-Plugin. Jeder Refactor ist eine reine
-  String-Transformation `source → source`, getrieben von Sourceror.
-- **Wer es nutzt:** als Library-Dependency in Elixir-Projekten
-  (`only: [:dev, :test], runtime: false`) — Endprodukt sind Git-Diffs, kein
-  Laufzeitverhalten.
+## Intent
+
+**The engine writes the change you already knew you wanted, and refuses
+when it cannot tell.**
+
+That sentence carries the two halves of the design, and the second half
+is the load-bearing one.
+
+Automated rewriting is easy to do badly. A tool that rewrites
+aggressively produces diffs nobody can review, and a diff nobody
+reviews is a behaviour change nobody consented to. So every refactor
+here is built around a decline: it establishes that a rewrite is
+warranted, or it leaves the source untouched. **Skipping is always
+correct; guessing never is.** Where those two conflict this codebase
+picks skipping — and the cost of that choice is real recall, given up
+deliberately.
+
+Three consequences follow, and they explain most of what looks unusual
+in here:
+
+- **Idempotence is a hard requirement, not a nice property.** The
+  engine runs a fixpoint loop, so a refactor that keeps changing its
+  own output never terminates. Every refactor ships an idempotence
+  test.
+- **Detection is the hard part; rewriting is mechanical.** The
+  interesting code decides *whether* a site qualifies. Once that is
+  settled, emitting the patch is usually short. This is why detection
+  quality — not transform coverage — is where the effort goes.
+- **Naming is part of correctness.** A refactor that extracts a
+  function must name it. A name that says nothing (`do_block`,
+  `helper_2`) is permanent noise, worse than the duplication it
+  replaced — so several refactors decline purely because they cannot
+  name their output confidently.
+
+### What it is
+
+A Mix task plus ~139 modular refactors that rewrite Elixir source into
+more idiomatic Elixir — from local idiom fixes (`Enum.into` → `Map.new`,
+`length(x) == 0` → `x == []`) up to structural work: extracting shared
+modules, deriving behaviours from adapter families, lifting duplicated
+HEEx into shared components, splitting low-cohesion modules.
+
+### What it is not
+
+- Not a formatter — that is `mix format`.
+- Not a linter — that is Credo. A linter reports; this rewrites.
+- Not a compiler plugin. Every refactor is a pure string
+  transformation `source → source`, driven by Sourceror.
+
+### Who uses it
+
+Elixir projects, as a dev-only dependency
+(`only: [:dev, :test], runtime: false`). The end product is a git diff.
+Nothing here runs in production.
 
 ---
 
-## Inhalt
+## Contents
 
 - [Installation](#installation)
 - [Quickstart](#quickstart)
-- [Konfiguration: `.refactor.exs`](#konfiguration-refactorexs)
-- [Was steckt drin?](#was-steckt-drin)
-- [Lokale Entwicklung](#lokale-entwicklung)
-- [Testen](#testen)
-- [Bugfixing-Workflow](#bugfixing-workflow)
-- [Einen eigenen Refactor schreiben](#einen-eigenen-refactor-schreiben)
-- [Architektur in 5 Minuten](#architektur-in-5-minuten)
-- [CI & Quality Gates](#ci--quality-gates)
-- [Release & Versionierung](#release--versionierung)
+- [Configuration: `.refactor.exs`](#configuration-refactorexs)
+- [What's inside](#whats-inside)
+- [Safety model](#safety-model)
+- [Local development](#local-development)
+- [Testing](#testing)
+- [Bugfixing workflow](#bugfixing-workflow)
+- [Writing your own refactor](#writing-your-own-refactor)
+- [Architecture in 5 minutes](#architecture-in-5-minutes)
+- [CI & quality gates](#ci--quality-gates)
+- [Release & versioning](#release--versioning)
 - [Troubleshooting](#troubleshooting)
-- [Lizenz](#lizenz)
+- [License](#license)
 
 ---
 
@@ -51,134 +97,169 @@ def deps do
 end
 ```
 
-Dann `mix deps.get` — und unten unter
-[Konfiguration](#konfiguration-refactorexs) eine `.refactor.exs` anlegen,
-sonst weigert sich der Task.
+Then `mix deps.get`, and create a `.refactor.exs` as described under
+[Configuration](#configuration-refactorexs) — without it the task
+refuses to run. That refusal is deliberate: a refactor engine with no
+declared input set would default to rewriting whatever it found.
 
 ## Quickstart
 
 ```sh
-mix refactor                     # alle Refactors anwenden, in-place schreiben
-mix refactor --check             # CI-Gate: exit ≠ 0, sobald etwas zu refactorn wäre
-mix refactor --dry-run           # git-style Diff drucken, nicht schreiben
-mix refactor --log               # pro Refactor: Beschreibung + Rationale + Diff
-mix refactor --auto              # nach jeder Datei einen Commit anlegen
-mix refactor --step-by-step      # Refactor für Refactor über alle Files laufen
-mix refactor --only RejectIsNil  # nur ein bestimmter Refactor (Suffix oder snake_case)
-mix refactor lib/foo/bar.ex      # auf bestimmte Pfade beschränken
+mix refactor                     # apply everything, write in place
+mix refactor --check             # CI gate: exit ≠ 0 if anything would change
+mix refactor --dry-run           # print a git-style diff, write nothing
+mix refactor --log               # per refactor: description, rationale, diff
+mix refactor --auto              # commit after each file
+mix refactor --step-by-step      # one refactor at a time, across all files
+mix refactor --only RejectIsNil  # a single refactor (suffix or snake_case)
+mix refactor lib/foo/bar.ex      # restrict to given paths
 
-mix refactor.heex_clones         # HEEx-Klone-Bericht (exact / class-stripped / attrs-stripped)
+mix refactor.heex_clones         # HEEx clone report (exact / class-stripped / attrs-stripped)
 ```
 
-Vollständige Optionsliste: `mix help refactor` und
+Start with `--dry-run`. Full option list: `mix help refactor` and
 `mix help refactor.heex_clones`.
 
-## Konfiguration: `.refactor.exs`
+## Configuration: `.refactor.exs`
 
-Die Datei liegt im Projekt-Root des **Konsumenten** und ist ein purer
-`Code.eval_string/3`-Map-Ausdruck. Ohne sie bricht `mix refactor` ab.
+Lives in the **consumer's** project root and is a plain
+`Code.eval_string/3` map expression.
 
 ```elixir
 %{
-  # Pflicht: Pfade, die der Engine standardmäßig umschreibt.
+  # Required: paths the engine rewrites by default.
   inputs: ["lib/**/*.ex", "test/**/*.exs"],
 
-  # Optional: Per-Refactor-Opts. Keys sind fully-qualified Module,
-  # Values sind Keyword-Listen. Häufige Schlüssel:
-  #   priority:        integer (Default 100; höher läuft früher)
-  #   skip_in_modules: [Module, ...] — Source-Files, die eines dieser
-  #                    Module mit defmodule definieren, werden ausgelassen
+  # Optional: per-refactor options. Keys are fully-qualified modules,
+  # values are keyword lists. Common keys:
+  #   priority:        integer (default 100; higher runs earlier)
+  #   skip_in_modules: [Module, ...] — source files defining one of
+  #                    these modules are left alone
   configured_modules: [
     {Number42.Refactors.Ex.ExpandShortFormBindings,
      skip_in_modules: [MyApp.Color]}
   ],
 
-  # Optional: Refactors, die im Projekt nie laufen sollen.
+  # Optional: refactors that should never run in this project.
   skipped_modules: [],
 
-  # Optional: HEEx-Klon-Extraktion. Setze das Ziel-CoreComponents-Modul.
-  # Bleibt der Key weg, ist `ExtractHeexExactClone` ein No-op.
+  # Optional: HEEx clone extraction. Set the target CoreComponents
+  # module. Without this key, ExtractHeexExactClone is a no-op.
   heex: %{
     core_components_module: "MyAppWeb.CoreComponents"
   }
 }
 ```
 
-Siehe `Mix.Tasks.Refactor`-Moduldoc für die vollständige Semantik der
-einzelnen Schalter und die Wechselwirkungen (`--auto` + `--test`,
-`--step-by-step` + `--stop`, etc.).
+`skipped_modules` is how a refactor is held back — there is no
+per-refactor enabled flag. This repo's own `.refactor.exs` is worth
+reading as an example: each skipped entry carries the reason it is off,
+which is the convention to follow. Several are off because their
+heuristics mis-trigger specifically on a codebase full of
+similar-shaped AST walkers.
 
-## Was steckt drin?
+See the `Mix.Tasks.Refactor` moduledoc for full flag semantics and
+interactions (`--auto` + `--test`, `--step-by-step` + `--stop`, …).
 
-Aktuell **59 Refactors**, gruppiert nach Themengebiet:
+## What's inside
 
-- **Style & Reihenfolge:** Alias-Sortierung, Multi-Alias-Expansion,
-  `import`-nach-`alias`, Funktions-Reihenfolge, Keyword-Sortierung,
-  Leerzeilen zwischen Attributen.
-- **Enum / Map / Stream-Idiomatik:** `Enum.into → Map.new`,
-  `Enum.reduce → Enum.sum`, `Enum.reverse |> Enum.concat`,
-  `Enum.flat_map → Enum.filter`, `Map.new`-Lambda zum For-Comprehension,
-  Stream-freundliche Rewrites, `Enum.reject(&is_nil/1)`,
-  `reduce_as_map`, `reduce_map_put`.
-- **Pattern Matching statt Conditionals:** `if`-Lift in Klauseln,
-  redundante Boolean-`if`, geschachteltes `case` → `with`,
-  `with`-mit-einer-Klausel → `case`, `with`-ohne-`else`.
-- **Pipes & Sigil-Rewrites:** Socket-zu-Pipe-Extraktion, Pipeline-Extraktion,
-  Pipe-Reassign, `with` ins Pipeline lifte, gepinnten Ecto-Ausdruck lifte.
-- **Length / String / List:** `length`-im-Guard, `length(x) == 0`, 
-  `List.last(Enum.reverse(...))`, `String.graphemes |> length`,
-  `Enum.sort |> Enum.take` als Top-K.
-- **Definition-Hygiene:** `inline-single-expression-def`,
-  `identity-passthrough`, `delegate-exact-duplicates`,
-  `expand-short-form-{bindings,functions,params}`, ungenutzte Variable,
-  `@impl true`-Resolve, trivialer `else`-Zweig, `case true/false`.
-- **Cross-File-Extraktion:** geteiltes Modul, parametrische / umbenannte /
-  intra-modul Klone, verschachtelte / Lambda- / Inline-Blöcke,
-  `case` → Helper.
-- **HEEx-Klone:** `extract-heex-exact-clone` (konfigurierbares Ziel),
-  `extract-heex-for`.
-- **Typ- & API-Safety:** `try/rescue` mit sicherer Alternative,
-  `Map.get`-unsafe-Pass, `DateTime.utc_now |> ...truncate`.
+Roughly **139 refactors**. The [refactor catalog][catalog] is the full
+index with per-module rationale; the groups below are the map.
 
-`mix help refactor` listet jeden Refactor mit Kurzname auf.
+**Local idiom** — the bread and butter. Enum/Map/Stream canonicalisation
+(`Enum.into` → `Map.new`, reduce-to-sum, filter-first-to-find), length
+and string idioms, pattern matching over conditionals (`if`-lift to
+clauses, nested `case` → `with`), pipe shaping.
+
+**Style & ordering** — alias sorting and expansion, directive ordering,
+keyword sorting, attribute spacing. Layout only; nothing moves between
+modules.
+
+**Definition hygiene** — short-form expansion, unused variables,
+`@impl true` resolution, identity passthrough removal, exact-duplicate
+delegation, flag-argument splitting.
+
+**Extraction & structure** — the ambitious half. Shared modules,
+parametric and renamed clones, common prologs, behaviours derived from
+adapter families, protocols from struct families, low-cohesion module
+splitting, primitive-to-struct promotion.
+
+**HEEx** — clone extraction into CoreComponents, near-clone merging via
+tree-edit distance, component extraction by assign seam, public
+component promotion, attribute contract tightening.
+
+**Type & API safety** — untyped params lifted to struct patterns,
+unsafe `Map.get` passes, `try/rescue` with safer alternatives.
+
+**Semantic naming** — several refactors name their output using frozen
+static-embedding tables in `priv/semantic` (verb and predicate models).
+The tables ship with the library; the generation dependencies (`nx`,
+`tokenizers`, `safetensors`) are `:dev`-only and never reach consumers.
+
+`mix help refactor` lists every refactor with its short name.
+
+## Safety model
+
+Worth understanding before enabling anything broad, because the
+guarantees differ sharply by refactor class.
+
+**Single-file refactors** are the well-covered case. Each is
+independently tested, idempotent, and verified by a convergence sweep:
+every file's output is re-run through the engine to confirm a second
+pass changes nothing, with oscillation caught by timeout. The current
+sweep covers 331 files with zero flagged.
+
+**Cross-file refactors** carry more risk and less verification. They
+rewrite several files as one atomic set — a shared module plus its
+callers — so the output only compiles as a whole. The convergence sweep
+explicitly excludes them, and dogfooding has produced non-compiling
+diffs from this class before. Treat their output as requiring real
+review, not a skim.
+
+**What the engine guarantees:** termination (fixpoint capped at 5
+passes), idempotence per refactor, and that a declined site is left
+byte-identical.
+
+**What it does not guarantee:** semantic equivalence. Read the diff.
+
+See the [safety and limitations guide][safety] for the full treatment.
 
 ---
 
-## Lokale Entwicklung
+## Local development
 
-Die Library setzt **devenv + direnv** voraus (siehe `devenv.nix`).
-Erstmaliges Setup:
+Requires **devenv + direnv** (see `devenv.nix`). First-time setup:
 
 ```sh
-direnv allow            # erlaubt direnv, den Dev-Shell automatisch zu laden
-devenv shell            # Elixir 1.19 / OTP 28 + Tools, einmaliges Reinmachen
-mix deps.get            # macht das enterShell-Script schon, hier zur Sicherheit
-mix compile             # erste Kompilation
+direnv allow            # let direnv load the dev shell automatically
+devenv shell            # Elixir 1.19 / OTP 28 plus tooling
+mix deps.get            # the enterShell script does this too
+mix compile
 ```
 
-Danach reicht ein `cd` ins Projekt — `direnv` aktiviert den Shell.
-Wer kein Nix mag, kann die Versionen aus `devenv.nix` (Elixir 1.18+/1.19,
-OTP 27+/28) auch über `asdf`/`mise` setzen; CI testet die Matrix
-`1.18/27` und `1.19/28`.
+After that, `cd` into the project and direnv activates the shell. If you
+would rather avoid Nix, set the versions from `devenv.nix`
+(Elixir 1.18+/1.19, OTP 27+/28) via `asdf`/`mise`; CI tests the matrix
+`1.18/27` and `1.19/28`.
 
-**Tägliche Kommandos:**
+**Daily commands:**
 
-| Aufgabe                                 | Kommando                                 |
-| --------------------------------------- | ---------------------------------------- |
-| Tests laufen lassen                     | `mix test`                               |
-| Nur eine Test-Datei                     | `mix test test/refactors/ex/foo_test.exs` |
-| Watch-Modus (manuell)                   | `mix test --stale`                       |
-| Coverage                                | `mix test --cover`                       |
-| Format-Check                            | `mix format --check-formatted`           |
-| Format auto-fixen                       | `mix format`                             |
-| Warnings als Errors kompilieren         | `mix compile --warnings-as-errors`       |
-| Credo (high priority)                   | `mix credo --min-priority=high`          |
-| Credo strict (volle Liste)              | `mix credo --strict`                     |
-| Dialyzer (PLT baut beim ersten Lauf)    | `mix dialyzer`                           |
-| Security-Audit der Deps                 | `mix deps.audit`                         |
-| Doku lokal bauen + ansehen              | `mix docs && open doc/index.html`        |
+| Task                               | Command                                   |
+| ---------------------------------- | ----------------------------------------- |
+| Run tests                          | `mix test`                                |
+| One test file                      | `mix test test/refactors/ex/foo_test.exs` |
+| Only what changed                  | `mix test --stale`                        |
+| Coverage                           | `mix test --cover`                        |
+| Format check                       | `mix format --check-formatted`            |
+| Format                             | `mix format`                              |
+| Compile with warnings as errors    | `mix compile --warnings-as-errors`        |
+| Credo (high priority)              | `mix credo --min-priority=high`           |
+| Credo strict (full list)           | `mix credo --strict`                      |
+| Dialyzer (builds PLT on first run) | `mix dialyzer`                            |
+| Dependency security audit          | `mix deps.audit`                          |
+| Build and open docs                | `mix docs && open doc/index.html`         |
 
-**Vor jedem Commit lokal die Pre-commit-Triade laufen lassen:**
+**Run the pre-commit triad before committing:**
 
 ```sh
 mix format
@@ -186,20 +267,19 @@ mix compile --warnings-as-errors
 mix test
 ```
 
-Das ist genau das, was `devenv shell precommit` macht (siehe
-`devenv.nix`, `scripts.precommit.exec`). Wenn du es vorab manuell machst,
-geht der Commit beim ersten Versuch durch — sonst formatiert der Hook
-nach, der Commit bricht ab, und du musst neu `git add` + `git commit`.
+That is exactly what `devenv shell precommit` runs. Doing it up front
+means the commit lands on the first attempt — otherwise the hook
+reformats, the commit aborts, and you re-stage.
 
-## Testen
+## Testing
 
-Jeder Refactor hat **genau eine** Test-Datei in
-`test/refactors/<area>/<name>_test.exs`, die ihn **isoliert** prüft
-(nicht über die volle Pipeline). Damit zeigt ein roter Test auf genau
-das Modul, das gebrochen ist.
+Every refactor has **exactly one** test file at
+`test/refactors/<area>/<name>_test.exs` that exercises it **in
+isolation**, not through the full pipeline. A red test therefore points
+at exactly one module.
 
-Das Test-Case-Modul ist `Number42.RefactorCase`
-(`test/support/refactor_case.ex`). Es liefert drei Helper:
+The case module is `Number42.RefactorCase`
+(`test/support/refactor_case.ex`), providing three helpers:
 
 ```elixir
 defmodule Number42.Refactors.Ex.RejectIsNilTest do
@@ -219,276 +299,285 @@ defmodule Number42.Refactors.Ex.RejectIsNilTest do
   end
 
   describe "leaves alone" do
-    test "schon kanonisch" do
+    test "already canonical" do
       assert_unchanged(@subject, "Enum.reject(list, &is_nil/1)")
     end
   end
 
   describe "idempotent" do
-    test "zweimal == einmal" do
+    test "twice == once" do
       assert_idempotent(@subject, "Enum.filter(list, fn x -> not is_nil(x) end)")
     end
   end
 end
 ```
 
-Wichtige Konventionen:
+Conventions that matter:
 
-- **`async: true` ist Pflicht** — alle Refactor-Tests sind pure Funktionen,
-  es gibt keine geteilte Datenbank- oder Prozess-State.
-- **Whitespace-agnostischer Vergleich.** `assert_rewrites/3` collapsed
-  jede Whitespace-Sequenz, bevor verglichen wird — Heredocs mit
-  natürlicher Einrückung sind also okay, und wir umgehen einen
-  `mix format`-Pass im Test-Pfad. Die Failure-Message zeigt trotzdem die
-  rohen Before/Expected/Actual-Strings.
-- **Drei Sektionen pro Test-Datei:** `describe "rewrites"`,
-  `describe "leaves alone"`, `describe "idempotent"`. Idempotenz ist
-  nicht optional — der Engine hat eine Fixpoint-Schleife und ein
-  nicht-idempotenter Refactor läuft unendlich.
-- **Tests prüfen unsere Refactors, nicht Sourceror.** Wenn ein Test bei
-  einem Sourceror-Bump bräche, ohne dass wir etwas geändert haben,
-  testet er die Library statt uns — umformulieren oder löschen.
-
-Coverage-Hilfe:
+- **`async: true` is mandatory** — refactors are pure functions with no
+  shared database or process state.
+- **Three sections per file:** `rewrites`, `leaves alone`,
+  `idempotent`. The middle one is not filler — a refactor's decline
+  behaviour is half its contract, and it is the half that prevents
+  damage.
+- **Idempotence is not optional.** The engine has a fixpoint loop; a
+  non-idempotent refactor runs to the cap and produces churn.
+- **Whitespace-agnostic comparison.** `assert_rewrites/3` collapses
+  whitespace runs before comparing, so heredocs can be indented
+  naturally and the test path skips a `mix format` pass. Failure
+  messages still show the raw strings.
+- **Tests cover our refactors, not Sourceror.** A test that would break
+  on a Sourceror bump with no change on our side is testing the
+  library — rewrite it or delete it.
 
 ```sh
-mix test --cover                                       # Gesamt-Übersicht
-mix test test/refactors/ex/reject_is_nil_test.exs --trace  # ein Refactor, geschwätzig
+mix test --cover
+mix test test/refactors/ex/reject_is_nil_test.exs --trace
 ```
 
-## Bugfixing-Workflow
+## Bugfixing workflow
 
-Ein typischer Refactor-Bug sieht so aus: ein Konsument meldet, dass
-`Foo.bar` plötzlich kaputt umgeschrieben wurde, oder ein File ändert sich
-beim zweiten Lauf nochmal (Idempotenz-Bruch). So gehst du vor:
+A typical bug: a consumer reports that something was rewritten
+incorrectly, or a file keeps changing on a second pass (broken
+idempotence).
 
-1. **Reproduktion isolieren.** Bau die kleinste Eingabe, die das
-   Verhalten zeigt. Schau dir die AST-Struktur an, bevor du den
-   Refactor-Code öffnest:
+1. **Isolate the reproduction.** Build the smallest input that shows
+   the behaviour, and look at the AST before opening the refactor:
 
     ```sh
     mix run --no-start -e '
-      src = "EnumYourBuggyExample"
+      src = "your_buggy_example"
       {:ok, ast} = Sourceror.parse_string(src)
       IO.inspect(ast, limit: :infinity)
     '
     ```
 
-2. **Failing Test zuerst.** Schreibe in der passenden
-   `test/refactors/<area>/<name>_test.exs` einen `assert_rewrites`-
-   oder `assert_unchanged`-Case mit deiner Eingabe und der erwarteten
-   Ausgabe. Lass ihn rot werden:
+2. **Failing test first.** Add an `assert_rewrites` or
+   `assert_unchanged` case with your input, and watch it go red:
 
     ```sh
     mix test test/refactors/ex/your_refactor_test.exs --trace
     ```
 
-3. **Engine isoliert ausführen.** Wenn die Pipeline ein Faktor sein
-   könnte, prüf mit `--only`, ob der einzelne Refactor reicht:
+3. **Rule out the pipeline.** Check whether the single refactor
+   reproduces it:
 
     ```sh
     mix refactor --only YourRefactor --dry-run lib/path/to/file.ex
     ```
 
-4. **Refactor fixen.** Schau in `lib/number42/refactors/ast_helpers.ex`,
-   bevor du Helper neu baust — vieles ist schon da
-   (`bare_var`, `body_to_exprs`, `clip_end_for_boolish_tail`, …).
-5. **Idempotenz prüfen.** `assert_idempotent` mit dem reparierten
-   Input ergänzen, sonst kommt der Bug beim Fixpoint zurück.
-6. **Gegen die Library selbst gegentesten.** Wenn der Refactor nicht
-   nur Stilkram macht, kann ein `mix refactor --only YourRefactor`
-   im eigenen Repo unerwartete Folgen produzieren. Diff anschauen,
-   danach **`git checkout -- lib/ test/`** — wir committen weder
-   den Smoke-Test-Output noch zufällige Pipeline-Folgen, nur den
-   Refactor + seinen Test.
-7. **Vor Commit:**
+4. **Fix it.** Read `lib/number42/refactors/ast_helpers.ex` before
+   building a helper — most of what you need exists (`bare_var`,
+   `body_to_exprs`, `clip_end_for_boolish_tail`, …).
+5. **Add the idempotence case**, or the bug returns via the fixpoint.
+6. **Smoke-test against this library itself** if the refactor does
+   anything structural, then `git checkout -- lib/ test/`. We commit
+   the refactor and its test, never incidental pipeline output.
+7. **Before committing:** the pre-commit triad, then
+   `git add <refactor>.ex <refactor>_test.exs` and nothing else.
 
-    ```sh
-    mix format
-    mix compile --warnings-as-errors
-    mix test
-    ```
+### Common AST traps
 
-   Dann `git add <refactor>.ex <refactor>_test.exs` (nichts anderes)
-   und committen. Der pre-commit-Hook wiederholt die Triade — wenn du
-   sie vorher schon grün gemacht hast, läuft der Commit beim ersten
-   Versuch durch.
+Details and examples in `AGENTS_README.md`:
 
-### Häufige AST-Fallen
+- Sourceror wraps `true`, `false`, `nil`, atoms, integers and floats in
+  `{:__block__, _, [literal]}`. Match both forms.
+- Sourceror overshoots the range of `true`/`false`/`nil` by one column,
+  so `Patch.replace` eats the following character. Use
+  `clip_end_for_boolish_tail/2` from `AstHelpers`.
+- `def`/`defp`/`defmacro`/`defmacrop` heads look like generic calls.
+  Skip or special-case them explicitly, or you will rewrite
+  signatures.
+- `Sourceror.to_string/1` re-emits `:leading_comments` and
+  `:trailing_comments` from node meta. Strip them with `Macro.prewalk`
+  before stringifying a reused subtree, or comments duplicate.
+- **When the pattern is ambiguous, leave it alone.** This is the house
+  rule, not a fallback.
 
-Bevor du Code schreibst, halt dich an diese Punkte (Details und Beispiele
-stehen in der `AGENTS_README.md`):
+## Writing your own refactor
 
-- Sourceror wickelt `true`, `false`, `nil`, Atome, Integer, Floats in
-  `{:__block__, _, [literal]}`. Pattern-Match auf beide Formen.
-- Sourceror überzieht die Range von `true`/`false`/`nil` um eine Spalte
-  → `Patch.replace` frisst sonst das Folgezeichen. Helfer:
-  `clip_end_for_boolish_tail/2` aus `Number42.Refactors.AstHelpers`.
-- `def`/`defp`/`defmacro`/`defmacrop`-Heads sehen aus wie generische
-  Calls — die müssen explizit übersprungen oder unterschiedlich
-  behandelt werden, sonst rewritest du Signaturen.
-- `Sourceror.to_string/1` re-emittiert
-  `:leading_comments`/`:trailing_comments` aus der Node-Meta. Beim
-  Wiederverwenden bestehender Subtrees vor dem `to_string/1` mit
-  `Macro.prewalk` strippen.
-- Skippen ist besser als raten: bei mehrdeutigen Patterns lieber
-  unverändert lassen.
-
-## Einen eigenen Refactor schreiben
-
-Ein Refactor ist ein Modul, das `Number42.Refactors.Refactor`
-implementiert und mit `use Number42.Refactors.Refactor` markiert wird.
-Die Engine entdeckt ihn beim Start automatisch:
+A refactor is a module implementing `Number42.Refactors.Refactor`,
+marked with `use`. The engine discovers it automatically at startup.
 
 ```elixir
 defmodule MyApp.Refactors.MyRule do
   use Number42.Refactors.Refactor
 
   @impl true
-  def description, do: "Was dieser Refactor macht — eine Zeile."
+  def description, do: "What this refactor does — one line."
 
   @impl true
   def transform(source, _opts) do
-    # Sourceror-basierter Rewrite; den umgeschriebenen String zurückgeben.
-    # Idempotent! Konformer Code muss unverändert durch.
+    # Sourceror-based rewrite; return the rewritten string.
+    # Idempotent! Conforming code must pass through untouched.
     source
   end
 
-  # Alle optional:
+  # All optional:
   # @impl true
-  # def explanation, do: "Langform-Begründung für --log."
+  # def explanation, do: "Long-form rationale, shown by --log."
   # @impl true
-  # def priority, do: 150               # Default 100; höher = früher
+  # def priority, do: 150               # default 100; higher runs earlier
   # @impl true
-  # def reformat_after?, do: true       # nach Anwenden mix format triggern
+  # def reformat_after?, do: true       # trigger mix format afterwards
   # @impl true
-  # def prepare(_opts), do: {:ok, term} # einmal pro Engine-Run, gecacht
+  # def prepare(_opts), do: {:ok, term} # once per engine run, cached
+  # @impl true
+  # def patches(ast, source, _opts), do: []   # opt into AST sharing
 end
 ```
 
-Pflichteigenschaften:
+**`patches/3` instead of `transform/2`** is worth knowing about: the
+engine parses a file once and shares that AST across every refactor
+implementing `patches/3`, gated on disjoint ranges. Around 79 refactors
+opt in, and it is a measurable win on large runs. Use it unless your
+refactor needs the raw source string.
 
-- **Idempotent.** Zweiter Lauf == erster Lauf.
-- **Skippen statt raten.** Ambivalente Fälle bleiben unverändert —
-  lieber gar nicht umschreiben, als ein Sonderverhalten kaputt machen.
-- **Best-effort statt Garantie.** Refactors *zielen darauf*, das
-  beobachtbare Verhalten zu erhalten, aber das ist keine formale
-  Zusicherung. Jede Anwendung ist eine Code-Änderung — Diff sichten,
-  Tests laufen lassen, CI vertrauen.
+Non-negotiables:
 
-Schreibreihenfolge (TDD):
+- **Idempotent.** Second run equals first run.
+- **Decline rather than guess.** An ambiguous case stays untouched.
+  Missing an opportunity costs nothing; a wrong rewrite costs trust in
+  every other diff the tool produces.
+- **Name confidently or decline.** If you cannot derive a name that
+  says what the extracted thing is, do not extract it.
+- **Best-effort, not guaranteed.** Refactors *aim* to preserve
+  observable behaviour without formally assuring it.
 
-1. Test-Datei mit `assert_rewrites` / `assert_unchanged` / `assert_idempotent`.
-2. `mix test --trace` → RED.
-3. Refactor-Modul.
-4. Test → GREEN.
-5. Optional: Smoke-Test gegen die Library selbst, danach `git checkout -- lib/ test/`.
+Write it test-first: test file → red → refactor module → green →
+optional smoke test against this repo, then
+`git checkout -- lib/ test/`.
 
-## Architektur in 5 Minuten
+See the [authoring guide][authoring] for the full walkthrough.
+
+## Architecture in 5 minutes
 
 ```
        .refactor.exs                 mix refactor [opts] [paths]
             │                                │
             ▼                                ▼
- ┌────────────────────────────────────────────────────────┐
- │ Mix.Tasks.Refactor       (lib/mix/tasks/refactor.ex)   │
- │  • Config laden, Inputs expandieren                    │
- │  • --auto/--test/--check/--step-by-step Driver         │
- │  • mix format als Follow-up bei reformat_after?        │
- └───────────┬────────────────────────────────────────────┘
+ ┌─────────────────────────────────────────────────────────┐
+ │ Mix.Tasks.Refactor       (lib/mix/tasks/refactor.ex)    │
+ │  • load config, expand inputs                           │
+ │  • --auto/--test/--check/--step-by-step drivers          │
+ │  • mix format follow-up when reformat_after?             │
+ └───────────┬─────────────────────────────────────────────┘
              ▼
- ┌────────────────────────────────────────────────────────┐
- │ Number42.Refactors.Engine                              │
- │  • discoverte Refactors (`is_refactor`-Attribut)       │
- │  • sortiert nach priority/0 (höher zuerst)             │
- │  • Fixpoint-Loop pro Datei (max 5 Pässe)               │
- │  • prepare/1-Cache via :persistent_term                │
- └───────────┬────────────────────────────────────────────┘
+ ┌─────────────────────────────────────────────────────────┐
+ │ Number42.Refactors.Engine                               │
+ │  • discovers refactors (is_refactor attribute)           │
+ │  • sorts by priority/0 (higher first)                    │
+ │  • fixpoint loop per file (max 5 passes)                 │
+ │  • prepare/1 cache via :persistent_term                  │
+ │  • shares one AST across patches/3 refactors             │
+ └───────────┬─────────────────────────────────────────────┘
              ▼
- ┌────────────────────────────────────────────────────────┐
- │ ein Refactor-Modul (lib/number42/refactors/ex/*.ex)    │
- │  • transform(source, opts) :: source                   │
- │  • benutzt Sourceror + AstHelpers + AstDiff            │
- └────────────────────────────────────────────────────────┘
+ ┌─────────────────────────────────────────────────────────┐
+ │ a refactor module (lib/number42/refactors/ex/*.ex)       │
+ │  • transform(source, opts) or patches(ast, source, opts) │
+ │  • uses Sourceror + AstHelpers + the analysis engines    │
+ └─────────────────────────────────────────────────────────┘
 ```
 
-Wichtige Module:
+Key modules:
 
-- **`Number42.Refactors.Engine`** — pure Library, kein I/O, kein Mix.
-  Driver für die Refactor-Pipeline, kennt `--only` / `skipped_modules` /
-  Prioritäten / Fixpoint-Loop.
-- **`Number42.Refactors.Refactor`** — Behaviour + `__using__`-Makro.
-  Setzt das `is_refactor`-Attribut, importiert `AstHelpers`.
-- **`Number42.Refactors.AstHelpers`** — geteilte AST-Prädikate und
-  -Accessors. Bevor du etwas neu baust: erst lesen.
-- **`Number42.Refactors.AstDiff`** — interne Diff-Helfer für
-  `--log` und Test-Failure-Messages.
-- **`Mix.Tasks.Refactor`** — der CLI-Driver. Hier sitzen `--auto`,
-  `--check`, `--step-by-step`, `--test`, der Follow-up-Format-Lauf.
-- **`Mix.Tasks.Refactor.HeexClones`** — der separate HEEx-Klon-Bericht.
-- **`Number42.Refactors.Heex.*`** — Tree, Fingerprint, Normalizer,
-  Clones-Detection für HEEx-Subbäume.
-- **`Number42.RefactorCase`** (`test/support/`) — gemeinsame
-  Test-Helfer (`assert_rewrites`, `assert_unchanged`, `assert_idempotent`).
+- **`Engine`** — pure library, no I/O, no Mix. Drives the pipeline:
+  `--only`, `skipped_modules`, priorities, fixpoint, AST sharing.
+- **`Refactor`** — the behaviour plus `__using__`. Sets the
+  `is_refactor` attribute and imports `AstHelpers`.
+- **`AstHelpers`** — shared AST predicates and accessors. Read it
+  before writing a helper.
+- **`AstDiff`** — diff helpers for `--log` and test failures.
 
-## CI & Quality Gates
+The analysis engines are the reusable substrate the structural
+refactors build on, and most are under-consumed relative to what they
+can do:
 
-Die CI in `.github/workflows/` läuft pro PR und Push auf `main`:
+- **`Semantic`** — frozen embedding tables; verb and predicate models
+  for naming decisions.
+- **`TreeEditDistance`** — tree-agnostic edit distance, with adapters
+  for Elixir and HEEx trees.
+- **`CommunityDetection`** — modularity-maximising graph clustering.
+- **`BlockSegmentation`** — per-statement read/write sets, carrier
+  tracking, phase grouping.
+- **`AttributeClassifier`**, **`VocabularyClassifier`**,
+  **`HelperNaming`**, **`IdentifierExpansion`**, **`LiteralNaming`** —
+  classification and naming.
+- **`Heex.*`** — tree, fingerprint, normalizer, motif, scope and clone
+  detection for HEEx subtrees.
+- **`Number42.RefactorCase`** (`test/support/`) — `assert_rewrites`,
+  `assert_unchanged`, `assert_idempotent`.
 
-- **`ci.yml`** — Matrix `1.18 / OTP 27` + `1.19 / OTP 28`:
-  `mix format --check-formatted`, `mix compile --warnings-as-errors`,
-  `mix test`.
-- **`credo.yml`** — `mix credo --min-priority=high` (high-Priority-only,
-  damit niedrigere Hinweise nicht blocken; `mix credo --strict` lokal
-  ist die volle Liste).
-- **`dialyzer.yml`** — `mix dialyzer --format short`, mit PLT-Cache.
-- **`security.yml`** — `mix deps.audit` (wöchentlich + bei jedem PR).
-- **`auto-merge-dependabot.yml`** — Dependabot-Patch/Minor-PRs werden
-  per Auto-Merge gemerged, sobald die obigen Checks grün sind.
+Full detail in the [architecture guide][architecture].
 
-Lokal lassen sich alle Checks unter dem Dev-Shell starten — die Sektion
-[Lokale Entwicklung](#lokale-entwicklung) hat die Kommandos.
+## CI & quality gates
 
-## Release & Versionierung
+Workflows in `.github/workflows/`, on every PR and push to `main`:
 
-- Versionierung: Semver (siehe `CHANGELOG.md`, Keep-a-Changelog-Format).
-- Pakete bauen: `mix hex.build`. Tatsächliches Publishen passiert
-  bewusst manuell aus dem Maintainer-Account.
-- `CHANGELOG.md` bei jedem releasten Change aktualisieren — speziell den
-  `## [Unreleased]`-Block.
+- **`ci.yml`** — matrix `1.18 / OTP 27` and `1.19 / OTP 28`:
+  `mix format --check-formatted`,
+  `mix compile --warnings-as-errors`, `mix test`.
+- **`credo.yml`** — `mix credo --min-priority=high`. High priority only,
+  so lower-severity hints do not block; `mix credo --strict` locally is
+  the full list.
+- **`dialyzer.yml`** — `mix dialyzer --format short`, with PLT cache.
+- **`security.yml`** — `mix deps.audit`, weekly and per PR.
+- **`auto-merge-dependabot.yml`** — patch/minor Dependabot PRs
+  auto-merge once the above are green.
+
+This repo also applies the library to **its own source** (the
+`.refactor.exs` in the root), so every rule shipped to consumers holds
+here too. If a refactor change turns `mix refactor --check` red, that
+is the gate working.
+
+## Release & versioning
+
+- Semver; `CHANGELOG.md` in Keep-a-Changelog format. `CHANGELOG.md` is
+  marked `merge=union` in `.gitattributes`, because parallel refactor
+  PRs otherwise collide on it constantly.
+- Build with `mix hex.build`. Publishing is deliberately manual from
+  the maintainer account.
+- Update the `## [Unreleased]` block with every released change.
 
 ## Troubleshooting
 
-**`mix` ist nicht im Pfad / unbekannter Befehl.** Du bist nicht im
-Dev-Shell. `direnv reload` oder `devenv shell`. Wenn das nichts hilft,
-`rm -rf .direnv .devenv`, dann `direnv reload`. (Siehe auch
-`.claude/memories/nix-devenv-mix.md` — die Memories sind privat, der
-Befehl ist trotzdem allgemein gültig.)
+**`mix` not found.** You are outside the dev shell. `direnv reload` or
+`devenv shell`. If that does not help: `rm -rf .direnv .devenv`, then
+`direnv reload`.
 
-**Pre-commit-Hook bricht den Commit ab.** Höchstwahrscheinlich ein
-`mix format`-Mismatch. Lokal `mix format` laufen lassen, neu stagen,
-neu committen. **Nie `--no-verify` als Default** — nur als letzter
-Ausweg, wenn die Infrastruktur (Nix-Cache, devenv-Reload) wirklich
-hängt; dann vorab die Pre-commit-Triade manuell grün haben.
+**Pre-commit hook aborts the commit.** Almost always a `mix format`
+mismatch. Run `mix format`, re-stage, commit again. **Never
+`--no-verify` by default** — only when the infrastructure itself is
+stuck, and only with the triad manually green first.
 
-**Refactor läuft endlos in Tests.** Idempotenz gebrochen. `mix test
-test/refactors/ex/<name>_test.exs --trace` führt direkt zur Stelle.
-Ein `assert_idempotent` ist Pflicht in jeder Test-Datei.
+**A refactor loops forever in tests.** Broken idempotence. Run that
+refactor's test file with `--trace`.
 
-**`Sourceror.to_string/1` produziert duplizierte Kommentare.**
-Klassischer Trap: Kommentare in der Node-Meta. Lösung steht in
-[Häufige AST-Fallen](#häufige-ast-fallen).
+**`Sourceror.to_string/1` duplicates comments.** Comments in node meta;
+see [Common AST traps](#common-ast-traps).
 
-**`mix refactor` will eine `.refactor.exs`, die es nicht gibt.** Diese
-Library hat selbst keine — sie ist Library, kein Konsument. Im
-Konsumenten anlegen, siehe [Konfiguration](#konfiguration-refactorexs).
+**`mix refactor` wants a `.refactor.exs` that does not exist.** In a
+consumer project, create one. This repo has its own for the bootstrap
+run.
 
-**Dialyzer ist langsam.** Erster Lauf baut den PLT — `priv/plts/`. In CI
-gecacht über `mix.lock`-Hash. Wenn der Cache schmutzig ist:
+**A cross-file refactor produced code that will not compile.** Known
+class limitation — see [Safety model](#safety-model). Discard the diff
+and file an issue with the input.
+
+**Dialyzer is slow.** The first run builds the PLT into `priv/plts/`,
+cached in CI by `mix.lock` hash. If the cache is dirty:
 `rm -rf priv/plts && mix dialyzer`.
 
-## Lizenz
+**A run takes minutes on a large project.** Cross-file refactors each
+build a project-wide plan, and that phase dominates the wall clock.
+Narrow the run with paths or `--only`.
 
-MIT — siehe [LICENSE](LICENSE).
+## License
+
+MIT — see [LICENSE](LICENSE).
 
 [sourceror]: https://github.com/doorgan/sourceror
+[catalog]: guides/refactor-catalog.md
+[safety]: guides/safety-and-limitations.md
+[authoring]: guides/authoring-a-refactor.md
+[architecture]: guides/architecture.md
