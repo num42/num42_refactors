@@ -203,9 +203,84 @@ defmodule Number42.Refactors.Engine do
       {{__MODULE__, :prepared, _module, _opts} = key, _value} ->
         :persistent_term.erase(key)
 
+      {{__MODULE__, :corpus, _paths} = key, _value} ->
+        :persistent_term.erase(key)
+
       _ ->
         :ok
     end)
+  end
+
+  @doc """
+  Read and parse the corpus once per run, shared across every
+  `prepare/1` that needs project-wide context.
+
+  Every cross-file refactor builds its plan from the whole input set, and
+  each one used to do its own `File.read!` plus `Sourceror.parse_string`
+  over every path. With ~25 such refactors the corpus was parsed ~25
+  times per run, and since Sourceror carries comments and byte ranges it
+  is roughly an order of magnitude costlier than a plain quoted-form
+  parse — so that repetition dominated the wall clock on a large project
+  while per-file work stayed sub-second (#421).
+
+  Returns `%{path => {source, ast_or_nil}}`. A path that cannot be read
+  is omitted; a path that fails to parse is present with `nil` for the
+  AST, so a caller can still see its source without re-reading it.
+
+  ## Cache lifetime — the correctness constraint
+
+  Cross-file refactors *write* files, and step-by-step mode rewrites
+  between modules. A corpus snapshot that outlived a write would make a
+  later refactor plan against pre-rewrite source: silently wrong output,
+  not a crash. The cache therefore lives under the same
+  `:persistent_term` sweep as the prepared-plan cache and is dropped by
+  the same `invalidate_prepared_cache/0` call — the two lifetimes are
+  identical by construction rather than by convention.
+  """
+  @spec corpus(nil | [Path.t()]) :: %{optional(Path.t()) => {String.t(), Macro.t() | nil}}
+  def corpus(nil), do: %{}
+
+  def corpus(paths) when is_list(paths) do
+    key = {__MODULE__, :corpus, paths}
+
+    case :persistent_term.get(key, :__miss__) do
+      :__miss__ ->
+        result = read_corpus(paths)
+        :persistent_term.put(key, result)
+        result
+
+      cached ->
+        cached
+    end
+  end
+
+  @doc """
+  Corpus sources only, as `%{path => source}`.
+
+  For refactors that need the text but not the AST; still served from the
+  one shared read, so it costs nothing extra beyond the first call.
+  """
+  @spec corpus_sources(nil | [Path.t()]) :: %{optional(Path.t()) => String.t()}
+  def corpus_sources(paths) do
+    paths |> corpus() |> Map.new(fn {path, {source, _ast}} -> {path, source} end)
+  end
+
+  defp read_corpus(paths) do
+    paths
+    |> Enum.uniq()
+    |> Enum.reduce(%{}, fn path, acc ->
+      case File.read(path) do
+        {:ok, source} -> Map.put(acc, path, {source, parse_or_nil(source)})
+        {:error, _} -> acc
+      end
+    end)
+  end
+
+  defp parse_or_nil(source) do
+    case Sourceror.parse_string(source) do
+      {:ok, ast} -> ast
+      {:error, _} -> nil
+    end
   end
 
   defp prepared_for(module, opts) do
