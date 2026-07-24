@@ -396,6 +396,103 @@ defmodule Number42.Refactors.Ex.InlineSingleCallerPrivateTest do
     end
   end
 
+  # #400: the soundness case. One *direct* call plus a second caller
+  # reaching the helper through a non-direct dispatch form. Undercounting
+  # any of these reads as "exactly one caller" and deletes a function that
+  # is still called — a silently broken build. The count now comes from
+  # `AstHelpers.collect_calls/1`, so each form is counted by the shared
+  # call-graph layer rather than by a private walk.
+  describe "leaves alone — a second caller via a non-direct form (#400)" do
+    test "direct call + capture elsewhere is not inlined" do
+      assert_unchanged(
+        @subject,
+        """
+        defmodule M do
+          defp helper(x), do: x * 2
+          def f(n), do: helper(n)
+          def g(xs), do: Enum.map(xs, &helper/1)
+        end
+        """,
+        @on
+      )
+    end
+
+    test "direct call + pipe-form call elsewhere is not inlined" do
+      assert_unchanged(
+        @subject,
+        """
+        defmodule M do
+          defp helper(x), do: x * 2
+          def f(n), do: helper(n)
+          def g(n), do: n |> helper()
+        end
+        """,
+        @on
+      )
+    end
+
+    test "direct call + static apply elsewhere is not inlined" do
+      assert_unchanged(
+        @subject,
+        """
+        defmodule M do
+          defp helper(x), do: x * 2
+          def f(n), do: helper(n)
+          def g(n), do: apply(__MODULE__, :helper, [n])
+        end
+        """,
+        @on
+      )
+    end
+
+    test "direct call + Kernel.apply elsewhere is not inlined" do
+      assert_unchanged(
+        @subject,
+        """
+        defmodule M do
+          defp helper(x), do: x * 2
+          def f(n), do: helper(n)
+          def g(n), do: Kernel.apply(__MODULE__, :helper, [n])
+        end
+        """,
+        @on
+      )
+    end
+
+    test "unresolvable dynamic dispatch blocks inlining even with one direct call" do
+      # `apply(__MODULE__, fun, [n])` with a non-literal name could reach
+      # any local function, so "exactly one caller" is unknowable.
+      assert_unchanged(
+        @subject,
+        """
+        defmodule M do
+          defp helper(x), do: x * 2
+          def f(n), do: helper(n)
+          def g(fun, n), do: apply(__MODULE__, fun, [n])
+        end
+        """,
+        @on
+      )
+    end
+
+    test "arity-correct pipe caller of a /2 helper is counted" do
+      # `x |> helper(y)` is AST-shaped as helper/1 but is really helper/2.
+      # Missing the arity correction would leave helper/2 with one counted
+      # caller and delete it while the pipe still references it.
+      assert_unchanged(
+        @subject,
+        """
+        defmodule M do
+          defp helper(x, y), do: x * y
+          def f(a, b), do: helper(a, b)
+          def g(a, b), do: a |> helper(b)
+        end
+        """,
+        @on
+      )
+    end
+  end
+
   describe "leaves alone — pipe-form callers (issue #80)" do
     test "one direct caller + one pipe caller is not inlined/deleted" do
       # `x |> render()` is AST-shaped as render/0 (the piped arg is

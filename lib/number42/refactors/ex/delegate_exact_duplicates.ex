@@ -102,6 +102,8 @@ defmodule Number42.Refactors.Ex.DelegateExactDuplicates do
 
   use Number42.Refactors.Refactor
 
+  alias Number42.Refactors.Engine
+
   @default_min_mass 20
 
   # Path patterns excluded from cross-file matching. The default-source
@@ -598,8 +600,17 @@ defmodule Number42.Refactors.Ex.DelegateExactDuplicates do
   defp plan_from_sources(sources), do: {:ok, build_plan(sources)}
   defp prepared_for_paths(nil), do: load_default_sources() |> plan_from_sources()
 
+  # Served from the engine's shared corpus read (#421) rather than doing
+  # this refactor's own pass over every path. The cache is dropped by the
+  # same `invalidate_prepared_cache/0` sweep that drops prepared plans, so
+  # a step-by-step rewrite between modules is picked up here too.
+  #
+  # `corpus_sources/1` returns a map, so the pairs are re-sorted by path to
+  # keep the plan a pure function of the input set. Winner selection is
+  # order-independent today, but a plan that silently depended on map
+  # iteration order would be a nasty thing to discover later.
   defp prepared_for_paths(paths) when is_list(paths) do
-    sources = paths |> Enum.map(fn p -> {p, File.read!(p)} end)
+    sources = paths |> Engine.corpus_sources() |> Enum.sort_by(&elem(&1, 0))
     {:ok, build_plan(sources)}
   end
 

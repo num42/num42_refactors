@@ -174,17 +174,52 @@ defmodule Number42.Refactors.Ex.BooleanFunctionQuestionMark do
 
   # The `?` suffix claims a *predicate* — a name that asks, not one that
   # acts. A boolean body alone isn't enough: `parse_boolean`/`maybe_update_oz`
-  # both return booleans but reading `parse_boolean?` is nonsense. The
-  # predicate embedding decides; on `:unknown` (the name carries no signal
-  # the model knows) the verb-stem heuristic stands in — an action stem
-  # (`parse`/`update`/`compute`/…) means "not a predicate", anything else
-  # is allowed. Measured 41/41 correct on position-db's real boolean defps.
+  # both return booleans but reading `parse_boolean?` is nonsense.
+  #
+  # Three tiers, most-specific first:
+  #
+  #   1. The predicate embedding, when it recognises a token in the name.
+  #   2. A modal/possessive prefix (`has_`, `can_`, `should_`, `is_`, …).
+  #      These are *grammatically* interrogative — `has_role` asks whether
+  #      a role is held — and the model's vocabulary does not cover them
+  #      (it scores adjectives like `valid`/`enabled`, so `has_role`,
+  #      `can_edit`, `needs_review` all come back `:unknown`). Reading the
+  #      prefix is structural, not statistical: it holds for any stem,
+  #      including domain nouns no embedding table will ever contain.
+  #   3. The verb-stem heuristic — an action stem (`parse`/`update`/…)
+  #      means "not a predicate", anything else is allowed.
+  #
+  # Tier 2 exists because tier 3 was deciding the majority of real names
+  # by exclusion rather than recognition (#408). It reaches the same verdict
+  # for the modal class, but on a stated reason instead of a fallthrough.
   defp predicate_name?(name) do
     case Semantic.classify(Atom.to_string(name), :predicate) do
       {:ok, :predicate, _} -> true
       {:ok, :action, _} -> false
-      :unknown -> not HelperNaming.action_verb?(name)
+      :unknown -> modal_predicate_name?(name) or not HelperNaming.action_verb?(name)
     end
+  end
+
+  # Auxiliary and modal prefixes only — words that cannot head a clause on
+  # their own, so whatever follows is necessarily a *claim about* the stem
+  # rather than an action performed on it. `has_update_flag` asks whether an
+  # update flag is held; it does not update anything.
+  #
+  # Deliberately excluded: `owns_`, `uses_`, `contains_`, `includes_`,
+  # `matches_`, `knows_`, `accepts_`, `supports_`. Those are ordinary
+  # transitive verbs, so a compound like `uses_fetch_row` reads as an action
+  # and must keep falling through to the verb-stem tier. Only prefixes whose
+  # own part of speech forces an interrogative reading belong here.
+  #
+  # A trailing `_` is required so `is_owner` matches while `island` does not
+  # — the prefix must be a whole leading segment, not a substring.
+  @modal_prefixes ~w(has_ have_ had_ can_ cannot_ could_ should_ shall_ must_
+                     may_ might_ will_ would_ is_ are_ was_ were_ been_
+                     needs_ need_ wants_ want_ requires_ require_)
+
+  defp modal_predicate_name?(name) do
+    str = Atom.to_string(name)
+    Enum.any?(@modal_prefixes, &String.starts_with?(str, &1))
   end
 
   defp renamable_name?(name) do
