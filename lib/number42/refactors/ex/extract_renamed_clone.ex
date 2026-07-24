@@ -78,8 +78,10 @@ defmodule Number42.Refactors.Ex.ExtractRenamedClone do
   """
 
   use Number42.Refactors.Refactor
+  use Number42.Refactors.Detection
 
   alias Number42.Refactors.Analysis.AstHelpers
+  alias Number42.Refactors.Detection.Finding
 
   @default_min_mass 20
 
@@ -129,6 +131,186 @@ defmodule Number42.Refactors.Ex.ExtractRenamedClone do
     function name, and replace each original with a wrapper-`def`
     pointing at the shared definition.
     """
+  end
+
+  @impl Number42.Refactors.Refactor
+  def detector, do: __MODULE__
+
+  @doc """
+  Renamed-clone groups across the corpus, with the verdict on each.
+
+  Cross-file by nature: a renamed clone is by definition the same body
+  under two names in two modules, so there is no single-file answer.
+
+  An accepted finding is a group the rewrite lifts into a `{LCP}.Shared`
+  module. Declined findings cover both halves of what used to vanish:
+
+    * **per-function exclusions** — `defp`, multi-clause heads,
+      non-plain-var heads, below-mass bodies and module-attribute users
+      were each dropped with a bare `[]` inside `build_function_entry/7`;
+    * **group-level skips** — a function that clears every per-function
+      gate can still miss the plan three ways, and the finding names
+      which: its body is genuinely unique, its twin carries the *same*
+      name (`ExtractSharedModule`'s case, not a rename), or the group's
+      function names yield no derivable shared-module name.
+
+  ## Detection must not write
+
+  `build_plan/2` writes one `{LCP}.Shared` module per group unless
+  `dry_run: true`, so detection forces that flag regardless of what the
+  caller passes.
+  """
+  @impl Number42.Refactors.Detection
+  @spec detect_corpus([{String.t(), String.t()}], keyword()) :: [Finding.t()]
+  def detect_corpus(sources, opts) do
+    min_mass = Keyword.get(opts, :min_mass, @default_min_mass)
+
+    plan = build_plan(sources, Keyword.put(opts, :dry_run, true))
+
+    # Plan entries carry no `:module` — the loser module is the map key.
+    planned =
+      for {loser, entries} <- plan, entry <- entries, into: MapSet.new() do
+        {loser, entry.name, entry.arity}
+      end
+
+    paths_by_module = module_paths(sources, min_mass)
+
+    accepted =
+      plan
+      |> Enum.sort_by(fn {loser, _entries} -> loser end)
+      |> Enum.flat_map(fn {loser, entries} ->
+        Enum.map(entries, &accepted_finding(&1, loser, Map.get(paths_by_module, loser)))
+      end)
+
+    accepted ++ unshared_findings(sources, min_mass, planned)
+  end
+
+  # {arity, body_hash} → the distinct {module, name} pairs carrying that
+  # body across the whole corpus. This is what separates "nothing else
+  # looks like this" from "a twin exists but a later gate skipped the
+  # group" — the two reasons a gate-passing function can still miss the
+  # plan, which are indistinguishable from the plan's absence alone.
+  defp clone_index(sources, min_mass) do
+    sources
+    |> Enum.flat_map(&extract_module_info(&1, min_mass))
+    |> Enum.group_by(fn e -> {e.arity, e.hash} end, fn e -> {e.module, e.name} end)
+    |> Map.new(fn {key, pairs} -> {key, Enum.uniq(pairs)} end)
+  end
+
+  @impl Number42.Refactors.Detection
+  def detects, do: description()
+
+  # Which file each module was found in — plan entries only carry the
+  # group's `source_paths`, not the individual loser's own file.
+  defp module_paths(sources, min_mass) do
+    sources
+    |> Enum.flat_map(&extract_module_info(&1, min_mass))
+    |> Map.new(fn entry -> {entry.module, entry.path} end)
+  end
+
+  defp accepted_finding(entry, loser, path) do
+    Finding.accept(:renamed_clone,
+      path: path,
+      refactor: __MODULE__,
+      scope: %{module: loser, function: {entry.name, entry.arity}},
+      description:
+        "#{inspect(loser)}.#{entry.name}/#{entry.arity} shares a body with " <>
+          "#{inspect(entry.target)}.#{entry.shared_name}/#{entry.arity}",
+      evidence: %{
+        arity: entry.arity,
+        shared_name: entry.shared_name,
+        target: entry.target
+      }
+    )
+  end
+
+  # Re-walks every source recording *why* each function was passed over,
+  # which `build_function_entry/7` throws away as a bare `[]`. Functions
+  # that made it into the plan are excluded via `planned`.
+  defp unshared_findings(sources, min_mass, planned) do
+    index = clone_index(sources, min_mass)
+
+    sources
+    |> Enum.sort_by(fn {path, _source} -> path end)
+    |> Enum.flat_map(fn {path, source} ->
+      case Sourceror.parse_string(source) do
+        {:ok, ast} -> declines_in_ast(ast, path, min_mass, planned, index)
+        {:error, _} -> []
+      end
+    end)
+  end
+
+  defp declines_in_ast(ast, path, min_mass, planned, index) do
+    ast
+    |> AstHelpers.qualified_module_bodies()
+    |> Enum.flat_map(fn {module, body} ->
+      body
+      |> AstHelpers.body_to_exprs()
+      |> Enum.filter(&def_clause?/1)
+      |> Enum.group_by(&def_name_arity_or_skip/1)
+      |> Enum.reject(fn {key, _clauses} -> key == :skip end)
+      |> Enum.reject(fn {{_kind, name, arity}, _} ->
+        MapSet.member?(planned, {module, name, arity})
+      end)
+      |> Enum.sort_by(fn {{_kind, name, arity}, _} -> {name, arity} end)
+      |> Enum.flat_map(fn {{kind, name, arity}, clauses} ->
+        decline_finding(module, kind, name, arity, clauses, path, min_mass, index)
+      end)
+    end)
+  end
+
+  defp decline_finding(module, kind, name, arity, clauses, path, min_mass, index) do
+    reason =
+      exclusion_reason(kind, clauses, min_mass) ||
+        unplanned_reason(module, name, arity, clauses, index)
+
+    [
+      Finding.decline(:renamed_clone, reason,
+        path: path,
+        refactor: __MODULE__,
+        scope: %{module: module, function: {name, arity}},
+        evidence: %{arity: arity, mass: total_mass(clauses), min_mass: min_mass}
+      )
+    ]
+  end
+
+  # A function that clears every per-function gate but is still absent
+  # from the plan either has no twin at all, or has one the group-level
+  # decision passed over — same name (`ExtractSharedModule`'s job) or no
+  # derivable shared-module name. Naming which is the whole point; the
+  # earlier version called all three "body is unique", which is wrong
+  # for two of them.
+  defp unplanned_reason(module, name, arity, clauses, index) do
+    twins =
+      index
+      |> Map.get({arity, hash_clauses(clauses)}, [])
+      |> Enum.reject(&(&1 == {module, name}))
+
+    case twins do
+      [] ->
+        "body is unique — no clone to share with"
+
+      pairs ->
+        if Enum.all?(pairs, fn {_mod, twin_name} -> twin_name == name end) do
+          "clone shares the same name — ExtractSharedModule's case, not a rename"
+        else
+          "no shared-module name derivable from the clone group's function names"
+        end
+    end
+  end
+
+  # Mirrors `build_function_entry/7`'s cond in the same order, so a
+  # decline reason always names the gate that actually stopped it.
+  defp exclusion_reason(:defp, _clauses, _min_mass), do: "private function (v1 is public-only)"
+
+  defp exclusion_reason(_kind, clauses, min_mass) do
+    cond do
+      length(clauses) > 1 -> "multi-clause function"
+      not Enum.all?(clauses, &plain_var_clause?/1) -> "head is not plain-var"
+      total_mass(clauses) < min_mass -> "body mass #{total_mass(clauses)} < min_mass #{min_mass}"
+      body_uses_module_attribute?(clauses) -> "body references a module attribute"
+      true -> nil
+    end
   end
 
   @impl Number42.Refactors.Refactor
