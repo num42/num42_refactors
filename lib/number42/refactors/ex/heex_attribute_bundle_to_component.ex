@@ -107,7 +107,7 @@ defmodule Number42.Refactors.Ex.HeexAttributeBundleToComponent do
 
   use Number42.Refactors.Refactor
 
-  alias Number42.Refactors.Heex.Tree
+  alias Number42.Refactors.Analysis.Heex.Tree
   alias Sourceror.Patch
 
   @default_min_occurrences 2

@@ -124,7 +124,7 @@ defmodule Number42.Refactors.Ex.PushParamIntoCallee do
 
   use Number42.Refactors.Refactor
 
-  alias Number42.Refactors.AstHelpers
+  alias Number42.Refactors.Analysis.AstHelpers
   alias Sourceror.Patch
 
   @excluded_path_prefixes ["test/", "dev/"]

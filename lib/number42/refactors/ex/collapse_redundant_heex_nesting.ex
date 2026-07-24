@@ -80,7 +80,7 @@ defmodule Number42.Refactors.Ex.CollapseRedundantHeexNesting do
 
   use Number42.Refactors.Refactor
 
-  alias Number42.Refactors.Heex.Tree
+  alias Number42.Refactors.Analysis.Heex.Tree
   alias Sourceror.Patch
 
   # Only div/span are layout-inert — collapsing them away changes nothing

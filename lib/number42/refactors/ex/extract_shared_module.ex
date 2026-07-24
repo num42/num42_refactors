@@ -110,7 +110,7 @@ defmodule Number42.Refactors.Ex.ExtractSharedModule do
 
   use Number42.Refactors.Refactor
 
-  alias Number42.Refactors.AstHelpers
+  alias Number42.Refactors.Analysis.AstHelpers
 
   @default_min_mass 20
 

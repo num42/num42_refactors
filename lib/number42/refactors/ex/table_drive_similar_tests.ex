@@ -51,7 +51,7 @@ defmodule Number42.Refactors.Ex.TableDriveSimilarTests do
   Within such a module, *consecutive* 2-argument `test "name" do … end`
   blocks are bucketed by the structural hash of their bodies (literals
   replaced by a single hole). A bucket of `>= :min_tests` consecutive
-  tests is a candidate; `Number42.Refactors.AstDiff` then computes the
+  tests is a candidate; `Number42.Refactors.Analysis.AstDiff` then computes the
   per-position literal divergences (the table columns).
 
   ## False-positive guards (skip — leave the tests alone)
@@ -87,8 +87,8 @@ defmodule Number42.Refactors.Ex.TableDriveSimilarTests do
 
   use Number42.Refactors.Refactor
 
-  alias Number42.Refactors.AstDiff
-  alias Number42.Refactors.AstHelpers
+  alias Number42.Refactors.Analysis.AstDiff
+  alias Number42.Refactors.Analysis.AstHelpers
 
   @default_min_tests 3
   @default_max_columns 4

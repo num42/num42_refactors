@@ -83,8 +83,8 @@ defmodule Number42.Refactors.Ex.ExtractMagicNumber do
 
   use Number42.Refactors.Refactor
 
-  alias Number42.Refactors.IdentifierExpansion
-  alias Number42.Refactors.LiteralNaming
+  alias Number42.Refactors.Analysis.IdentifierExpansion
+  alias Number42.Refactors.Analysis.LiteralNaming
   alias Sourceror.Patch
 
   @idiomatic [0, 1, 2, 0.0, 1.0, 0.5]

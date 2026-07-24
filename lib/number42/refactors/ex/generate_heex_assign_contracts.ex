@@ -35,7 +35,7 @@ defmodule Number42.Refactors.Ex.GenerateHeexAssignContracts do
   A *function-component* here is a top-level `def`/`defp` whose head is
   `name(assigns)` (exactly one parameter, literally named `assigns`)
   and whose body contains at least one `~H` sigil. The sigils are
-  parsed with `Number42.Refactors.Heex.Tree`; every `@assign` read in
+  parsed with `Number42.Refactors.Analysis.Heex.Tree`; every `@assign` read in
 
   - inline `{...}` / `<%= ... %>` expressions,
   - `attr={...}` attribute braces, and
@@ -68,7 +68,7 @@ defmodule Number42.Refactors.Ex.GenerateHeexAssignContracts do
 
   use Number42.Refactors.Refactor
 
-  alias Number42.Refactors.Heex.Tree
+  alias Number42.Refactors.Analysis.Heex.Tree
 
   # LiveView-provided assigns that are never declared with `attr`.
   # `inner_block` is intentionally absent — it maps to a `slot`.

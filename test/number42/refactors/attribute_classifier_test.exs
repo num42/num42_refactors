@@ -1,7 +1,7 @@
 defmodule Number42.Refactors.AttributeClassifierTest do
   use ExUnit.Case, async: true
 
-  alias Number42.Refactors.AttributeClassifier
+  alias Number42.Refactors.Analysis.AttributeClassifier
 
   describe "classify/1 — real adjectives" do
     # Parity with the trained Python model. Synonyms generalize to their class.

@@ -64,9 +64,9 @@ defmodule Number42.Refactors.Ex.BooleanFunctionQuestionMark do
 
   use Number42.Refactors.Refactor
 
-  alias Number42.Refactors.AstHelpers
-  alias Number42.Refactors.HelperNaming
-  alias Number42.Refactors.Semantic
+  alias Number42.Refactors.Analysis.AstHelpers
+  alias Number42.Refactors.Analysis.HelperNaming
+  alias Number42.Refactors.Analysis.Semantic
   alias Sourceror.Patch
 
   # Operators that *always* yield a boolean. `and`/`or` qualify because

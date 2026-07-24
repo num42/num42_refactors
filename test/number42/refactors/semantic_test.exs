@@ -1,7 +1,7 @@
 defmodule Number42.Refactors.SemanticTest do
   use ExUnit.Case, async: true
 
-  alias Number42.Refactors.Semantic
+  alias Number42.Refactors.Analysis.Semantic
 
   describe "classify/1 parity with the Python Model2Vec POC" do
     # Ground truth = the verb the static-embedding classifier assigns. These

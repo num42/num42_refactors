@@ -39,7 +39,7 @@ defmodule Number42.Refactors.Ex.SplitLowCohesionModule do
      functions belong together if they are linked, regardless of who
      calls whom.
   2. Run greedy modularity-maximising community detection
-     (`Number42.Refactors.CommunityDetection`). Plain connected
+     (`Number42.Refactors.Analysis.CommunityDetection`). Plain connected
      components is too blunt — a single shared helper bridges every
      island into one component. Modularity instead measures intra-
      community density *beyond chance*, so a lone bridge edge between
@@ -127,8 +127,8 @@ defmodule Number42.Refactors.Ex.SplitLowCohesionModule do
 
   use Number42.Refactors.Refactor
 
-  alias Number42.Refactors.CommunityDetection
-  alias Number42.Refactors.VocabularyClassifier
+  alias Number42.Refactors.Analysis.CommunityDetection
+  alias Number42.Refactors.Analysis.VocabularyClassifier
 
   @default_min_modularity 0.3
   @default_max_cut_ratio 0.25

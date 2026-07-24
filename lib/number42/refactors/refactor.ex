@@ -138,8 +138,8 @@ defmodule Number42.Refactors.Refactor do
     quote do
       @behaviour Number42.Refactors.Refactor
 
-      import Number42.Refactors.AstHelpers
-      import Number42.Refactors.IdentifierExpansion
+      import Number42.Refactors.Analysis.AstHelpers
+      import Number42.Refactors.Analysis.IdentifierExpansion
 
       Module.register_attribute(__MODULE__, :is_refactor, persist: true)
       @is_refactor true

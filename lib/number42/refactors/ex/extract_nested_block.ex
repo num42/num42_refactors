@@ -50,7 +50,7 @@ defmodule Number42.Refactors.Ex.ExtractNestedBlock do
 
   use Number42.Refactors.Refactor
 
-  alias Number42.Refactors.HelperNaming
+  alias Number42.Refactors.Analysis.HelperNaming
   alias Sourceror.Patch
 
   @impl Number42.Refactors.Refactor

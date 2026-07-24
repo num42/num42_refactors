@@ -68,8 +68,8 @@ defmodule Number42.Refactors.Ex.ExtractToPublicComponent do
 
   use Number42.Refactors.Refactor
 
-  alias Number42.Refactors.AstHelpers
-  alias Number42.Refactors.Heex.{AttrType, ComponentNaming, Motif, Scope, StructureMotif, Tree}
+  alias Number42.Refactors.Analysis.AstHelpers
+  alias Number42.Refactors.Analysis.Heex.{AttrType, ComponentNaming, Motif, Scope, StructureMotif, Tree}
 
   @min_nodes 6
   @min_lines 12

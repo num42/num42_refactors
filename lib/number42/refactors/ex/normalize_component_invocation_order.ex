@@ -61,7 +61,7 @@ defmodule Number42.Refactors.Ex.NormalizeComponentInvocationOrder do
 
   use Number42.Refactors.Refactor
 
-  alias Number42.Refactors.Heex.Tree
+  alias Number42.Refactors.Analysis.Heex.Tree
   alias Sourceror.Patch
 
   @directives ~w(:for :if :let)

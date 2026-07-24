@@ -114,7 +114,7 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
 
   ## Helper-Naming: ableiten oder ablehnen (kein Platzhalter)
 
-  Der Helper wird über `Number42.Refactors.HelperNaming` aus dem Block
+  Der Helper wird über `Number42.Refactors.Analysis.HelperNaming` aus dem Block
   selbst benannt: ein Verb aus dem dominanten Call (`Enum.sum` → `compute`)
   plus dem live-out-Objekt → `compute_subtotal_and_taxed`. Da ein Klon über
   mehrere Funktionen läuft, gibt es keinen einzelnen Host-Namen — Naming-
@@ -201,9 +201,9 @@ defmodule Number42.Refactors.Ex.ExtractExpressionClone do
 
   use Number42.Refactors.Refactor
 
-  alias Number42.Refactors.AstHelpers
-  alias Number42.Refactors.BlockSegmentation
-  alias Number42.Refactors.HelperNaming
+  alias Number42.Refactors.Analysis.AstHelpers
+  alias Number42.Refactors.Analysis.BlockSegmentation
+  alias Number42.Refactors.Analysis.HelperNaming
 
   @default_min_mass 8
   @default_min_savings 12

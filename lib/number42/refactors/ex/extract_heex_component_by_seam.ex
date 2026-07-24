@@ -29,7 +29,7 @@ defmodule Number42.Refactors.Ex.ExtractHeexComponentBySeam do
     * **assign leak ≤ `#{0.25}`** — of the assigns it reads, at most this
       fraction are also referenced outside the subtree (measured against
       tree siblings via byte-range containment);
-    * **no free non-assign variable** (`Number42.Refactors.Heex.Scope`) —
+    * **no free non-assign variable** (`Number42.Refactors.Analysis.Heex.Scope`) —
       a variable bound outside the cut (a `for` generator, a `:let` slot,
       a local assignment) would break the standalone component.
 
@@ -46,7 +46,7 @@ defmodule Number42.Refactors.Ex.ExtractHeexComponentBySeam do
 
   @behaviour Number42.Refactors.Refactor
 
-  alias Number42.Refactors.Heex.{AttrType, ComponentNaming, Scope, Tree}
+  alias Number42.Refactors.Analysis.Heex.{AttrType, ComponentNaming, Scope, Tree}
 
   @min_nodes 6
   @min_lines 12

@@ -104,8 +104,8 @@ defmodule Number42.Refactors.Ex.SplitPipeableResponsibilities do
 
   use Number42.Refactors.Refactor
 
-  alias Number42.Refactors.BlockSegmentation
-  alias Number42.Refactors.HelperNaming
+  alias Number42.Refactors.Analysis.BlockSegmentation
+  alias Number42.Refactors.Analysis.HelperNaming
 
   @control_flow_forms ~w(raise throw exit with case cond if unless try for fn receive)a
   @effect_modules ~w(Repo Logger GenServer File IO Agent Task Process)a

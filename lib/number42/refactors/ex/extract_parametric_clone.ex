@@ -37,8 +37,8 @@ defmodule Number42.Refactors.Ex.ExtractParametricClone do
 
   use Number42.Refactors.Refactor
 
-  alias Number42.Refactors.AstDiff
-  alias Number42.Refactors.AstHelpers
+  alias Number42.Refactors.Analysis.AstDiff
+  alias Number42.Refactors.Analysis.AstHelpers
 
   @default_min_mass 25
 

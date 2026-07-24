@@ -58,7 +58,7 @@ defmodule Number42.Refactors.Ex.NegatedBooleanName do
 
   use Number42.Refactors.Refactor
 
-  alias Number42.Refactors.IdentifierExpansion
+  alias Number42.Refactors.Analysis.IdentifierExpansion
   alias Sourceror.Patch
 
   @negation_prefixes ~w(not un in dis)

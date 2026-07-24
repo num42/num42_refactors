@@ -20,7 +20,7 @@ defmodule Number42.Refactors.Ex.ExtractHeexExactCloneTest do
   end
 
   describe "find_free_vars/1" do
-    alias Number42.Refactors.Heex.Tree
+    alias Number42.Refactors.Analysis.Heex.Tree
 
     defp parse!(body) do
       {:ok, tree} = Tree.parse_body(body)

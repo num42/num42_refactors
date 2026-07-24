@@ -36,7 +36,7 @@ defmodule Number42.Refactors.Ex.UnwrapSpanInHeading do
 
   ## Detection
 
-  Each `~H` sigil is parsed with `Number42.Refactors.Heex.Tree`. Inside
+  Each `~H` sigil is parsed with `Number42.Refactors.Analysis.Heex.Tree`. Inside
   every `<h1>`–`<h6>`/`<header>` element we look for descendant
   `<span>` elements (direct or nested) and rewrite the ones that are
   provably safe to unwrap. Spans outside a heading/header are never
@@ -72,7 +72,7 @@ defmodule Number42.Refactors.Ex.UnwrapSpanInHeading do
 
   use Number42.Refactors.Refactor
 
-  alias Number42.Refactors.Heex.Tree
+  alias Number42.Refactors.Analysis.Heex.Tree
   alias Sourceror.Patch
 
   @heading_tags ~w(h1 h2 h3 h4 h5 h6 header)

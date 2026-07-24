@@ -161,7 +161,7 @@ defmodule Number42.Refactors.Ex.ExtractBehaviourFromAdapterFamily do
 
   use Number42.Refactors.Refactor
 
-  alias Number42.Refactors.Semantic
+  alias Number42.Refactors.Analysis.Semantic
 
   @default_min_modules 2
   @default_min_callbacks 1

@@ -45,7 +45,7 @@ defmodule Number42.Refactors.Ex.SortKeywords do
 
   use Number42.Refactors.Refactor
 
-  alias Number42.Refactors.AstHelpers
+  alias Number42.Refactors.Analysis.AstHelpers
   alias Sourceror.Patch
 
   @impl Number42.Refactors.Refactor
