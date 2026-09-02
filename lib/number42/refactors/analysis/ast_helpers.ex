@@ -451,15 +451,25 @@ defmodule Number42.Refactors.Analysis.AstHelpers do
 
   defp alias_as_opt(_), do: nil
 
+  # `?`/`!` belong to the function name; reading `permit?: 4` as `permit`
+  # (or as nothing) made the directive look dead while the call was live.
+  # An empty list means the entries are operators we cannot name — no
+  # readable name is not the same as no use, so the directive stays.
   defp import_only_names(directive) do
     case Regex.run(~r/only:\s*\[(.+)\]/, directive) do
       [_, inner] ->
-        Regex.scan(~r/([a-z_][a-zA-Z0-9_]*):/, inner) |> Enum.map(fn [_, n] -> n end)
+        ~r/([a-z_][a-zA-Z0-9_]*[?!]?):/
+        |> Regex.scan(inner)
+        |> Enum.map(fn [_, name] -> name end)
+        |> nil_when_empty()
 
       _ ->
         nil
     end
   end
+
+  defp nil_when_empty([]), do: nil
+  defp nil_when_empty(names), do: names
 
   # The full line span of a directive — a multi-line `import Foo,\n  only: […]`
   # must drop every line it occupies, or the orphaned `only:` continuation

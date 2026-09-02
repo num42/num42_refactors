@@ -1490,6 +1490,42 @@ defmodule Number42.Refactors.Analysis.AstHelpersTest do
       assert AstHelpers.prune_dead_directives(source) =~ "import Foo.Bar"
     end
 
+    test "keeps an `import only:` whose called function ends in `?`" do
+      source = """
+      defmodule M do
+        import Foo.Bar, only: [permit?: 4]
+
+        def go(scope, project), do: permit?(Ctx, :edit, scope, project)
+      end
+      """
+
+      assert AstHelpers.prune_dead_directives(source) =~ "import Foo.Bar"
+    end
+
+    test "keeps an `import only:` whose called function ends in `!`" do
+      source = """
+      defmodule M do
+        import Foo.Bar, only: [fetch!: 1]
+
+        def go(id), do: fetch!(id)
+      end
+      """
+
+      assert AstHelpers.prune_dead_directives(source) =~ "import Foo.Bar"
+    end
+
+    test "keeps an `import only:` listing operators — the names aren't readable here" do
+      source = """
+      defmodule M do
+        import Foo.Bar, only: [+: 2]
+
+        def go(a, b), do: a + b
+      end
+      """
+
+      assert AstHelpers.prune_dead_directives(source) =~ "import Foo.Bar"
+    end
+
     test "leaves a plain `import Mod` alone (functions can't be enumerated)" do
       source = """
       defmodule M do
