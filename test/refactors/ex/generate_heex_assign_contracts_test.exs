@@ -592,6 +592,44 @@ defmodule Number42.Refactors.Ex.GenerateHeexAssignContractsTest do
       assert after_src =~ "attr :milestone, :any, required: true"
     end
 
+    test "an attribute at the call site wins over render_slot in the body" do
+      built = index(~S|      <.slot_row milestone={@m} step={step} />|)
+
+      after_src =
+        apply_refactor(@subject, slot_component("<span>{render_slot(@step)}</span>"),
+          enabled: true,
+          prepared: built
+        )
+
+      assert after_src =~ "attr :step, :any, required: true"
+      refute after_src =~ "slot :step"
+    end
+
+    test "an attribute passed as an expression is never typed :string" do
+      built = index(~S|      <.slot_row milestone={@m} class={["a", @b && "c"]} />|)
+
+      after_src =
+        apply_refactor(@subject, slot_component(~S|<span class={@class}>{@milestone}</span>|),
+          enabled: true,
+          prepared: built
+        )
+
+      assert after_src =~ "attr :class, :any, required: true"
+      refute after_src =~ "attr :class, :string"
+    end
+
+    test "an attribute every call site passes as a literal keeps its inferred type" do
+      built = index(~S|      <.slot_row milestone={@m} class="a b" />|)
+
+      after_src =
+        apply_refactor(@subject, slot_component(~S|<span class={@class}>{@milestone}</span>|),
+          enabled: true,
+          prepared: built
+        )
+
+      assert after_src =~ "attr :class, :string, required: true"
+    end
+
     test "an unreferenced component keeps the body-only contract" do
       built = index(~S|      <.something_else x={@x} />|)
 

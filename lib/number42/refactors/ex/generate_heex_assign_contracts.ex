@@ -229,9 +229,14 @@ defmodule Number42.Refactors.Ex.GenerateHeexAssignContracts do
       opaque?: "" in names,
       global?: Enum.any?(names, &global_attr?/1),
       attrs: names |> Enum.reject(&ignored_attr?/1) |> MapSet.new(),
+      exprs: expr_attr_names(attrs),
       slots: MapSet.new(slots, fn {:element, ":" <> name, _, _, _} -> name end),
       children?: content != []
     }
+  end
+
+  defp expr_attr_names(attrs) do
+    for {name, {:expr, _code}} <- attrs, not ignored_attr?(name), into: MapSet.new(), do: name
   end
 
   # `<:back>…</:back>` fills a named slot: it is a child of the call, never an
@@ -253,6 +258,7 @@ defmodule Number42.Refactors.Ex.GenerateHeexAssignContracts do
     %{
       attrs: facts.attrs,
       always: facts.attrs,
+      exprs: facts.exprs,
       slots: facts.slots,
       slots_always: facts.slots,
       opaque?: facts.opaque?,
@@ -265,6 +271,7 @@ defmodule Number42.Refactors.Ex.GenerateHeexAssignContracts do
     %{
       attrs: MapSet.union(acc.attrs, facts.attrs),
       always: MapSet.intersection(acc.always, facts.attrs),
+      exprs: MapSet.union(acc.exprs, facts.exprs),
       slots: MapSet.union(acc.slots, facts.slots),
       slots_always: MapSet.intersection(acc.slots_always, facts.slots),
       opaque?: acc.opaque? or facts.opaque?,
@@ -358,12 +365,16 @@ defmodule Number42.Refactors.Ex.GenerateHeexAssignContracts do
     }
   end
 
-  # A `<:name>` at any call site settles it: the assign is a slot, whatever the
-  # body's usage looked like.
+  # What the call sites do outranks what the body looks like: `render_slot/1`
+  # also accepts a slot entry handed over as an ordinary attribute, and a
+  # `:string` guess is wrong the moment one caller passes a class list.
   defp declared_type(name, read, facts) do
-    if MapSet.member?(facts.slots, name),
-      do: :slot,
-      else: Map.get_lazy(read, name, fn -> attr_type_signal(name) end)
+    cond do
+      MapSet.member?(facts.slots, name) -> :slot
+      MapSet.member?(facts.exprs, name) -> :any
+      MapSet.member?(facts.attrs, name) -> attr_type_signal(name)
+      true -> Map.get_lazy(read, name, fn -> attr_type_signal(name) end)
+    end
   end
 
   # `inner_block` is filled by the call's own children, a named slot by its
