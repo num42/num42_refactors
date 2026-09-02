@@ -521,6 +521,77 @@ defmodule Number42.Refactors.Ex.GenerateHeexAssignContractsTest do
       assert after_src =~ "attr :design, :any, required: true\n  attr :milestone"
     end
 
+    test "a named slot is declared as a slot, not an attribute" do
+      built = index(~S|      <.slot_row milestone={@m}><:back>go</:back></.slot_row>|)
+
+      after_src =
+        apply_refactor(@subject, slot_component("<span>{@milestone}{render_slot(@back)}</span>"),
+          enabled: true,
+          prepared: built
+        )
+
+      assert after_src =~ "slot :back, required: true"
+      refute after_src =~ "attr :back"
+    end
+
+    test "a slot only some call sites fill is not required" do
+      built =
+        index("""
+              <.slot_row milestone={@m}><:back>go</:back></.slot_row>
+              <.slot_row milestone={@m} />
+        """)
+
+      after_src =
+        apply_refactor(@subject, slot_component("<span>{@milestone}{render_slot(@back)}</span>"),
+          enabled: true,
+          prepared: built
+        )
+
+      assert after_src =~ "slot :back\n"
+      refute after_src =~ "slot :back, required: true"
+    end
+
+    test "a slot a caller fills but the body never renders is still declared" do
+      built = index(~S|      <.slot_row milestone={@m}><:footer>x</:footer></.slot_row>|)
+
+      after_src =
+        apply_refactor(@subject, slot_component("<span>{@milestone}</span>"),
+          enabled: true,
+          prepared: built
+        )
+
+      assert after_src =~ "slot :footer, required: true"
+    end
+
+    test "a slot entry does not count as inner_block content" do
+      built = index(~S|      <.slot_row milestone={@m}><:back>go</:back></.slot_row>|)
+
+      after_src =
+        apply_refactor(
+          @subject,
+          slot_component("<span>{@milestone}{render_slot(@inner_block)}</span>"),
+          enabled: true,
+          prepared: built
+        )
+
+      assert after_src =~ "slot :inner_block\n"
+      refute after_src =~ "slot :inner_block, required: true"
+    end
+
+    test "HEEx directives are never declared" do
+      built = index(~S|      <.slot_row :if={@show} :let={row} milestone={@m} />|)
+
+      after_src =
+        apply_refactor(@subject, slot_component("<span>{@milestone}</span>"),
+          enabled: true,
+          prepared: built
+        )
+
+      refute after_src =~ "::if"
+      refute after_src =~ "::let"
+      assert after_src =~ "attr :milestone, :any, required: true"
+    end
+
     test "an unreferenced component keeps the body-only contract" do
       built = index(~S|      <.something_else x={@x} />|)
 

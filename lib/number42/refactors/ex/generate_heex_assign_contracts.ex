@@ -223,14 +223,21 @@ defmodule Number42.Refactors.Ex.GenerateHeexAssignContracts do
 
   defp site_facts(attrs, children) do
     names = Enum.map(attrs, fn {name, _value} -> name end)
+    {slots, content} = Enum.split_with(children, &slot_entry?/1)
 
     %{
       opaque?: "" in names,
       global?: Enum.any?(names, &global_attr?/1),
       attrs: names |> Enum.reject(&ignored_attr?/1) |> MapSet.new(),
-      children?: children != []
+      slots: MapSet.new(slots, fn {:element, ":" <> name, _, _, _} -> name end),
+      children?: content != []
     }
   end
+
+  # `<:back>…</:back>` fills a named slot: it is a child of the call, never an
+  # attribute of it, and it is not `inner_block` content either.
+  defp slot_entry?({:element, ":" <> _name, _attrs, _children, _meta}), do: true
+  defp slot_entry?(_node), do: false
 
   # `:let`/`:if`/`:for` are HEEx directives, not attributes of the component.
   defp ignored_attr?(name),
@@ -246,6 +253,8 @@ defmodule Number42.Refactors.Ex.GenerateHeexAssignContracts do
     %{
       attrs: facts.attrs,
       always: facts.attrs,
+      slots: facts.slots,
+      slots_always: facts.slots,
       opaque?: facts.opaque?,
       global?: facts.global?,
       children_always?: facts.children?
@@ -256,6 +265,8 @@ defmodule Number42.Refactors.Ex.GenerateHeexAssignContracts do
     %{
       attrs: MapSet.union(acc.attrs, facts.attrs),
       always: MapSet.intersection(acc.always, facts.attrs),
+      slots: MapSet.union(acc.slots, facts.slots),
+      slots_always: MapSet.intersection(acc.slots_always, facts.slots),
       opaque?: acc.opaque? or facts.opaque?,
       global?: acc.global? or facts.global?,
       children_always?: acc.children_always? and facts.children?
@@ -330,24 +341,35 @@ defmodule Number42.Refactors.Ex.GenerateHeexAssignContracts do
     read
     |> Map.keys()
     |> Enum.concat(MapSet.to_list(facts.attrs))
+    |> Enum.concat(MapSet.to_list(facts.slots))
     |> Enum.uniq()
     |> Enum.map(&declaration(&1, read, facts))
     |> Enum.concat(global_decl(facts))
   end
 
   defp declaration(name, read, facts) do
-    type = Map.get_lazy(read, name, fn -> attr_type_signal(name) end)
+    type = declared_type(name, read, facts)
 
     %{
       name: name,
       type: type,
       required?: required?(name, type, facts),
-      from_caller?: MapSet.member?(facts.attrs, name)
+      from_caller?: MapSet.member?(facts.attrs, name) or MapSet.member?(facts.slots, name)
     }
   end
 
-  # `inner_block` is passed as the call's children, not as an attribute.
+  # A `<:name>` at any call site settles it: the assign is a slot, whatever the
+  # body's usage looked like.
+  defp declared_type(name, read, facts) do
+    if MapSet.member?(facts.slots, name),
+      do: :slot,
+      else: Map.get_lazy(read, name, fn -> attr_type_signal(name) end)
+  end
+
+  # `inner_block` is filled by the call's own children, a named slot by its
+  # `<:name>` entry — neither ever arrives as an attribute.
   defp required?("inner_block", :slot, facts), do: facts.children_always?
+  defp required?(name, :slot, facts), do: MapSet.member?(facts.slots_always, name)
   defp required?(name, _type, facts), do: MapSet.member?(facts.always, name)
 
   # A caller passing `phx-click` or `data-*` needs somewhere for those to land,
@@ -644,6 +666,12 @@ defmodule Number42.Refactors.Ex.GenerateHeexAssignContracts do
     |> Macro.prewalker()
     |> Enum.flat_map(&assign_from_node(&1, attr_signal))
   end
+
+  # `render_slot(@back)` names a slot, not an attribute — the only signal the
+  # body gives for a named slot.
+  defp assign_from_node({:render_slot, _, [{:@, _, [{name, _, ctx}]} | _]}, _attr_signal)
+       when is_atom(name) and is_atom(ctx),
+       do: [{name, :slot}]
 
   # Field access on an assign: `@user.name` -> :map signal.
   defp assign_from_node({{:., _, [{:@, _, [{name, _, ctx}]}, field]}, _, []}, _attr_signal)
