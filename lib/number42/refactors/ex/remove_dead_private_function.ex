@@ -138,8 +138,8 @@ defmodule Number42.Refactors.Ex.RemoveDeadPrivateFunction do
   def reformat_after?, do: true
 
   @impl Number42.Refactors.Refactor
-  def transform(source, _opts) do
-    Sourceror.parse_string(source) |> apply_to_parse_result(source)
+  def transform(source, opts) do
+    Sourceror.parse_string(source) |> apply_to_parse_result(source, Keyword.get(opts, :path))
   end
 
   # A deleted `defp` may have been the sole user of an `alias`/`import only:`
@@ -147,14 +147,14 @@ defmodule Number42.Refactors.Ex.RemoveDeadPrivateFunction do
   # rewritten source — re-parsing after the deletion so the now-removed `defp`
   # no longer counts as a use. No-op when nothing was deleted (the directive is
   # still live) or when the source is unchanged.
-  defp apply_to_parse_result({:ok, ast}, source) do
+  defp apply_to_parse_result({:ok, ast}, source, path) do
     case ast |> first_module_patches() |> patch_or_passthrough(source) do
       ^source -> source
-      rewritten -> prune_dead_directives(rewritten)
+      rewritten -> prune_dead_directives(rewritten, path: path)
     end
   end
 
-  defp apply_to_parse_result({:error, _}, source), do: source
+  defp apply_to_parse_result({:error, _}, source, _path), do: source
 
   # Delete every dead private in the first module that has any — all of
   # them in one pass. `reachable_defs/2` already gives the full

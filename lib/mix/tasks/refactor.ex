@@ -176,7 +176,9 @@ defmodule Mix.Tasks.Refactor do
     Number42.Refactors.Ex.ExtractStringLiteral,
     Number42.Refactors.Ex.HoistHardcodedConfig
   ]
-  @test_glob "test/**/*.{ex,exs}"
+  # An umbrella keeps its tests under `apps/<app>/test/`, so anchoring the gate at
+  # the repo root would leave every child app's tests ungated.
+  @test_globs ["test/**/*.{ex,exs}", "**/test/**/*.{ex,exs}"]
 
   @config_path ".refactor.exs"
   @switches [
@@ -785,12 +787,15 @@ defmodule Mix.Tasks.Refactor do
   end
 
   defp test_globs(%{enable_in_tests: true}), do: []
-  defp test_globs(_config), do: [@test_glob]
+  defp test_globs(_config), do: @test_globs
 
   defp engine_opts_for_file(path, engine_opts) do
     base_skipped = Keyword.fetch!(engine_opts, :skipped_modules)
     config = Keyword.get(engine_opts, :project_config, %{})
-    Keyword.put(engine_opts, :skipped_modules, skipped_for_file(path, base_skipped, config))
+
+    engine_opts
+    |> Keyword.put(:skipped_modules, skipped_for_file(path, base_skipped, config))
+    |> Keyword.put(:path, path)
   end
 
   defp module_globbed_out?(module, path, engine_opts) do

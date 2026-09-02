@@ -729,7 +729,7 @@ defmodule Number42.Refactors.Ex.ExtractToPublicComponent do
         source
         |> rewrite_sigils(file_plans)
         |> ensure_aliases(file_plans)
-        |> prune_dead_directives(index)
+        |> prune_dead_directives_with_index(index)
     end
   end
 
@@ -742,7 +742,7 @@ defmodule Number42.Refactors.Ex.ExtractToPublicComponent do
   # single short token (a bare `import Foo.Bar` exposing snake_case components,
   # an `import …, only: […]`) is left alone — its exported names are not
   # enumerable here, so we cannot prove it dead.
-  defp prune_dead_directives(source, index) do
+  defp prune_dead_directives_with_index(source, index) do
     case dead_directive_lines(source, index) do
       [] -> source
       dead -> drop_lines(source, dead)

@@ -279,19 +279,19 @@ defmodule Number42.Refactors.Analysis.AstHelpers do
   a live reference, so the directive is still pruned. Source that does not
   parse passes through unchanged.
   """
-  @spec prune_dead_directives(String.t()) :: String.t()
-  def prune_dead_directives(source) do
-    case dead_directive_lines(source) do
+  @spec prune_dead_directives(String.t(), keyword()) :: String.t()
+  def prune_dead_directives(source, opts \\ []) do
+    case dead_directive_lines(source, Keyword.get(opts, :path)) do
       [] -> source
       lines -> drop_lines(source, lines)
     end
   end
 
-  defp dead_directive_lines(source) do
+  defp dead_directive_lines(source, path) do
     case Sourceror.parse_string(source) do
       {:ok, ast} ->
         directives = top_level_directive_nodes(ast)
-        usage = name_usage_lines(ast)
+        usage = ast |> name_usage_lines() |> add_sibling_template_usage(path)
 
         directives
         |> Enum.filter(&directive_dead?(&1, usage))
@@ -350,6 +350,41 @@ defmodule Number42.Refactors.Analysis.AstHelpers do
     |> Enum.reduce(%{}, fn {name, line}, acc ->
       Map.update(acc, name, MapSet.new([line]), &MapSet.put(&1, line))
     end)
+  end
+
+  # A Phoenix module's markup often lives in a sibling `.heex` file, so an
+  # alias used only there looks dead in the `.ex` alone — pruning it breaks
+  # the template. Every identifier in those files counts as a use; the line
+  # is `0`, which no directive occupies, so it always reads as off-line.
+  defp add_sibling_template_usage(usage, nil), do: usage
+
+  defp add_sibling_template_usage(usage, path) do
+    path
+    |> sibling_template_files()
+    |> Enum.flat_map(&template_name_tokens/1)
+    |> Enum.reduce(usage, fn name, acc ->
+      Map.update(acc, name, MapSet.new([0]), &MapSet.put(&1, 0))
+    end)
+  end
+
+  defp sibling_template_files(path) do
+    base = Path.rootname(Path.basename(path))
+    dir = Path.dirname(path)
+
+    Path.wildcard(Path.join(dir, "*.heex")) ++
+      Path.wildcard(Path.join([dir, base <> "_html", "*.heex"]))
+  end
+
+  defp template_name_tokens(file) do
+    case File.read(file) do
+      {:ok, contents} ->
+        ~r/[A-Za-z_][A-Za-z0-9_]*[?!]?/
+        |> Regex.scan(contents)
+        |> Enum.map(fn [token] -> token end)
+
+      {:error, _} ->
+        []
+    end
   end
 
   defp ast_name_lines(ast) do

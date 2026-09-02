@@ -214,6 +214,9 @@ defmodule Number42.Refactors.Engine do
     |> Keyword.get(module, [])
     |> Keyword.put(:dry_run, dry_run?)
     |> Keyword.put(:project_config, project_config)
+    # The file's own path — a refactor pruning directives needs it to see the
+    # sibling `.heex` templates that reference them.
+    |> Keyword.put(:path, Keyword.get(opts, :path))
   end
 
   defp filter_only(modules, []), do: modules

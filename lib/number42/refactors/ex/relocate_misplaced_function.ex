@@ -271,7 +271,7 @@ defmodule Number42.Refactors.Ex.RelocateMisplacedFunction do
     if Keyword.get(opts, :enabled, false) do
       Keyword.get(opts, :prepared)
       |> rewrite_with_plan_or_passthrough(source)
-      |> prune_dead_directives()
+      |> prune_dead_directives(path: Keyword.get(opts, :path))
     else
       source
     end

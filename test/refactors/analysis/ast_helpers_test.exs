@@ -1526,6 +1526,46 @@ defmodule Number42.Refactors.Analysis.AstHelpersTest do
       assert AstHelpers.prune_dead_directives(source) =~ "import Foo.Bar"
     end
 
+    test "keeps an alias used only by the co-located `.html.heex` template" do
+      dir = Path.join(System.tmp_dir!(), "prune_heex_#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      on_exit(fn -> File.rm_rf!(dir) end)
+
+      path = Path.join(dir, "show.ex")
+      File.write!(Path.join(dir, "show.html.heex"), "<p>{ViewIds.preview?(@id)}</p>\n")
+
+      source = """
+      defmodule M do
+        alias WhkPortal.Construction.ViewIds
+
+        def render(assigns), do: assigns
+      end
+      """
+
+      assert AstHelpers.prune_dead_directives(source, path: path) =~
+               "alias WhkPortal.Construction.ViewIds"
+    end
+
+    test "still prunes an alias no sibling template mentions" do
+      dir = Path.join(System.tmp_dir!(), "prune_heex_#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      on_exit(fn -> File.rm_rf!(dir) end)
+
+      path = Path.join(dir, "show.ex")
+      File.write!(Path.join(dir, "show.html.heex"), "<p>nothing here</p>\n")
+
+      source = """
+      defmodule M do
+        alias WhkPortal.Construction.ViewIds
+
+        def render(assigns), do: assigns
+      end
+      """
+
+      refute AstHelpers.prune_dead_directives(source, path: path) =~
+               "alias WhkPortal.Construction.ViewIds"
+    end
+
     test "leaves a plain `import Mod` alone (functions can't be enumerated)" do
       source = """
       defmodule M do
