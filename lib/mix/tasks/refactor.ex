@@ -346,7 +346,7 @@ defmodule Mix.Tasks.Refactor do
       |> Enum.reject(&(not File.exists?(&1)))
       |> Enum.flat_map(fn path ->
         source = File.read!(path)
-        rewritten = Engine.apply_one(module, source, engine_opts)
+        rewritten = Engine.apply_one(module, source, engine_opts_for_file(path, engine_opts))
 
         cond do
           rewritten == source ->
