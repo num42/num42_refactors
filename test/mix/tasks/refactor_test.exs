@@ -108,6 +108,27 @@ defmodule Mix.Tasks.RefactorTest do
       for module <- @literal_hoisters, do: refute(module in skipped)
     end
 
+    test "enable_in_tests: false skips the literal hoisters on umbrella test paths" do
+      config = %{enable_in_tests: false}
+
+      for path <- [
+            "apps/my_app/test/x_test.exs",
+            "apps/my_app/test/support/case.ex",
+            "apps/my_app_web/test/live/x_test.exs"
+          ] do
+        skipped = Refactor.skipped_for_file(path, [], config)
+
+        for module <- @literal_hoisters, do: assert(module in skipped)
+      end
+    end
+
+    test "enable_in_tests: false leaves umbrella lib paths alone" do
+      config = %{enable_in_tests: false}
+      skipped = Refactor.skipped_for_file("apps/my_app/lib/my_app/x.ex", [], config)
+
+      for module <- @literal_hoisters, do: refute(module in skipped)
+    end
+
     test "enable_in_tests: true leaves every literal hoister active on a test path" do
       config = %{enable_in_tests: true}
       skipped = Refactor.skipped_for_file("test/x_test.exs", [], config)
