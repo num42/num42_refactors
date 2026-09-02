@@ -334,4 +334,43 @@ defmodule Number42.Refactors.Ex.HeexAttributeBundleToComponentTest do
       assert result =~ "defp danger_panel(assigns)"
     end
   end
+
+  describe "HEEx directives stay at the call site" do
+    @directive_source """
+    defmodule MyApp.Page do
+      use Phoenix.Component
+
+      def render(assigns) do
+        ~H\"\"\"
+        <div :if={@discount?} class="rowline gap">
+          <p>{@first}</p>
+        </div>
+        <div :if={@discount?} class="rowline gap">
+          <p>{@second}</p>
+        </div>
+        \"\"\"
+      end
+    end
+    """
+
+    test "the directive is not forwarded as an assign" do
+      out = apply_refactor(@subject, @directive_source, @enabled)
+
+      refute out =~ "@:if"
+      refute out =~ "attr ::if"
+    end
+
+    test "each call site keeps its own directive" do
+      out = apply_refactor(@subject, @directive_source, @enabled)
+
+      assert out =~ ~s|<.rowline :if={@discount?}>|
+    end
+
+    test "the extracted component carries no directive" do
+      out = apply_refactor(@subject, @directive_source, @enabled)
+
+      [_before, component] = String.split(out, "defp rowline(assigns) do")
+      refute component =~ ":if"
+    end
+  end
 end

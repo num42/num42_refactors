@@ -205,7 +205,7 @@ defmodule Number42.Refactors.Ex.HeexAttributeBundleToComponent do
          true <- Enum.all?(nodes, &safe_body?/1),
          {:ok, name} <- shell_name(attrs),
          false <- MapSet.member?(existing, name) do
-      Map.merge(group, %{name: name, tag: tag, attrs: attrs, sigil: sigil})
+      Map.merge(group, %{name: name, tag: tag, attrs: shell_attrs(attrs), sigil: sigil})
     else
       _ -> nil
     end
@@ -219,11 +219,22 @@ defmodule Number42.Refactors.Ex.HeexAttributeBundleToComponent do
     |> Enum.reverse()
   end
 
-  # Shell identity: tag + the full attribute list (names + values,
-  # static or dynamic). Children are excluded — they are the hole.
-  defp shell_fingerprint({:element, tag, attrs, _children, _meta}), do: {tag, attrs}
+  # Shell identity: tag + the full attribute list (names + values, static or
+  # dynamic). Children are excluded — they are the hole — and so are
+  # directives, which belong to the call site.
+  defp shell_fingerprint({:element, tag, attrs, _children, _meta}),
+    do: {tag, shell_attrs(attrs)}
 
-  defp attr_count({:element, _, attrs, _, _}), do: length(attrs)
+  defp attr_count({:element, _, attrs, _, _}), do: attrs |> shell_attrs() |> length()
+
+  # `:if`/`:for`/`:let` are per-call-site control flow, not part of the shell:
+  # forwarding one would make it an `@:if` assign the component cannot name.
+  defp shell_attrs(attrs), do: Enum.reject(attrs, &directive?/1)
+
+  defp directives({:element, _tag, attrs, _children, _meta}),
+    do: Enum.filter(attrs, &directive?/1)
+
+  defp directive?({name, _value}), do: String.starts_with?(name, ":")
 
   # --- guards ---------------------------------------------------------
 
@@ -306,7 +317,7 @@ defmodule Number42.Refactors.Ex.HeexAttributeBundleToComponent do
 
   defp splice_call(body, node, {s, e}, name, forwarded) do
     inner = inner_content(node, body, s, e)
-    call = render_call(name, forwarded, inner)
+    call = render_call(name, directives(node) ++ forwarded, inner)
     binary_part(body, 0, s) <> call <> binary_part(body, e, byte_size(body) - e)
   end
 
@@ -369,10 +380,16 @@ defmodule Number42.Refactors.Ex.HeexAttributeBundleToComponent do
     end)
   end
 
-  defp render_call(name, forwarded, inner) do
-    attrs = Enum.map_join(forwarded, "", fn {n, code} -> " #{n}={#{code}}" end)
-    "<.#{name}#{attrs}>#{inner}</.#{name}>"
+  defp render_call(name, attrs, inner) do
+    rendered = Enum.map_join(attrs, "", &render_call_attr/1)
+    "<.#{name}#{rendered}>#{inner}</.#{name}>"
   end
+
+  # Directives arrive as parsed `{:expr, _}`/`{:string, _}` values, forwarded
+  # attributes as the bare expression source.
+  defp render_call_attr({name, {:expr, code}}), do: " #{name}={#{code}}"
+  defp render_call_attr({name, {:string, value}}), do: ~s( #{name}="#{value}")
+  defp render_call_attr({name, code}) when is_binary(code), do: " #{name}={#{code}}"
 
   defp render_sigil(new_body, indent) do
     indented =
