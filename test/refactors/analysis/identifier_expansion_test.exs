@@ -713,6 +713,10 @@ defmodule Number42.Refactors.Analysis.IdentifierExpansionTest do
       assert "kibi" = IdentifierExpansion.derive_constant_name(1024, %{})
     end
 
+    test "1048576 → mebi" do
+      assert "mebi" = IdentifierExpansion.derive_constant_name(1_048_576, %{})
+    end
+
     test "255 → max_byte" do
       assert "max_byte" = IdentifierExpansion.derive_constant_name(255, %{})
     end

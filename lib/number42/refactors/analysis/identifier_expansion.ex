@@ -145,7 +145,8 @@ defmodule Number42.Refactors.Analysis.IdentifierExpansion do
     255 => "max_byte",
     360 => "degrees_full",
     1024 => "kibi",
-    65_535 => "max_word"
+    65_535 => "max_word",
+    1_048_576 => "mebi"
   }
 
   # Well-known integers whose name only holds in a temporal or relative
@@ -799,7 +800,8 @@ defmodule Number42.Refactors.Analysis.IdentifierExpansion do
      fall through.
   4. Well-known values — floats (`pi`, `e`, … within a tolerance) and
      context-free integers whose meaning never shifts (`1024 → kibi`,
-     `255 → max_byte`, `360 → degrees_full`, `65535 → max_word`).
+     `1048576 → mebi`, `255 → max_byte`, `360 → degrees_full`,
+     `65535 → max_word`).
   5. Context-dependent well-known values — `60 → seconds_per_minute`,
      `100 → percent`, `1000 → kilo`, `3600 → seconds_per_hour`,
      `86400 → seconds_per_day`, and millisecond multiples
