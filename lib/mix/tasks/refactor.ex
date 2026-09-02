@@ -529,8 +529,28 @@ defmodule Mix.Tasks.Refactor do
   @spec git_porcelain_paths(Path.t()) :: MapSet.t(String.t())
   def git_porcelain_paths(cwd \\ ".") do
     case System.cmd("git", ["status", "--porcelain"], cd: cwd, stderr_to_stdout: true) do
-      {output, 0} -> parse_porcelain(output)
+      {output, 0} -> output |> parse_porcelain() |> rebase_on_cwd(git_prefix(cwd))
       {output, _} -> Mix.raise("--auto: git status failed:\n#{output}")
+    end
+  end
+
+  # Porcelain reports repo-root-relative paths while the input paths and
+  # the later `git add` are cwd-relative — they only coincide when the
+  # project is the git root, so a project checked out below it (umbrella
+  # in a monorepo) produced unstageable pathspecs.
+  defp rebase_on_cwd(paths, ""), do: paths
+
+  defp rebase_on_cwd(paths, prefix) do
+    paths
+    |> Enum.filter(&String.starts_with?(&1, prefix))
+    |> Enum.map(&String.replace_prefix(&1, prefix, ""))
+    |> MapSet.new()
+  end
+
+  defp git_prefix(cwd) do
+    case System.cmd("git", ["rev-parse", "--show-prefix"], cd: cwd, stderr_to_stdout: true) do
+      {output, 0} -> String.trim(output)
+      {output, _} -> Mix.raise("--auto: git rev-parse failed:\n#{output}")
     end
   end
 

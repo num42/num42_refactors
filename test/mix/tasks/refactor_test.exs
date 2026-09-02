@@ -287,6 +287,51 @@ defmodule Mix.Tasks.RefactorTest do
     end
   end
 
+  describe "stage_paths/3 when the project is not the git root" do
+    setup do
+      repo =
+        Path.join(System.tmp_dir!(), "refactor_subdir_#{System.unique_integer([:positive])}")
+
+      project = Path.join(repo, "umbrella")
+
+      File.mkdir_p!(project)
+      git!(repo, ["init", "-q"])
+      git!(repo, ["config", "user.email", "test@example.com"])
+      git!(repo, ["config", "user.name", "Test"])
+
+      File.write!(Path.join(project, "a.ex"), "defmodule A do\nend\n")
+      git!(repo, ["add", "umbrella/a.ex"])
+      git!(repo, ["commit", "-q", "-m", "init"])
+
+      on_exit(fn -> File.rm_rf!(repo) end)
+      {:ok, project: project, repo: repo}
+    end
+
+    test "returns paths relative to the project, not the git root", %{project: project} do
+      baseline = Refactor.git_porcelain_paths(project)
+      assert baseline == MapSet.new()
+
+      File.write!(Path.join(project, "a.ex"), "defmodule A do\n  def x, do: 1\nend\n")
+      File.write!(Path.join(project, "shared.ex"), "defmodule Shared do\nend\n")
+
+      staged = Refactor.stage_paths(["a.ex"], baseline, project)
+
+      assert "shared.ex" in staged
+      refute "umbrella/shared.ex" in staged
+    end
+
+    test "ignores changes outside the project directory", %{project: project, repo: repo} do
+      baseline = Refactor.git_porcelain_paths(project)
+
+      File.write!(Path.join(repo, "sibling.ex"), "defmodule Sibling do\nend\n")
+      File.write!(Path.join(project, "shared.ex"), "defmodule Shared do\nend\n")
+
+      staged = Refactor.stage_paths([], baseline, project)
+
+      assert staged == ["shared.ex"]
+    end
+  end
+
   defp git!(repo, args) do
     case System.cmd("git", args, cd: repo, stderr_to_stdout: true) do
       {_, 0} -> :ok
