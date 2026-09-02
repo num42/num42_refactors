@@ -336,12 +336,16 @@ defmodule Number42.Refactors.Engine do
     end
   end
 
+  # `prepare/1` builds a corpus-wide plan, so the per-file `:path` must stay
+  # out of the key: keying on it rebuilt the whole plan once per file and put
+  # a copy of it into the never-collected literal area on every miss.
   defp prepared_for(module, opts) do
-    key = {__MODULE__, :prepared, module, opts}
+    prepare_opts = Keyword.delete(opts, :path)
+    key = {__MODULE__, :prepared, module, prepare_opts}
 
     case :persistent_term.get(key, :__miss__) do
       :__miss__ ->
-        result = module.prepare(opts)
+        result = module.prepare(prepare_opts)
         :persistent_term.put(key, result)
         result
 
