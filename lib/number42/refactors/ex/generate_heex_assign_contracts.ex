@@ -300,7 +300,7 @@ defmodule Number42.Refactors.Ex.GenerateHeexAssignContracts do
     |> Enum.group_by(fn {_def_node, fn_name} -> fn_name end)
     |> Enum.flat_map(fn {fn_name, clauses} ->
       derived = clauses |> Enum.flat_map(&assigned_in_def/1) |> MapSet.new()
-      own = Map.get(declared, fn_name, MapSet.new())
+      own = Map.get(declared, fn_name, %{names: MapSet.new(), global?: false})
       missing_for_component(fn_name, first_lines, own, derived, source, index)
     end)
   end
@@ -313,14 +313,14 @@ defmodule Number42.Refactors.Ex.GenerateHeexAssignContracts do
   end
 
   defp emit_for_component(fn_name, first_lines, declared, derived, source, facts) do
-    declared = MapSet.new(declared, &Atom.to_string/1)
+    names = MapSet.new(declared.names, &Atom.to_string/1)
     derived = MapSet.new(derived, &Atom.to_string/1)
 
     missing =
       fn_name
       |> used_assigns(source)
       |> contract(facts)
-      |> Enum.reject(&skip_decl?(&1, declared, derived))
+      |> Enum.reject(&skip_decl?(&1, names, derived, declared.global?))
       |> Enum.sort_by(& &1.name)
 
     case missing do
@@ -331,14 +331,29 @@ defmodule Number42.Refactors.Ex.GenerateHeexAssignContracts do
 
   # An assign the body derives itself is not a caller input — unless a caller
   # does pass it, in which case the contract has to admit it anyway.
-  defp skip_decl?(%{name: name, from_caller?: from_caller?}, declared, derived),
-    do: MapSet.member?(declared, name) or (MapSet.member?(derived, name) and not from_caller?)
+  #
+  # An attribute the body never reads is left undeclared when the component
+  # carries a `:global` bundle: declaring it moves the value out of `@rest`,
+  # and a `{@rest}` splat then silently stops rendering it.
+  defp skip_decl?(decl, declared, derived, global?) do
+    %{name: name, from_caller?: from_caller?, read?: read?} = decl
+
+    MapSet.member?(declared, name) or
+      (MapSet.member?(derived, name) and not from_caller?) or
+      (global? and from_caller? and not read?)
+  end
 
   # No observed caller: nothing can contradict the body, so the reads are the
   # contract — the original single-file behaviour.
   defp contract(used, :none) do
     Enum.map(used, fn {name, type} ->
-      %{name: Atom.to_string(name), type: type, required?: true, from_caller?: false}
+      %{
+        name: Atom.to_string(name),
+        type: type,
+        required?: true,
+        from_caller?: false,
+        read?: true
+      }
     end)
   end
 
@@ -361,7 +376,8 @@ defmodule Number42.Refactors.Ex.GenerateHeexAssignContracts do
       name: name,
       type: type,
       required?: required?(name, type, facts),
-      from_caller?: MapSet.member?(facts.attrs, name) or MapSet.member?(facts.slots, name)
+      from_caller?: MapSet.member?(facts.attrs, name) or MapSet.member?(facts.slots, name),
+      read?: Map.has_key?(read, name)
     }
   end
 
@@ -386,7 +402,7 @@ defmodule Number42.Refactors.Ex.GenerateHeexAssignContracts do
   # A caller passing `phx-click` or `data-*` needs somewhere for those to land,
   # and that is one `:global` attr rather than a declaration per name.
   defp global_decl(%{global?: true}),
-    do: [%{name: "rest", type: :global, required?: false, from_caller?: true}]
+    do: [%{name: "rest", type: :global, required?: false, from_caller?: false, read?: true}]
 
   defp global_decl(_facts), do: []
 
@@ -547,8 +563,8 @@ defmodule Number42.Refactors.Ex.GenerateHeexAssignContracts do
     index
   end
 
-  defp attach_expr({decl, _, [first | _]}, {index, pending}) when decl in [:attr, :slot],
-    do: {index, pending ++ List.wrap(decl_name(first))}
+  defp attach_expr({decl, _, [first | rest]}, {index, pending}) when decl in [:attr, :slot],
+    do: {index, pending ++ Enum.map(List.wrap(decl_name(first)), &{&1, global_type?(rest)})}
 
   defp attach_expr({def_kind, _, [head, [{_do, _body}]]}, {index, pending})
        when def_kind in [:def, :defp] do
@@ -560,8 +576,21 @@ defmodule Number42.Refactors.Ex.GenerateHeexAssignContracts do
 
   defp attach_expr(_expr, state), do: state
 
-  defp claim(index, name, pending),
-    do: Map.update(index, name, MapSet.new(pending), &MapSet.union(&1, MapSet.new(pending)))
+  defp global_type?([{:__block__, _, [:global]} | _]), do: true
+  defp global_type?([:global | _]), do: true
+  defp global_type?(_rest), do: false
+
+  defp claim(index, name, pending) do
+    entry = %{
+      names: MapSet.new(pending, fn {decl_name, _global?} -> decl_name end),
+      global?: Enum.any?(pending, fn {_decl_name, global?} -> global? end)
+    }
+
+    Map.update(index, name, entry, &merge_declared(&1, entry))
+  end
+
+  defp merge_declared(a, b),
+    do: %{names: MapSet.union(a.names, b.names), global?: a.global? or b.global?}
 
   defp decl_name({:__block__, _, [name]}) when is_atom(name), do: name
   defp decl_name(name) when is_atom(name), do: name

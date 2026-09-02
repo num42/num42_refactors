@@ -630,6 +630,39 @@ defmodule Number42.Refactors.Ex.GenerateHeexAssignContractsTest do
       assert after_src =~ "attr :class, :string, required: true"
     end
 
+    test "a :global bundle keeps its attributes — declaring one would steal it" do
+      built = index(~S|      <.slot_row milestone={@m} id="registration_form" />|)
+
+      before_source = ~S'''
+      defmodule MyView do
+        attr :rest, :global
+
+        def slot_row(assigns) do
+          ~H"""
+          <form {@rest}>{@milestone}</form>
+          """
+        end
+      end
+      '''
+
+      after_src = apply_refactor(@subject, before_source, enabled: true, prepared: built)
+
+      refute after_src =~ "attr :id"
+      assert after_src =~ "attr :milestone, :any, required: true"
+    end
+
+    test "without a :global bundle a call-site attribute is still declared" do
+      built = index(~S|      <.slot_row milestone={@m} id="registration_form" />|)
+
+      after_src =
+        apply_refactor(@subject, slot_component("<span>{@milestone}</span>"),
+          enabled: true,
+          prepared: built
+        )
+
+      assert after_src =~ "attr :id, :string, required: true"
+    end
+
     test "an unreferenced component keeps the body-only contract" do
       built = index(~S|      <.something_else x={@x} />|)
 
