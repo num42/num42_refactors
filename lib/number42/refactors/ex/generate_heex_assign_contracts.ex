@@ -54,11 +54,29 @@ defmodule Number42.Refactors.Ex.GenerateHeexAssignContracts do
   - field access (`@user.name`) only       -> `:map`
   - anything weaker                         -> `:any`
 
-  Generated `attr`/`slot` are always `required: true`: the template
-  reads the assign unconditionally, so the safe contract is "must be
-  passed". Loosen to `default:` by hand where `assign_new` or a
-  fallback applies. We never touch or re-type a declaration that is
-  already present.
+  ## The contract must cover the callers, not just the body
+
+  Declaring a single `attr` switches Phoenix from "no validation" to
+  "this list is exhaustive", so a contract inferred from the template
+  alone turns every attribute a caller passes but the body never reads
+  into an `undefined attribute` warning. `prepare/1` therefore indexes
+  every `<.component …>` / `<Mod.component …>` call site in the corpus
+  — the configured sources plus the `.heex` templates beside them — and
+  the generated contract is the union of what the body reads and what
+  the callers pass.
+
+  `required: true` is likewise only emitted for an attribute that
+  *every* observed call site passes; one call site leaving it out would
+  make `required` a `missing required attribute` warning. With no call
+  site anywhere in the corpus there is no caller to contradict, and the
+  body's reads are taken as the contract.
+
+  A call site that spreads (`<.card {@rest}>`) hides its attribute
+  names, so the component is left alone entirely. A call site passing a
+  global attribute (`phx-click`, `data-*`) contributes `attr :rest,
+  :global` rather than a declaration per name.
+
+  We never touch or re-type a declaration that is already present.
 
   ## Idempotence
 
@@ -105,18 +123,144 @@ defmodule Number42.Refactors.Ex.GenerateHeexAssignContracts do
   def reformat_after?, do: true
 
   @impl Number42.Refactors.Refactor
+  def prepare(opts) do
+    case Keyword.get(opts, :source_files) do
+      files when is_list(files) and files != [] -> {:ok, build_call_index(files)}
+      _ -> :no_cache
+    end
+  end
+
+  @impl Number42.Refactors.Refactor
   def transform(source, opts) do
     if Keyword.get(opts, :enabled, false) do
-      Sourceror.parse_string(source) |> apply_or_passthrough(source)
+      Sourceror.parse_string(source)
+      |> apply_or_passthrough(source, Keyword.get(opts, :prepared))
     else
       source
     end
   end
 
-  defp apply_or_passthrough({:ok, ast}, source),
-    do: ast |> components_with_missing(source) |> insert_all(source)
+  defp apply_or_passthrough({:ok, ast}, source, index),
+    do: ast |> components_with_missing(source, index) |> insert_all(source)
 
-  defp apply_or_passthrough({:error, _}, source), do: source
+  defp apply_or_passthrough({:error, _}, source, _index), do: source
+
+  @doc """
+  The call-site index built by `prepare/1`, exposed for testing.
+
+  Maps a component's bare function name to what its callers pass:
+  `:attrs` is the union over all sites, `:always` the intersection,
+  `:opaque?` records a spread that hides the names.
+  """
+  @spec build_call_index([String.t()]) :: %{String.t() => map()}
+  def build_call_index(files) do
+    files
+    |> corpus_files()
+    |> Enum.reduce(%{}, fn path, acc ->
+      case File.read(path) do
+        {:ok, source} -> source |> call_sites(path) |> Enum.reduce(acc, &merge_site/2)
+        {:error, _} -> acc
+      end
+    end)
+  end
+
+  # A component is just as often called from the `.heex` beside its module as
+  # from another `~H` sigil, and those templates are not in `inputs`.
+  defp corpus_files(files) do
+    templates =
+      files
+      |> Enum.map(&Path.dirname/1)
+      |> Enum.uniq()
+      |> Enum.flat_map(
+        &(Path.wildcard(Path.join(&1, "*.heex")) ++ Path.wildcard(Path.join(&1, "*/*.heex")))
+      )
+
+    Enum.uniq(files ++ templates)
+  end
+
+  defp call_sites(source, path) do
+    source |> trees_in(path) |> Enum.flat_map(&sites_in_tree/1)
+  end
+
+  defp trees_in(source, path) do
+    if String.ends_with?(path, ".heex") do
+      case Tree.parse_body(source) do
+        {:ok, tree} -> [tree]
+        :error -> []
+      end
+    else
+      case Tree.from_source(source) do
+        {:ok, sigils} -> Enum.map(sigils, & &1.tree)
+        :error -> []
+      end
+    end
+  end
+
+  defp sites_in_tree(tree) do
+    Tree.walk(tree, [], fn
+      {:element, tag, attrs, children, _meta}, acc ->
+        case component_name(tag) do
+          nil -> acc
+          name -> [{name, site_facts(attrs, children)} | acc]
+        end
+
+      _node, acc ->
+        acc
+    end)
+  end
+
+  # `<.local />` and `<Some.Remote.fun />` are component calls; a plain HTML
+  # tag is not.
+  defp component_name("." <> rest), do: last_segment(rest)
+
+  defp component_name(tag) do
+    if Regex.match?(~r/\A[A-Z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)*\.[a-z_][A-Za-z0-9_]*[?!]?\z/, tag),
+      do: last_segment(tag),
+      else: nil
+  end
+
+  defp last_segment(tag), do: tag |> String.split(".") |> List.last()
+
+  defp site_facts(attrs, children) do
+    names = Enum.map(attrs, fn {name, _value} -> name end)
+
+    %{
+      opaque?: "" in names,
+      global?: Enum.any?(names, &global_attr?/1),
+      attrs: names |> Enum.reject(&ignored_attr?/1) |> MapSet.new(),
+      children?: children != []
+    }
+  end
+
+  # `:let`/`:if`/`:for` are HEEx directives, not attributes of the component.
+  defp ignored_attr?(name),
+    do: name == "" or String.starts_with?(name, ":") or global_attr?(name)
+
+  defp global_attr?(name), do: String.contains?(name, "-")
+
+  defp merge_site({name, facts}, index) do
+    Map.update(index, name, first_site(facts), &fold_site(&1, facts))
+  end
+
+  defp first_site(facts) do
+    %{
+      attrs: facts.attrs,
+      always: facts.attrs,
+      opaque?: facts.opaque?,
+      global?: facts.global?,
+      children_always?: facts.children?
+    }
+  end
+
+  defp fold_site(acc, facts) do
+    %{
+      attrs: MapSet.union(acc.attrs, facts.attrs),
+      always: MapSet.intersection(acc.always, facts.attrs),
+      opaque?: acc.opaque? or facts.opaque?,
+      global?: acc.global? or facts.global?,
+      children_always?: acc.children_always? and facts.children?
+    }
+  end
 
   # For each function-component, the list of missing declarations and
   # the source line its `def`/`defp` starts on (the insertion anchor).
@@ -129,8 +273,8 @@ defmodule Number42.Refactors.Ex.GenerateHeexAssignContracts do
   # scans every sigil enclosed by that name), and the block is anchored
   # at the earliest clause's line — across *all* clauses of that name,
   # including a leading dispatcher clause with no `~H` sigil of its own.
-  defp components_with_missing(ast, source) do
-    declared = declared_names(ast)
+  defp components_with_missing(ast, source, index) do
+    declared = declared_by_component(ast)
     first_lines = first_clause_lines(ast)
 
     ast
@@ -138,23 +282,88 @@ defmodule Number42.Refactors.Ex.GenerateHeexAssignContracts do
     |> Enum.group_by(fn {_def_node, fn_name} -> fn_name end)
     |> Enum.flat_map(fn {fn_name, clauses} ->
       derived = clauses |> Enum.flat_map(&assigned_in_def/1) |> MapSet.new()
-      missing_for_component(fn_name, first_lines, declared, derived, source)
+      own = Map.get(declared, fn_name, MapSet.new())
+      missing_for_component(fn_name, first_lines, own, derived, source, index)
     end)
   end
 
-  defp missing_for_component(fn_name, first_lines, declared, derived, source) do
-    used = used_assigns(fn_name, source)
+  defp missing_for_component(fn_name, first_lines, declared, derived, source, index) do
+    case call_facts(index, fn_name) do
+      :opaque -> []
+      facts -> emit_for_component(fn_name, first_lines, declared, derived, source, facts)
+    end
+  end
+
+  defp emit_for_component(fn_name, first_lines, declared, derived, source, facts) do
+    declared = MapSet.new(declared, &Atom.to_string/1)
+    derived = MapSet.new(derived, &Atom.to_string/1)
 
     missing =
-      used
-      |> Enum.reject(fn {name, _type} ->
-        MapSet.member?(declared, name) or MapSet.member?(derived, name)
-      end)
-      |> Enum.sort_by(fn {name, _type} -> name end)
+      fn_name
+      |> used_assigns(source)
+      |> contract(facts)
+      |> Enum.reject(&skip_decl?(&1, declared, derived))
+      |> Enum.sort_by(& &1.name)
 
     case missing do
       [] -> []
       decls -> [%{anchor_line: Map.fetch!(first_lines, fn_name), decls: decls}]
+    end
+  end
+
+  # An assign the body derives itself is not a caller input — unless a caller
+  # does pass it, in which case the contract has to admit it anyway.
+  defp skip_decl?(%{name: name, from_caller?: from_caller?}, declared, derived),
+    do: MapSet.member?(declared, name) or (MapSet.member?(derived, name) and not from_caller?)
+
+  # No observed caller: nothing can contradict the body, so the reads are the
+  # contract — the original single-file behaviour.
+  defp contract(used, :none) do
+    Enum.map(used, fn {name, type} ->
+      %{name: Atom.to_string(name), type: type, required?: true, from_caller?: false}
+    end)
+  end
+
+  defp contract(used, facts) do
+    read = Map.new(used, fn {name, type} -> {Atom.to_string(name), type} end)
+
+    read
+    |> Map.keys()
+    |> Enum.concat(MapSet.to_list(facts.attrs))
+    |> Enum.uniq()
+    |> Enum.map(&declaration(&1, read, facts))
+    |> Enum.concat(global_decl(facts))
+  end
+
+  defp declaration(name, read, facts) do
+    type = Map.get_lazy(read, name, fn -> attr_type_signal(name) end)
+
+    %{
+      name: name,
+      type: type,
+      required?: required?(name, type, facts),
+      from_caller?: MapSet.member?(facts.attrs, name)
+    }
+  end
+
+  # `inner_block` is passed as the call's children, not as an attribute.
+  defp required?("inner_block", :slot, facts), do: facts.children_always?
+  defp required?(name, _type, facts), do: MapSet.member?(facts.always, name)
+
+  # A caller passing `phx-click` or `data-*` needs somewhere for those to land,
+  # and that is one `:global` attr rather than a declaration per name.
+  defp global_decl(%{global?: true}),
+    do: [%{name: "rest", type: :global, required?: false, from_caller?: true}]
+
+  defp global_decl(_facts), do: []
+
+  defp call_facts(nil, _fn_name), do: :none
+
+  defp call_facts(index, fn_name) do
+    case Map.get(index, Atom.to_string(fn_name)) do
+      nil -> :none
+      %{opaque?: true} -> :opaque
+      facts -> facts
     end
   end
 
@@ -255,8 +464,12 @@ defmodule Number42.Refactors.Ex.GenerateHeexAssignContracts do
     body <> "\n"
   end
 
-  defp render_decl({name, :slot}), do: "slot :#{name}, required: true"
-  defp render_decl({name, type}), do: "attr :#{name}, :#{type}, required: true"
+  defp render_decl(%{name: name, type: :global}), do: "attr :#{name}, :global"
+  defp render_decl(%{name: name, type: :slot} = decl), do: "slot :#{name}#{suffix(decl)}"
+  defp render_decl(%{name: name, type: type} = decl), do: "attr :#{name}, :#{type}#{suffix(decl)}"
+
+  defp suffix(%{required?: true}), do: ", required: true"
+  defp suffix(_decl), do: ""
 
   defp anchor_indent(source, line) do
     source
@@ -280,15 +493,42 @@ defmodule Number42.Refactors.Ex.GenerateHeexAssignContracts do
 
   # --- declared names (existing attr/slot at module level) ---
 
-  defp declared_names(ast) do
+  # An `attr`/`slot` binds to the next function definition only, so a
+  # module-wide set would let one component's declaration silence a missing
+  # declaration on another.
+  defp declared_by_component(ast) do
     ast
     |> Macro.prewalker()
     |> Enum.flat_map(fn
-      {decl, _, [first | _]} when decl in [:attr, :slot] -> List.wrap(decl_name(first))
+      {:defmodule, _, [_name, [{_do, body}]]} -> [body]
       _ -> []
     end)
-    |> MapSet.new()
+    |> Enum.reduce(%{}, fn body, acc -> body |> body_exprs() |> attach_declarations(acc) end)
   end
+
+  defp body_exprs({:__block__, _, exprs}), do: exprs
+  defp body_exprs(expr), do: [expr]
+
+  defp attach_declarations(exprs, acc) do
+    {index, _pending} = Enum.reduce(exprs, {acc, []}, &attach_expr/2)
+    index
+  end
+
+  defp attach_expr({decl, _, [first | _]}, {index, pending}) when decl in [:attr, :slot],
+    do: {index, pending ++ List.wrap(decl_name(first))}
+
+  defp attach_expr({def_kind, _, [head, [{_do, _body}]]}, {index, pending})
+       when def_kind in [:def, :defp] do
+    case arity_one_name(head) do
+      {:ok, name} -> {claim(index, name, pending), []}
+      :error -> {index, []}
+    end
+  end
+
+  defp attach_expr(_expr, state), do: state
+
+  defp claim(index, name, pending),
+    do: Map.update(index, name, MapSet.new(pending), &MapSet.union(&1, MapSet.new(pending)))
 
   defp decl_name({:__block__, _, [name]}) when is_atom(name), do: name
   defp decl_name(name) when is_atom(name), do: name

@@ -391,6 +391,149 @@ defmodule Number42.Refactors.Ex.GenerateHeexAssignContractsTest do
     end
   end
 
+  # The contract is only exhaustive once it accounts for what the callers pass:
+  # declaring one attr makes Phoenix validate every attribute at every site.
+  describe "call-site aware contract" do
+    defp index(sites) do
+      caller = """
+      defmodule Caller do
+        def page(assigns) do
+          ~H\"\"\"
+      #{sites}
+          \"\"\"
+        end
+      end
+      """
+
+      dir = Path.join(System.tmp_dir!(), "n42_contract_#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      path = Path.join(dir, "caller.ex")
+      File.write!(path, caller)
+      on_exit(fn -> File.rm_rf!(dir) end)
+
+      GenerateHeexAssignContracts.build_call_index([path])
+    end
+
+    defp slot_component(body) do
+      """
+      defmodule MyView do
+        def slot_row(assigns) do
+          ~H\"\"\"
+          #{body}
+          \"\"\"
+        end
+      end
+      """
+    end
+
+    test "declares an attr the callers pass but the body never reads" do
+      built = index(~S|      <.slot_row design={@design} milestone={@m} />|)
+
+      after_src =
+        apply_refactor(@subject, slot_component("<span>{@milestone}</span>"),
+          enabled: true,
+          prepared: built
+        )
+
+      assert after_src =~ "attr :design, :any, required: true"
+      assert after_src =~ "attr :milestone, :any, required: true"
+    end
+
+    test "an attr only some call sites pass is declared without required: true" do
+      built =
+        index("""
+              <.slot_row milestone={@m} design={@d} />
+              <.slot_row milestone={@m} />
+        """)
+
+      after_src =
+        apply_refactor(@subject, slot_component("<span>{@milestone}</span>"),
+          enabled: true,
+          prepared: built
+        )
+
+      assert after_src =~ "attr :design, :any\n"
+      refute after_src =~ "attr :design, :any, required: true"
+      assert after_src =~ "attr :milestone, :any, required: true"
+    end
+
+    test "an assign the body reads but no caller passes is not marked required" do
+      built = index(~S|      <.slot_row milestone={@m} />|)
+
+      after_src =
+        apply_refactor(@subject, slot_component("<span>{@milestone} {@design}</span>"),
+          enabled: true,
+          prepared: built
+        )
+
+      assert after_src =~ "attr :design, :any\n"
+      refute after_src =~ "attr :design, :any, required: true"
+    end
+
+    test "a spreading call site hides the names, so the component is left alone" do
+      built = index(~S|      <.slot_row {@rest} milestone={@m} />|)
+
+      assert_unchanged(@subject, slot_component("<span>{@milestone}</span>"),
+        enabled: true,
+        prepared: built
+      )
+    end
+
+    test "global attributes at a call site become one :global attr" do
+      built = index(~S|      <.slot_row milestone={@m} phx-click="go" data-id="1" />|)
+
+      after_src =
+        apply_refactor(@subject, slot_component("<span>{@milestone}</span>"),
+          enabled: true,
+          prepared: built
+        )
+
+      assert after_src =~ "attr :rest, :global"
+      refute after_src =~ "phx-click"
+      refute after_src =~ "data-id"
+    end
+
+    test "a declaration binds to its own component, not the whole module" do
+      built = index(~S|      <.slot_row design={@d} milestone={@m} />|)
+
+      before_source = ~S'''
+      defmodule MyView do
+        attr :design, :any, required: true
+
+        def other(assigns) do
+          ~H"""
+          <span>{@design}</span>
+          """
+        end
+
+        def slot_row(assigns) do
+          ~H"""
+          <span>{@milestone}</span>
+          """
+        end
+      end
+      '''
+
+      after_src = apply_refactor(@subject, before_source, enabled: true, prepared: built)
+
+      # `attr :design` above `other/1` says nothing about `slot_row/1`, whose
+      # callers pass `design` too.
+      assert after_src =~ "attr :design, :any, required: true\n  attr :milestone"
+    end
+
+    test "an unreferenced component keeps the body-only contract" do
+      built = index(~S|      <.something_else x={@x} />|)
+
+      after_src =
+        apply_refactor(@subject, slot_component("<span>{@milestone}</span>"),
+          enabled: true,
+          prepared: built
+        )
+
+      assert after_src =~ "attr :milestone, :any, required: true"
+    end
+  end
+
   describe "idempotent" do
     test "running twice equals running once" do
       assert_idempotent(
