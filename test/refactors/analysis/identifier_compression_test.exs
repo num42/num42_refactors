@@ -36,7 +36,7 @@ defmodule Number42.Refactors.Analysis.IdentifierCompressionTest do
 
   describe "compress/3 — dedupe after stemming" do
     test "drops a token whose stem already occurred" do
-      assert {:ok, "build_match_conditions_binding"} =
+      assert {:ok, "build_serie_match_conditions"} =
                IC.compress("build_serie_match_conditions_match_binding", %{})
     end
 
@@ -124,6 +124,44 @@ defmodule Number42.Refactors.Analysis.IdentifierCompressionTest do
 
     test "counts an identifier once per token, not per occurrence" do
       assert IC.corpus(["match_match_match"])["match"] == 1
+    end
+  end
+
+  describe "compress/3 — wished-for names from real code" do
+    # Each pair is a name taken out of a live umbrella and the name it should
+    # read as. The rules are tuned against this table, not the other way round.
+    @wished [
+      {"quantity_unit_to_display_string", "quantity_unit_display_string"},
+      {"fetch_endpoint_and_api_key", "fetch_endpoint_api_key"},
+      {"fetch_fill_and_stroke_width", "fetch_fill_stroke_width"},
+      {"format_path_and_task_id", "format_path_task_id"},
+      {"group_by_preset_and_stage", "group_preset_stage"},
+      {"filter_products_and_item_ids", "filter_products_ids"},
+      {"maybe_put_pending_template_id", "maybe_pending_template_id"},
+      # The head noun stays even though `items` reads generic on its own.
+      {"warn_about_cascading_additional_items", "warn_cascading_additional_items"},
+      {"list_current_price_list_products_for_items", "list_price_products_items"},
+      # `info` says how the value is carried, `haus` says what it is about.
+      {"build_haus_summary_from_price_info", "build_haus_summary_price"},
+      {"build_haus_sheet_from_tree", "build_haus_sheet_tree"},
+      # `in` is part of the verb, so it is not the cryptic token it looks like.
+      {"signed_in_path_for_actor", "signed_in_path_actor"},
+      # The `on_` marker opens the name; `result` closes it without saying more.
+      {"on_get_user_for_simulation_result", "on_get_user_simulation"},
+      {"on_import_position_db_from_file_result", "on_import_position_file"},
+      {"build_serie_match_conditions_match_fields_binding", "build_match_conditions_fields"}
+    ]
+
+    for {long, wished} <- @wished do
+      test "#{long} reads as #{wished}" do
+        assert IC.compress(unquote(long), %{}) == {:ok, unquote(wished)}
+      end
+    end
+
+    test "every wished-for name is a fixpoint" do
+      for {_long, wished} <- @wished do
+        assert IC.compress(wished, %{}) == :keep, "#{wished} would be compressed again"
+      end
     end
   end
 end

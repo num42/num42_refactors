@@ -24,8 +24,8 @@ defmodule Number42.Refactors.Ex.ShortenVerboseIdentifierTest do
 
       assert compiles?(out)
       refute out =~ "build_serie_match_conditions_match_binding"
-      assert out =~ "defp build_match_conditions_binding(x)"
-      assert out =~ "do: build_match_conditions_binding(x)"
+      assert out =~ "defp build_serie_match_conditions(x)"
+      assert out =~ "do: build_serie_match_conditions(x)"
     end
 
     test "off by default" do
@@ -56,8 +56,8 @@ defmodule Number42.Refactors.Ex.ShortenVerboseIdentifierTest do
 
       assert compiles?(out)
       refute out =~ "fetch_serie_match_conditions_match_binding"
-      assert out =~ "defp fetch_match_conditions_binding([])"
-      assert out =~ "defp fetch_match_conditions_binding(x)"
+      assert out =~ "defp fetch_serie_match_conditions([])"
+      assert out =~ "defp fetch_serie_match_conditions(x)"
     end
 
     test "a public def is not renamed without a corpus — its callers are out of reach" do
@@ -73,7 +73,7 @@ defmodule Number42.Refactors.Ex.ShortenVerboseIdentifierTest do
     test "declines when the shorter name is already taken in the module" do
       src = ~S'''
       defmodule M do
-        defp build_match_conditions_binding(x), do: x
+        defp build_serie_match_conditions(x), do: x
         defp build_serie_match_conditions_match_binding(x), do: x
       end
       '''
@@ -93,7 +93,7 @@ defmodule Number42.Refactors.Ex.ShortenVerboseIdentifierTest do
       out = run(src)
 
       assert compiles?(out)
-      assert out =~ "&build_match_conditions_binding/1"
+      assert out =~ "&build_serie_match_conditions/1"
     end
 
     test "is idempotent" do
@@ -118,7 +118,7 @@ defmodule Number42.Refactors.Ex.ShortenVerboseIdentifierTest do
 
       assert compiles?(out)
       refute out =~ "serie_match_conditions_match_fields_binding"
-      assert out =~ "use_it(serie_conditions_fields_binding)"
+      assert out =~ "use_it(serie_match_conditions_fields)"
     end
 
     test "a binding in another clause with the same name is untouched by this one" do
@@ -146,9 +146,9 @@ defmodule Number42.Refactors.Ex.ShortenVerboseIdentifierTest do
       src = ~S'''
       defmodule M do
         def run(x) do
-          serie_conditions_fields_binding = x
+          serie_match_conditions_fields = x
           serie_match_conditions_match_fields_binding = compute(x)
-          {serie_conditions_fields_binding, serie_match_conditions_match_fields_binding}
+          {serie_match_conditions_fields, serie_match_conditions_match_fields_binding}
         end
       end
       '''
@@ -293,9 +293,9 @@ defmodule Number42.Refactors.Ex.ShortenVerboseIdentifierTest do
 
       assert compiles?(out_a)
       assert compiles?(out_b)
-      assert out_a =~ "def build_match_conditions_binding(x)"
-      assert out_b =~ "App.A.build_match_conditions_binding(x)"
-      assert out_b =~ "&App.A.build_match_conditions_binding/1"
+      assert out_a =~ "def build_serie_match_conditions(x)"
+      assert out_b =~ "App.A.build_serie_match_conditions(x)"
+      assert out_b =~ "&App.A.build_serie_match_conditions/1"
     end
 
     test "an importing file has its bare calls renamed too", ctx do
@@ -318,7 +318,7 @@ defmodule Number42.Refactors.Ex.ShortenVerboseIdentifierTest do
       out_b = apply_to(b, plan([a, b]))
 
       assert compiles?(out_b)
-      assert out_b =~ "do: build_match_conditions_binding(x)"
+      assert out_b =~ "do: build_serie_match_conditions(x)"
     end
 
     test "declines when the name is spoken as an atom literal anywhere", ctx do
