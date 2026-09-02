@@ -327,6 +327,14 @@ defmodule Number42.Refactors.Ex.HoistInvariantOutOfComprehension do
   # every nested-scope variable to `bound` before recursing keeps the
   # lift at the correct level: the innermost comprehension whose body the
   # candidate is truly invariant in claims it (one hoist per pass).
+  # A pipe's right-hand side is written without its first argument, so
+  # the node is not a callable expression on its own — lifting it emits
+  # `sort = Enum.sort()`. Its arguments are still fair game.
+  defp find_invariant({:|>, _, [lhs, rhs]}, bound) do
+    find_invariant(lhs, bound) ||
+      rhs |> children() |> Enum.find_value(&find_invariant(&1, bound))
+  end
+
   defp find_invariant(node, bound) do
     if hoistable_call?(node, bound) do
       node

@@ -508,6 +508,20 @@ defmodule Number42.Refactors.Ex.HoistInvariantOutOfComprehensionTest do
 
       assert_unchanged(@subject, source)
     end
+
+    test "leaves the right-hand side of a pipe alone — its first argument is missing" do
+      source = """
+      defmodule M do
+        def run(rows) do
+          Enum.map(rows, fn row ->
+            %{ids: (row.ids || []) |> Enum.sort()}
+          end)
+        end
+      end
+      """
+
+      assert_unchanged(@subject, source)
+    end
   end
 
   describe "naming" do
