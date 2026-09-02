@@ -230,10 +230,9 @@ defmodule Number42.Refactors.Ex.ExtractProtocolFromStructFamily do
     write_root = Keyword.get(opts, :write_root, File.cwd!())
     dry_run? = Keyword.get(opts, :dry_run, false)
 
-    parsed =
-      sources
-      |> Enum.reject(fn {path, _src} -> excluded_path?(path) end)
-      |> Enum.flat_map(&parse_module_defs/1)
+    included = Enum.reject(sources, fn {path, _src} -> excluded_path?(path) end)
+    parsed = Enum.flat_map(included, &parse_module_defs/1)
+    hosts = host_contexts(included)
 
     groups =
       parsed
@@ -242,7 +241,7 @@ defmodule Number42.Refactors.Ex.ExtractProtocolFromStructFamily do
 
     {candidates, rejected} = classify(groups, min_structs)
 
-    {synthesized, skipped} = synthesize(candidates, parsed, write_root)
+    {synthesized, skipped} = synthesize(candidates, parsed, hosts, write_root)
 
     unless dry_run?, do: Enum.each(synthesized, &write_protocol_file/1)
 
@@ -533,10 +532,10 @@ defmodule Number42.Refactors.Ex.ExtractProtocolFromStructFamily do
   # module (`:cross_module` otherwise) and the derived protocol name is
   # free (`:naming_collision`). The `taken` set guards two candidates in
   # the same run from claiming the same protocol name.
-  defp synthesize(candidates, parsed, write_root) do
+  defp synthesize(candidates, parsed, hosts, write_root) do
     {synthesized, skipped, _taken} =
       Enum.reduce(candidates, {[], [], MapSet.new()}, fn cand, {ok, skip, taken} ->
-        case synthesize_one(cand, parsed, write_root, taken) do
+        case synthesize_one(cand, parsed, hosts, write_root, taken) do
           {:ok, syn} -> {[syn | ok], skip, MapSet.put(taken, syn.protocol)}
           {:skip, reason} -> {ok, [skip_record(cand, reason) | skip], taken}
         end
@@ -545,22 +544,24 @@ defmodule Number42.Refactors.Ex.ExtractProtocolFromStructFamily do
     {Enum.reverse(synthesized), Enum.reverse(skipped)}
   end
 
-  defp synthesize_one(%{modules: [_, _ | _]} = _cand, _parsed, _root, _taken),
+  defp synthesize_one(%{modules: [_, _ | _]} = _cand, _parsed, _hosts, _root, _taken),
     do: {:skip, :cross_module}
 
-  defp synthesize_one(cand, parsed, write_root, taken) do
+  defp synthesize_one(cand, parsed, hosts, write_root, taken) do
     protocol = protocol_name(cand)
+    host = Map.get(hosts, cand.module, empty_host())
 
     cond do
       MapSet.member?(taken, protocol) -> {:skip, :naming_collision}
       Code.ensure_loaded?(protocol) -> {:skip, :naming_collision}
-      true -> build_synthesis(cand, protocol, parsed, write_root)
+      host_dependent?(cand, host) -> {:skip, :host_dependent_body}
+      true -> build_synthesis(cand, protocol, parsed, host, write_root)
     end
   end
 
-  defp build_synthesis(cand, protocol, parsed, write_root) do
+  defp build_synthesis(cand, protocol, parsed, host, write_root) do
     path = protocol_path(protocol, cand, write_root)
-    rendered = render_protocol(protocol, cand, parsed)
+    rendered = render_protocol(protocol, cand, parsed, host)
 
     case existing_file_status(path, rendered) do
       :foreign ->
@@ -609,11 +610,105 @@ defmodule Number42.Refactors.Ex.ExtractProtocolFromStructFamily do
 
   # --- protocol rendering ---
 
-  defp render_protocol(protocol, cand, parsed) do
+  # Everything a migrated clause can reach in its host module but not in
+  # the generated file: the aliases its patterns and bodies are written
+  # against, and the names whose absence makes the emitted file fail to
+  # compile (private helpers, module attributes, `use`-injected macros).
+  defp host_contexts(sources) do
+    sources
+    |> Enum.flat_map(&module_contexts/1)
+    |> Map.new()
+  end
+
+  defp module_contexts({_path, src}) do
+    case Sourceror.parse_string(src) do
+      {:ok, ast} -> ast |> Macro.prewalker() |> Enum.flat_map(&module_context/1)
+      {:error, _} -> []
+    end
+  end
+
+  defp module_context({:defmodule, _, [name_ast, [{_do, body}]]}) do
+    case alias_to_module(name_ast) do
+      {:ok, module} -> [{module, context_of_body(body)}]
+      :error -> []
+    end
+  end
+
+  defp module_context(_node), do: []
+
+  defp context_of_body(body) do
+    exprs = body_to_exprs(body)
+
+    %{
+      aliases: Enum.flat_map(exprs, &alias_text/1),
+      locals: exprs |> Enum.flat_map(&local_name_arity/1) |> MapSet.new(),
+      uses?: Enum.any?(exprs, &match?({:use, _, _}, &1)),
+      attributes: exprs |> Enum.flat_map(&attribute_name/1) |> MapSet.new()
+    }
+  end
+
+  defp empty_host,
+    do: %{aliases: [], locals: MapSet.new(), uses?: false, attributes: MapSet.new()}
+
+  defp alias_text({:alias, _, _} = node), do: [Sourceror.to_string(node)]
+  defp alias_text(_expr), do: []
+
+  # `def` counts as much as `defp`: the generated file calls it
+  # unqualified, and only the host module has it in scope.
+  defp local_name_arity({kind, _, [head | _]}) when kind in [:def, :defp] do
+    case name_and_args(strip_when(head)) do
+      {:ok, name, args} -> [{name, length(args)}]
+      :error -> []
+    end
+  end
+
+  defp local_name_arity(_expr), do: []
+
+  defp attribute_name({:@, _, [{name, _, [_value]}]}) when is_atom(name), do: [name]
+  defp attribute_name(_expr), do: []
+
+  # A clause whose body reaches back into its host module cannot stand
+  # alone in the generated file: the private helper, the attribute and
+  # the `use`-injected macro all resolve in the host and nowhere else.
+  defp host_dependent?(cand, host) do
+    # The migrated clauses move along with the dispatch, so neither their
+    # own heads nor a sibling clause of the same function is a host tie.
+    host = Map.update!(host, :locals, &MapSet.delete(&1, {cand.name, cand.arity}))
+    cand.infos |> Enum.any?(fn info -> info.ast |> clause_body() |> clause_needs_host?(host) end)
+  end
+
+  defp clause_body({_kind, _, [_head, [{_do, body} | _]]}), do: body
+  defp clause_body(_ast), do: nil
+
+  defp clause_needs_host?(nil, _host), do: false
+
+  defp clause_needs_host?(ast, host) do
+    ast
+    |> Macro.prewalker()
+    |> Enum.any?(fn
+      {:@, _, [{name, _, ctx}]} when is_atom(name) and is_atom(ctx) ->
+        MapSet.member?(host.attributes, name)
+
+      {name, _, args} when is_atom(name) and is_list(args) ->
+        MapSet.member?(host.locals, {name, length(args)}) or host_macro?(name, host)
+
+      _ ->
+        false
+    end)
+  end
+
+  # A `use` injects imports we cannot enumerate, so any sigil or bare
+  # call that a `use`d module could have provided keeps the clause home.
+  defp host_macro?(name, %{uses?: true}),
+    do: name |> Atom.to_string() |> String.starts_with?("sigil_")
+
+  defp host_macro?(_name, _host), do: false
+
+  defp render_protocol(protocol, cand, parsed, host) do
     impls = Enum.map_join(struct_clauses_for(cand), "\n\n", &render_defimpl(protocol, &1))
 
     """
-    defprotocol #{inspect(protocol)} do
+    #{alias_block(host)}defprotocol #{inspect(protocol)} do
       @moduledoc \"\"\"
       Protocol extracted from `#{inspect(cand.module)}.#{cand.name}/#{cand.arity}`,
       which dispatched on the first-argument struct type across:
@@ -627,6 +722,9 @@ defmodule Number42.Refactors.Ex.ExtractProtocolFromStructFamily do
     #{impls}
     """
   end
+
+  defp alias_block(%{aliases: []}), do: ""
+  defp alias_block(%{aliases: aliases}), do: Enum.join(aliases, "\n") <> "\n\n"
 
   # The protocol head dispatches on the first arg (named `data` by
   # convention); any further args keep positional names.

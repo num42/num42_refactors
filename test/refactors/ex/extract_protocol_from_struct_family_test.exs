@@ -208,6 +208,95 @@ defmodule Number42.Refactors.Ex.ExtractProtocolFromStructFamilyTest do
     end
   end
 
+  describe "host context" do
+    test "the host module's aliases ride along into the generated file" do
+      plan =
+        detect([
+          {"Catalog.Labeling",
+           """
+             alias Catalog.Brand
+             alias Catalog.{Asset, Item}
+
+             def label(%Brand{} = b), do: b.name
+             def label(%Item{} = i), do: i.title
+             def label(%Asset{} = a), do: a.filename
+           """}
+        ])
+
+      assert [syn] = plan.synthesized
+      assert syn.rendered =~ "alias Catalog.Brand"
+      assert syn.rendered =~ "alias Catalog.{Asset, Item}"
+    end
+
+    test "a body calling a private host helper is skipped, not emitted" do
+      plan =
+        detect([
+          {"Catalog.Labeling",
+           """
+             def label(%Brand{} = b), do: pretty(b.name)
+             def label(%Item{} = i), do: i.title
+             def label(%Asset{} = a), do: a.filename
+
+             defp pretty(text), do: String.upcase(text)
+           """}
+        ])
+
+      assert plan.synthesized == []
+      assert [%{name: :label, reason: :host_dependent_body}] = plan.skipped
+    end
+
+    test "a body calling a public host helper is skipped too — the call is unqualified" do
+      plan =
+        detect([
+          {"Catalog.Labeling",
+           """
+             def label(%Brand{} = b), do: pretty(b.name)
+             def label(%Item{} = i), do: i.title
+             def label(%Asset{} = a), do: a.filename
+
+             def pretty(text), do: String.upcase(text)
+           """}
+        ])
+
+      assert plan.synthesized == []
+      assert [%{name: :label, reason: :host_dependent_body}] = plan.skipped
+    end
+
+    test "a body reading a host module attribute is skipped" do
+      plan =
+        detect([
+          {"Catalog.Labeling",
+           """
+             @fallback "n/a"
+
+             def label(%Brand{} = b), do: b.name || @fallback
+             def label(%Item{} = i), do: i.title
+             def label(%Asset{} = a), do: a.filename
+           """}
+        ])
+
+      assert plan.synthesized == []
+      assert [%{name: :label, reason: :host_dependent_body}] = plan.skipped
+    end
+
+    test "a body using a sigil from the host's `use` is skipped" do
+      plan =
+        detect([
+          {"Catalog.Labeling",
+           ~S"""
+             use CatalogWeb, :verified_routes
+
+             def label(%Brand{id: id}), do: ~p"/brands/#{id}"
+             def label(%Item{} = i), do: i.title
+             def label(%Asset{} = a), do: a.filename
+           """}
+        ])
+
+      assert plan.synthesized == []
+      assert [%{name: :label, reason: :host_dependent_body}] = plan.skipped
+    end
+  end
+
   describe "synthesis" do
     test "a single-module candidate synthesizes a protocol named after the function" do
       plan =
