@@ -219,6 +219,34 @@ defmodule Number42.Refactors.Ex.ExtractNestedBlockTest do
       assert result =~ ~r/defp \w+\([^)]*\bprefix\b/,
              "extracted helper must take `prefix` (the `with`-clause binding) as a parameter:\n#{result}"
     end
+
+    test "captures `case` clause binding as helper param" do
+      before_source = """
+      defmodule Foo do
+        def go(groups, design) do
+          case load_preview(design) do
+            nil ->
+              groups
+
+            preview ->
+              Enum.map(groups, fn group ->
+                Enum.map(group.options, fn option ->
+                  picks = drop(option.products, preview.item)
+                  %{option | products: picks}
+                end)
+              end)
+          end
+        end
+      end
+      """
+
+      result = apply_refactor(@subject, before_source, @opts)
+
+      assert {:ok, _} = Code.string_to_quoted(result)
+
+      assert result =~ ~r/defp \w+\([^)]*\bpreview\b/,
+             "extracted helper must take `preview` (the `case`-clause binding) as a parameter:\n#{result}"
+    end
   end
 
   describe "idempotent" do

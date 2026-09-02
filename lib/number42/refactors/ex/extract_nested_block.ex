@@ -114,18 +114,14 @@ defmodule Number42.Refactors.Ex.ExtractNestedBlock do
       {:<-, _, [lhs, _rhs]} ->
         pattern_var_names(lhs)
 
-      # Lambda parameters bind names too. A name introduced by an
-      # *outer* `fn` on the path to the extracted node must be passed
-      # in as a parameter — otherwise the helper closes over a name
-      # that no longer exists in scope. We collect them all; the
-      # final `used ∩ bound_before` intersection drops any that
-      # aren't actually referenced.
-      {:fn, _, clauses} ->
-        clauses
-        |> Enum.flat_map(fn
-          {:->, _, [args, _body]} -> args |> Enum.flat_map(&pattern_var_names/1)
-          _ -> []
-        end)
+      # Every clause head binds names — a lambda's parameters as much as
+      # a `case`/`cond`/`receive`/`try` branch pattern. A name introduced
+      # by a clause on the path to the extracted node must be passed in
+      # as a parameter, otherwise the helper closes over a name that no
+      # longer exists in scope. We collect them all; the final
+      # `used ∩ bound_before` intersection drops the unreferenced ones.
+      {:->, _, [args, _body]} ->
+        args |> List.wrap() |> Enum.flat_map(&pattern_var_names/1)
 
       _ ->
         []
