@@ -379,6 +379,9 @@ defmodule Number42.Refactors.Analysis.Heex.Tree do
         {:text, raw, meta}, {acc, stack} ->
           {split_text_with_curlies(raw, meta) ++ acc, stack}
 
+        {:raw_text, raw, meta}, {acc, stack} ->
+          {[{:text, raw, node_meta(meta)} | acc], stack}
+
         {:self, name, attrs, meta}, {acc, stack} ->
           {[{:element, name, normalize_attrs(attrs), [], node_meta(meta)} | acc], stack}
 
@@ -590,6 +593,8 @@ defmodule Number42.Refactors.Analysis.Heex.Tree do
   # remaining binary, threaded so every HTML event records its exact
   # `byte_offset`. This replaces the old re-scan-from-cursor (`tag_at`) that
   # could match a `<` inside EEx code or a comment.
+  @raw_text_tags ~w(script style textarea title)
+
   defp scan_html("", _line, _pos, acc), do: acc |> Enum.reverse()
 
   defp scan_html("<!--" <> rest, line, pos, acc) do
@@ -623,10 +628,11 @@ defmodule Number42.Refactors.Analysis.Heex.Tree do
       {attrs, self_close?, after_attrs, line_after} = read_attrs(after_tag, line)
       consumed = byte_size(rest) - byte_size(after_attrs) + 1
       kind = if self_close?, do: :self, else: :open
+      acc = [{kind, name, attrs, %{line: line, byte_offset: pos}} | acc]
 
-      scan_html(after_attrs, line_after, pos + consumed, [
-        {kind, name, attrs, %{line: line, byte_offset: pos}} | acc
-      ])
+      if kind == :open and raw_text_tag?(name),
+        do: scan_raw_text(name, after_attrs, line_after, pos + consumed, acc),
+        else: scan_html(after_attrs, line_after, pos + consumed, acc)
     end
   end
 
@@ -635,6 +641,30 @@ defmodule Number42.Refactors.Analysis.Heex.Tree do
 
   defp scan_html(<<c, rest::binary>>, line, pos, acc),
     do: rest |> scan_html(line, pos + byte_size(<<c>>), push_text(<<c>>, line, pos, acc))
+
+  defp raw_text_tag?(name), do: String.downcase(name) in @raw_text_tags
+
+  # HEEx never parses markup inside these, so neither may we: an HTML snippet
+  # in a JS template literal was surfacing as real elements, and refactors
+  # rewrote call sites and shells that the browser only ever sees as text.
+  defp scan_raw_text(name, bin, line, pos, acc) do
+    case :binary.match(bin, "</" <> name) do
+      {at, _} ->
+        raw = binary_part(bin, 0, at)
+        rest = binary_part(bin, at, byte_size(bin) - at)
+        scan_html(rest, line + count_newlines(raw), pos + at, push_raw(raw, line, pos, acc))
+
+      :nomatch ->
+        scan_html("", line, pos, push_raw(bin, line, pos, acc))
+    end
+  end
+
+  # A distinct event: raw content must not be split on `{...}` either, or CSS
+  # braces would surface as interpolations.
+  defp push_raw("", _line, _pos, acc), do: acc
+
+  defp push_raw(raw, line, pos, acc),
+    do: [{:raw_text, raw, %{line: line, byte_offset: pos}} | acc]
 
   defp scan_node_end({:element, tag, _attrs, _children, _meta}, body, start_byte) do
     # Walk from start_byte: read the open-tag's `>` or `/>`, then

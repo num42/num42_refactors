@@ -234,4 +234,32 @@ defmodule Number42.Refactors.Analysis.Heex.TreeTest do
                Tree.parse_body(~S|<Mod.shown? x={@a} />|)
     end
   end
+
+  describe "raw-text elements" do
+    test "markup inside <script> stays text, as HEEx treats it" do
+      body = ~s|<div><script>\n  el.innerHTML = `<span class="detail">x</span>`\n</script></div>|
+
+      assert {:ok, [{:element, "div", [], [{:element, "script", [], kids, _}], _}]} =
+               Tree.parse_body(body)
+
+      assert Enum.all?(kids, &match?({:text, _, _}, &1))
+      assert kids |> Enum.map_join("", fn {:text, t, _} -> t end) =~ ~s|<span class="detail">|
+    end
+
+    test "markup inside <style> stays text" do
+      body = ~s|<style>\n  .detail { color: red }\n</style>|
+
+      assert {:ok, [{:element, "style", [], kids, _}]} = Tree.parse_body(body)
+      assert Enum.all?(kids, &match?({:text, _, _}, &1))
+    end
+
+    test "the element after a raw-text element parses normally" do
+      body = ~s|<script>var x = "</div>"</script><p class="after">hi</p>|
+
+      assert {:ok, [{:element, "script", _, _, _}, {:element, "p", attrs, _, _}]} =
+               Tree.parse_body(body)
+
+      assert attrs == [{"class", {:string, "after"}}]
+    end
+  end
 end

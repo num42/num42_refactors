@@ -160,6 +160,10 @@ defmodule Number42.Refactors.Detection.SplitLowCohesionDetectTest do
     end
 
     test "exposes only the corpus entry point — cohesion has no single-file answer" do
+      # function_exported?/3 answers for the *loaded* module, so without this the
+      # assertion races whichever test happens to load it first.
+      Code.ensure_loaded!(SplitLowCohesionModule)
+
       refute function_exported?(SplitLowCohesionModule, :detect, 2)
       assert function_exported?(SplitLowCohesionModule, :detect_corpus, 2)
     end
