@@ -44,19 +44,41 @@ defmodule Number42.Refactors.Ex.ShortenVerboseIdentifier do
   alias Number42.Refactors.Analysis.AstHelpers
   alias Number42.Refactors.Analysis.IdentifierCompression, as: Compression
 
+  # Dispatched by name from outside any call site this refactor can read.
+  @framework_callbacks ~w(
+    init start_link child_spec terminate code_change format_status
+    handle_call handle_cast handle_info handle_continue handle_event
+    handle_params handle_async handle_in handle_out
+    mount render update preload join authorize policy call plug
+    changeset new run perform up down change
+  )a
+
   @impl Number42.Refactors.Refactor
   def description, do: "Shorten identifiers of five-plus word tokens (default-OFF)"
 
   @impl Number42.Refactors.Refactor
   def reformat_after?, do: false
 
+  # The rarity rule is only informed if it has the project's own identifiers to
+  # count, so the corpus is built once over the whole read corpus.
+  @impl Number42.Refactors.Refactor
+  def prepare(opts) do
+    case Keyword.get(opts, :source_files) do
+      files when is_list(files) and files != [] ->
+        {:ok, build_plan(files, opts)}
+
+      _ ->
+        :no_cache
+    end
+  end
+
   @impl Number42.Refactors.Refactor
   def transform(source, opts) do
     if Keyword.get(opts, :enabled, false) do
-      corpus = Keyword.get(opts, :identifier_corpus, %{})
+      corpus = corpus_from(opts)
 
       case Sourceror.parse_string(source) do
-        {:ok, ast} -> rewrite(ast, source, corpus)
+        {:ok, ast} -> rewrite(ast, source, corpus, opts[:prepared])
         _ -> source
       end
     else
@@ -64,8 +86,32 @@ defmodule Number42.Refactors.Ex.ShortenVerboseIdentifier do
     end
   end
 
-  defp rewrite(ast, source, corpus) do
-    case patches_for(ast, corpus) do
+  defp corpus_from(opts) do
+    case opts[:prepared] do
+      %{corpus: corpus} -> corpus
+      _ -> Keyword.get(opts, :identifier_corpus, %{})
+    end
+  end
+
+  # Every name this refactor could ever rename, which is exactly the population
+  # the frequencies should be read over.
+  defp identifier_names(ast) do
+    ast
+    |> Macro.prewalker()
+    |> Enum.flat_map(fn
+      {kind, _, [head | _]} when kind in [:def, :defp] ->
+        head |> strip_when() |> name_of() |> List.wrap() |> Enum.map(&Atom.to_string/1)
+
+      {:=, _, [{name, _, nil}, _rhs]} when is_atom(name) ->
+        [Atom.to_string(name)]
+
+      _ ->
+        []
+    end)
+  end
+
+  defp rewrite(ast, source, corpus, prepared) do
+    case patches_for(ast, corpus) ++ public_patches(ast, source, prepared) do
       [] -> source
       patches -> Sourceror.patch_string(source, patches)
     end
@@ -85,6 +131,219 @@ defmodule Number42.Refactors.Ex.ShortenVerboseIdentifier do
       |> Enum.flat_map(&binding_patches(&1, corpus))
 
     function_patches ++ binding_patches
+  end
+
+  # ---- cross-file plan -----------------------------------------------------
+
+  # One pass over the corpus: what each file defines and imports, which atoms
+  # are spoken as literals, and what the templates say. A public rename can only
+  # be decided against all of that at once.
+  defp build_plan(files, opts) do
+    contents =
+      files
+      |> Enum.map(fn file -> {file, File.read(file)} end)
+      |> Enum.flat_map(fn
+        {file, {:ok, source}} -> [{file, source}]
+        _ -> []
+      end)
+
+    parsed =
+      Enum.flat_map(contents, fn {file, source} ->
+        case Sourceror.parse_string(source) do
+          {:ok, ast} -> [{file, source, ast}]
+          _ -> []
+        end
+      end)
+
+    corpus =
+      Keyword.get(opts, :identifier_corpus) ||
+        parsed
+        |> Enum.flat_map(fn {_f, _s, ast} -> identifier_names(ast) end)
+        |> Compression.corpus()
+
+    literals = parsed |> Enum.flat_map(fn {_f, _s, ast} -> atom_literals(ast) end) |> MapSet.new()
+    template_words = template_words(Keyword.get(opts, :template_files) || templates_near(files))
+    protected = MapSet.union(literals, template_words)
+
+    public =
+      Enum.reduce(parsed, %{}, fn {_file, _source, ast}, acc ->
+        case {module_name(ast), public_renames(ast, corpus, protected)} do
+          {nil, _} -> acc
+          {_module, renames} when renames == %{} -> acc
+          {module, renames} -> Map.put(acc, module, renames)
+        end
+      end)
+
+    %{
+      corpus: corpus,
+      source_to_file: Map.new(contents, fn {file, source} -> {source, file} end),
+      file_module: Map.new(parsed, fn {file, _s, ast} -> {file, module_name(ast)} end),
+      imports: Map.new(parsed, fn {file, _s, ast} -> {file, imported_modules(ast)} end),
+      public: public
+    }
+  end
+
+  defp public_renames(ast, corpus, protected) do
+    taken = MapSet.new(defined_names(ast))
+
+    ast
+    |> defs_of_kind(:def)
+    |> Enum.reduce(%{}, fn name, acc ->
+      with false <- MapSet.member?(protected, name),
+           false <- name in @framework_callbacks,
+           false <- component?(ast, name),
+           {:ok, shorter} <- Compression.compress(name, corpus),
+           false <- MapSet.member?(taken, shorter),
+           false <- shorter in Map.values(acc) do
+        Map.put(acc, Atom.to_string(name), shorter)
+      else
+        _ -> acc
+      end
+    end)
+  end
+
+  # This file sees its own module's renames bare, an imported module's renames
+  # bare as well, and every module's renames qualified.
+  defp public_patches(_ast, _source, nil), do: []
+
+  defp public_patches(ast, source, prepared) do
+    file = Map.get(prepared.source_to_file, source)
+
+    bare =
+      [prepared.file_module[file] | Map.get(prepared.imports, file, [])]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.flat_map(&(prepared.public |> Map.get(&1, %{}) |> Map.to_list()))
+      |> Map.new()
+
+    Enum.map(occurrences(ast, bare), &rename_patch/1) ++
+      Enum.map(qualified_occurrences(ast, prepared.public), &rename_patch/1)
+  end
+
+  # ---- guards --------------------------------------------------------------
+
+  # A `~H` body is a template, and `attr`/`slot` above a def declares one —
+  # either way the callers are templates rather than call sites.
+  defp component?(ast, name) do
+    heex_def?(ast, name) or declared_component?(ast, name)
+  end
+
+  defp heex_def?(ast, name) do
+    ast
+    |> Macro.prewalker()
+    |> Enum.any?(fn
+      {:def, _, [head | body]} ->
+        strip_when(head) |> name_of() == name and
+          body |> Macro.prewalker() |> Enum.any?(&match?({:sigil_H, _, _}, &1))
+
+      _ ->
+        false
+    end)
+  end
+
+  defp declared_component?(ast, name) do
+    ast
+    |> Macro.prewalker()
+    |> Enum.flat_map(fn
+      {:defmodule, _, [_alias, [{_do, block}]]} -> [block_exprs(block)]
+      _ -> []
+    end)
+    |> Enum.any?(&declared_before?(&1, name))
+  end
+
+  defp declared_before?(exprs, name) do
+    exprs
+    |> Enum.chunk_every(2, 1, :discard)
+    |> Enum.any?(fn
+      [{form, _, _}, {:def, _, [head | _]}] when form in [:attr, :slot] ->
+        strip_when(head) |> name_of() == name
+
+      _ ->
+        false
+    end)
+  end
+
+  defp block_exprs({:__block__, _, exprs}), do: exprs
+  defp block_exprs(other), do: [other]
+
+  # Atoms spoken as values rather than as call heads — the shapes dynamic
+  # dispatch takes (`apply/3`, `{Mod, :name}`, a keyword config).
+  defp atom_literals(ast) do
+    ast
+    |> Macro.prewalker()
+    |> Enum.flat_map(fn
+      {:__block__, _meta, [atom]} when is_atom(atom) -> [atom]
+      _ -> []
+    end)
+    |> Enum.uniq()
+  end
+
+  defp imported_modules(ast) do
+    ast
+    |> Macro.prewalker()
+    |> Enum.flat_map(fn
+      {:import, _, [{:__aliases__, _, _} = target | _]} -> [Macro.to_string(target)]
+      _ -> []
+    end)
+    |> Enum.uniq()
+  end
+
+  # Templates are not parsed here, so every word one contains is treated as a
+  # reference this rewrite could not follow.
+  defp templates_near(files) do
+    files
+    |> Enum.flat_map(fn file ->
+      case String.split(Path.dirname(file), "/lib/", parts: 2) do
+        [root, _rest] -> [root]
+        _ -> []
+      end
+    end)
+    |> Enum.uniq()
+    |> Enum.flat_map(&Path.wildcard(&1 <> "/**/*.{heex,eex}"))
+    |> Enum.uniq()
+  end
+
+  defp template_words(paths) do
+    paths
+    |> Enum.flat_map(fn path ->
+      case File.read(path) do
+        {:ok, content} -> ~r/[a-z_][a-zA-Z0-9_]*[?!]?/ |> Regex.scan(content) |> Enum.map(&hd/1)
+        _ -> []
+      end
+    end)
+    |> MapSet.new(&String.to_atom/1)
+  end
+
+  # `Mod.name(...)` and `&Mod.name/1`: the dot node carries the position and the
+  # name starts one column past the dot.
+  defp qualified_occurrences(ast, per_module) do
+    ast
+    |> Macro.prewalker()
+    |> Enum.flat_map(fn
+      {{:., meta, [{:__aliases__, _, _} = target, name]}, _, _} when is_atom(name) ->
+        located(Atom.to_string(name), Map.get(per_module, Macro.to_string(target), %{}), meta, 1)
+
+      _ ->
+        []
+    end)
+  end
+
+  defp module_name(ast) do
+    ast
+    |> Macro.prewalker()
+    |> Enum.find_value(fn
+      {:defmodule, _, [{:__aliases__, _, _} = target | _]} -> Macro.to_string(target)
+      _ -> nil
+    end)
+  end
+
+  defp defs_of_kind(ast, kind) do
+    ast
+    |> Macro.prewalker()
+    |> Enum.flat_map(fn
+      {^kind, _, [head | _]} -> head |> strip_when() |> name_of() |> List.wrap()
+      _ -> []
+    end)
+    |> Enum.uniq()
   end
 
   # ---- private functions ---------------------------------------------------
@@ -218,19 +477,18 @@ defmodule Number42.Refactors.Ex.ShortenVerboseIdentifier do
     ast
     |> Macro.prewalker()
     |> Enum.flat_map(fn
-      {name, meta, _args} when is_atom(name) ->
-        old = Atom.to_string(name)
-
-        case {Map.get(renames, old), Keyword.get(meta, :line), Keyword.get(meta, :column)} do
-          {nil, _, _} -> []
-          {_, nil, _} -> []
-          {_, _, nil} -> []
-          {new, line, column} -> [{old, new, line, column}]
-        end
-
-      _ ->
-        []
+      {name, meta, _args} when is_atom(name) -> located(Atom.to_string(name), renames, meta, 0)
+      _ -> []
     end)
+  end
+
+  defp located(old, renames, meta, offset) do
+    case {Map.get(renames, old), Keyword.get(meta, :line), Keyword.get(meta, :column)} do
+      {nil, _, _} -> []
+      {_, nil, _} -> []
+      {_, _, nil} -> []
+      {new, line, column} -> [{old, new, line, column + offset}]
+    end
   end
 
   defp rename_patch({old, new, line, column}) do
