@@ -61,9 +61,19 @@ defmodule Number42.Refactors.Ex.CssClassClusterCorrectionTest do
       built = model([{"lib/conv.ex", convention_file("mt1 pb2 gap2", 12)}])
       [c] = Correction.corrections(built, outlier_file("mt1 pb3 gap2"))
 
-      assert c.bad == :pb3
-      assert c.good == :pb2
-      assert c.classes == MapSet.new([:mt1, :pb3, :gap2])
+      assert c.bad == "pb3"
+      assert c.good == "pb2"
+      assert c.classes == MapSet.new(["mt1", "pb3", "gap2"])
+    end
+
+    test "a novel class name never reaches the atom table" do
+      built = model([{"lib/conv.ex", convention_file("mt1 pb2 gap2", 12)}])
+
+      assert Correction.corrections(built, outlier_file("zzq-novel-1 zzq-novel-2")) == []
+
+      for token <- ["zzq-novel-1", "zzq-novel-2"] do
+        assert_raise ArgumentError, fn -> String.to_existing_atom(token) end
+      end
     end
 
     test "no correction when the deviation is more than one token off" do

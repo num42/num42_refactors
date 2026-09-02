@@ -101,9 +101,9 @@ defmodule Number42.Refactors.Ex.CssClassClusterCorrection do
 
   @typedoc "A single trusted correction: swap `bad` for `good` in a site's set."
   @type correction :: %{
-          classes: MapSet.t(atom()),
-          bad: atom(),
-          good: atom()
+          classes: MapSet.t(String.t()),
+          bad: String.t(),
+          good: String.t()
         }
 
   @impl Number42.Refactors.Refactor
@@ -174,12 +174,25 @@ defmodule Number42.Refactors.Ex.CssClassClusterCorrection do
   @spec corrections(model(), String.t(), keyword()) :: [correction()]
   def corrections(model, source, opts \\ []) do
     thresholds = thresholds(opts)
+    index = build_index(model.clusters, thresholds)
 
     source
     |> Coocc.class_sites()
     |> Enum.map(& &1.classes)
     |> Enum.uniq()
-    |> Enum.flat_map(&correction_for_set(&1, model, thresholds))
+    |> Enum.flat_map(&correction_for_set(&1, index, model.weights, thresholds))
+  end
+
+  # Built once per source rather than once per class set: a Hamming-1 swap
+  # cannot change the set's size, so only same-size conventions are candidates.
+  defp build_index(clusters, %{min_support: min}) do
+    %{
+      support: Map.new(clusters, &{&1.classes, &1.support}),
+      by_size:
+        clusters
+        |> Enum.filter(&(&1.support >= min))
+        |> Enum.group_by(&MapSet.size(&1.classes))
+    }
   end
 
   # ── transform plumbing ───────────────────────────────────────────
@@ -275,26 +288,21 @@ defmodule Number42.Refactors.Ex.CssClassClusterCorrection do
   # Swap exactly the one deviating token for the convention token in the raw
   # class string, preserving every other token and its position/whitespace.
   defp swap_token(raw, bad, good) do
-    bad_s = Atom.to_string(bad)
-    good_s = Atom.to_string(good)
-
     raw
     |> String.split(~r/(\s+)/, include_captures: true)
-    |> Enum.map_join("", fn part -> if part == bad_s, do: good_s, else: part end)
+    |> Enum.map_join("", fn part -> if part == bad, do: good, else: part end)
   end
 
   # ── correction decision (per distinct class set) ─────────────────
 
-  defp correction_for_set(set, %{clusters: clusters, weights: weights}, thresholds) do
-    own_support = exact_support(clusters, set)
+  defp correction_for_set(set, index, weights, thresholds) do
+    own_support = Map.get(index.support, set, 0)
 
-    clusters
-    |> Enum.filter(&convention?(&1, thresholds))
+    index.by_size
+    |> Map.get(MapSet.size(set), [])
     |> Enum.flat_map(&swap_candidate(&1, set, own_support, weights, thresholds))
     |> pick_unambiguous(set)
   end
-
-  defp convention?(%{support: support}, %{min_support: min}), do: support >= min
 
   # A candidate swap exists iff `set` is Hamming-distance-1 from the
   # convention `C` (one `bad ∈ set`, one `good ∈ C`, the rest identical) and
@@ -345,11 +353,9 @@ defmodule Number42.Refactors.Ex.CssClassClusterCorrection do
   end
 
   defp split_scale(token) do
-    s = Atom.to_string(token)
-
-    case Regex.run(~r/^(.*?)(\d+)$/, s) do
+    case Regex.run(~r/^(.*?)(\d+)$/, token) do
       [_, prefix, scale] -> {prefix, scale}
-      _ -> {s, ""}
+      _ -> {token, ""}
     end
   end
 
@@ -384,13 +390,6 @@ defmodule Number42.Refactors.Ex.CssClassClusterCorrection do
 
   defp strip(%{classes: classes, bad: bad, good: good}),
     do: %{classes: classes, bad: bad, good: good}
-
-  defp exact_support(clusters, set) do
-    Enum.find_value(clusters, 0, fn
-      %{classes: ^set, support: s} -> s
-      _ -> false
-    end)
-  end
 
   # ── thresholds + corpus loading ──────────────────────────────────
 
@@ -430,7 +429,7 @@ defmodule Number42.Refactors.Ex.CssClassClusterCorrection do
   # ── small helpers ────────────────────────────────────────────────
 
   defp token_set(raw) do
-    tokens = raw |> String.split(~r/\s+/, trim: true) |> Enum.map(&String.to_atom/1)
+    tokens = String.split(raw, ~r/\s+/, trim: true)
     if tokens == [], do: nil, else: MapSet.new(tokens)
   end
 

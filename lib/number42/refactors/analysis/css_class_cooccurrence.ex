@@ -43,22 +43,29 @@ defmodule Number42.Refactors.Analysis.CssClassCooccurrence do
 
   @default_sibling_weight 0.5
 
+  # Class names stay binaries: Tailwind's arbitrary-value syntax makes the
+  # token vocabulary unbounded, and the atom table is never collected.
   @typedoc """
   One element's static class observation: its token set, the tree depth at
   which it sits (root = 0), and the enclosing element's identity used for
   the sibling/parent proximity walk.
   """
   @type class_site :: %{
-          classes: MapSet.t(atom()),
+          classes: MapSet.t(String.t()),
           depth: non_neg_integer(),
           path: [non_neg_integer()]
         }
 
   @typedoc "Alphabetically-ordered class pair → summed proximity weight."
-  @type tuple_weights :: %{{atom(), atom()} => float()}
+  @type tuple_weights :: %{{String.t(), String.t()} => float()}
 
   @typedoc "An exact class set and how many elements use exactly it."
-  @type cluster :: %{classes: MapSet.t(atom()), support: non_neg_integer()}
+  @type cluster :: %{classes: MapSet.t(String.t()), support: non_neg_integer()}
+
+  # Beyond this many edges the 1/2^d weight is numerically irrelevant, so the
+  # pair is skipped rather than stored — this is what keeps the index from
+  # growing to every-token-against-every-token on a large template.
+  @max_pair_distance 8
 
   @doc """
   All static-class sites in one source string.
@@ -86,9 +93,12 @@ defmodule Number42.Refactors.Analysis.CssClassCooccurrence do
   def tuple_weights(sources, opts \\ []) do
     sibling_weight = Keyword.get(opts, :sibling_weight, @default_sibling_weight)
 
-    sources
-    |> Enum.flat_map(fn {_path, source} -> weighted_pairs(source, sibling_weight) end)
-    |> Enum.reduce(%{}, fn {pair, w}, acc -> Map.update(acc, pair, w, &(&1 + w)) end)
+    # Folded per source so only one file's pair list is ever resident.
+    Enum.reduce(sources, %{}, fn {_path, source}, acc ->
+      source
+      |> weighted_pairs(sibling_weight)
+      |> Enum.reduce(acc, fn {pair, w}, inner -> Map.update(inner, pair, w, &(&1 + w)) end)
+    end)
   end
 
   @doc """
@@ -113,7 +123,7 @@ defmodule Number42.Refactors.Analysis.CssClassCooccurrence do
   single file contributes to the corpus index. Public for measurement
   (Phase 0) and testing.
   """
-  @spec weighted_pairs(String.t(), float()) :: [{{atom(), atom()}, float()}]
+  @spec weighted_pairs(String.t(), float()) :: [{{String.t(), String.t()}, float()}]
   def weighted_pairs(source, sibling_weight \\ @default_sibling_weight) do
     case Tree.from_source(source) do
       {:ok, sigils} -> Enum.flat_map(sigils, &pairs_in_tree(&1.tree, sibling_weight))
@@ -167,14 +177,21 @@ defmodule Number42.Refactors.Analysis.CssClassCooccurrence do
     end)
   end
 
+  # Paths and token lists are materialised once: read inside the nested
+  # comprehension they were rebuilt for every one of the O(sites²) pairs.
   defp inter_element_pairs(sites, sibling_weight) do
-    for {a, ai} <- Enum.with_index(sites),
-        {b, bi} <- Enum.with_index(sites),
+    indexed =
+      sites
+      |> Enum.with_index()
+      |> Enum.map(fn {site, i} -> {i, site.path, MapSet.to_list(site.classes)} end)
+
+    for {ai, pa, tokens_a} <- indexed,
+        {bi, pb, tokens_b} <- indexed,
         ai < bi,
-        pair_weight = proximity_weight(a, b, sibling_weight),
+        pair_weight = proximity_weight(pa, pb, sibling_weight),
         pair_weight > 0.0,
-        token_a <- MapSet.to_list(a.classes),
-        token_b <- MapSet.to_list(b.classes),
+        token_a <- tokens_a,
+        token_b <- tokens_b,
         token_a != token_b do
       {sort_pair(token_a, token_b), pair_weight}
     end
@@ -184,14 +201,16 @@ defmodule Number42.Refactors.Analysis.CssClassCooccurrence do
   # of edges on the path connecting them through their lowest common
   # ancestor. Siblings (same parent path, differing only in the last index)
   # get the configurable sibling weight; everything else decays as 1 / 2^d.
-  defp proximity_weight(%{path: pa}, %{path: pb}, sibling_weight) do
+  defp proximity_weight(pa, pb, sibling_weight) do
     common = common_prefix_len(pa, pb)
     da = length(pa) - common
     db = length(pb) - common
 
-    if da == 1 and db == 1,
-      do: sibling_weight,
-      else: 1.0 / :math.pow(2, da + db)
+    cond do
+      da == 1 and db == 1 -> sibling_weight
+      da + db > @max_pair_distance -> 0.0
+      true -> 1.0 / :math.pow(2, da + db)
+    end
   end
 
   defp common_prefix_len(a, b), do: common_prefix_len(a, b, 0)
@@ -210,10 +229,7 @@ defmodule Number42.Refactors.Analysis.CssClassCooccurrence do
   end
 
   defp class_tokens(value) do
-    tokens =
-      value
-      |> String.split(~r/\s+/, trim: true)
-      |> Enum.map(&String.to_atom/1)
+    tokens = String.split(value, ~r/\s+/, trim: true)
 
     case tokens do
       [] -> nil

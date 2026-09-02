@@ -22,7 +22,20 @@ defmodule Number42.Refactors.Analysis.CssClassCooccurrenceTest do
       source = wrap(~s|    <div class="mt1 pb2 text-hase">hi</div>|)
 
       assert [%{classes: classes}] = Coocc.class_sites(source)
-      assert classes == MapSet.new([:mt1, :pb2, :"text-hase"])
+      assert classes == MapSet.new(["mt1", "pb2", "text-hase"])
+    end
+
+    test "tokens are binaries — the atom table is never grown by class names" do
+      source = wrap(~s|    <div class="zzq-uniq-1 zzq-uniq-2 grid-cols-[1fr_auto]">x</div>|)
+
+      assert [%{classes: classes}] = Coocc.class_sites(source)
+      assert Enum.all?(classes, &is_binary/1)
+
+      # The global atom counter races with the async suite, so assert the
+      # names themselves never entered the table.
+      for token <- classes do
+        assert_raise ArgumentError, fn -> String.to_existing_atom(token) end
+      end
     end
 
     test "collects one site per element with a static class" do
@@ -34,8 +47,8 @@ defmodule Number42.Refactors.Analysis.CssClassCooccurrenceTest do
         """)
 
       sets = source |> Coocc.class_sites() |> Enum.map(& &1.classes)
-      assert MapSet.new([:card, :shadow]) in sets
-      assert MapSet.new([:red, :bold]) in sets
+      assert MapSet.new(["card", "shadow"]) in sets
+      assert MapSet.new(["red", "bold"]) in sets
     end
 
     test "ignores dynamic class={expr} attributes" do
@@ -59,17 +72,17 @@ defmodule Number42.Refactors.Analysis.CssClassCooccurrenceTest do
       source = wrap(~s|    <div class="mt1 pb2 text-hase">x</div>|)
       weights = Coocc.tuple_weights([{"a.ex", source}])
 
-      assert weights[{:mt1, :pb2}] == 1.0
-      assert weights[{:mt1, :"text-hase"}] == 1.0
-      assert weights[{:pb2, :"text-hase"}] == 1.0
+      assert weights[{"mt1", "pb2"}] == 1.0
+      assert weights[{"mt1", "text-hase"}] == 1.0
+      assert weights[{"pb2", "text-hase"}] == 1.0
     end
 
-    test "pairs are alphabetically sorted so {:a,:b} and {:b,:a} collapse" do
+    test "pairs are alphabetically sorted so {a,b} and {b,a} collapse" do
       source = wrap(~s|    <div class="zebra alpha">x</div>|)
       weights = Coocc.tuple_weights([{"a.ex", source}])
 
-      assert Map.has_key?(weights, {:alpha, :zebra})
-      refute Map.has_key?(weights, {:zebra, :alpha})
+      assert Map.has_key?(weights, {"alpha", "zebra"})
+      refute Map.has_key?(weights, {"zebra", "alpha"})
     end
 
     test "direct parent↔child co-occurrence scores 0.5" do
@@ -81,13 +94,25 @@ defmodule Number42.Refactors.Analysis.CssClassCooccurrenceTest do
         """)
 
       weights = Coocc.tuple_weights([{"a.ex", source}])
-      assert weights[{:card, :red}] == 0.5
+      assert weights[{"card", "red"}] == 0.5
     end
 
     test "weights accumulate across the corpus" do
       one = wrap(~s|    <div class="mt1 pb2">x</div>|)
       weights = Coocc.tuple_weights([{"a.ex", one}, {"b.ex", one}])
-      assert weights[{:mt1, :pb2}] == 2.0
+      assert weights[{"mt1", "pb2"}] == 2.0
+    end
+
+    test "pairs beyond the distance cutoff are dropped, not stored at ~0 weight" do
+      nested =
+        Enum.reduce(12..1//-1, ~s|<i class="deep">x</i>|, fn n, inner ->
+          ~s|<div class="lvl#{n}">| <> inner <> ~s|</div>|
+        end)
+
+      weights = Coocc.tuple_weights([{"a.ex", wrap("    " <> nested)}])
+
+      assert weights[{"deep", "lvl12"}] == 0.5
+      refute Map.has_key?(weights, {"deep", "lvl1"})
     end
   end
 
@@ -102,7 +127,7 @@ defmodule Number42.Refactors.Analysis.CssClassCooccurrenceTest do
 
       clusters = Coocc.clusters(sites ++ one_off)
       assert [%{classes: top, support: 3} | _] = clusters
-      assert top == MapSet.new([:mt1, :pb2, :gap2])
+      assert top == MapSet.new(["mt1", "pb2", "gap2"])
     end
 
     test "ignores single-token sets (no internal convention to deviate from)" do
