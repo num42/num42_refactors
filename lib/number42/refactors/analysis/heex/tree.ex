@@ -444,8 +444,10 @@ defmodule Number42.Refactors.Analysis.Heex.Tree do
 
   defp read_attr_name(bin), do: read_attr_name(bin, [])
 
+  # `?`/`!` are legal in a Phoenix attr name (`back?={…}`); stopping short of
+  # them silently truncated the name and split the rest of the tag into text.
   defp read_attr_name(<<c, rest::binary>>, acc)
-       when c in ?a..?z or c in ?A..?Z or c in ?0..?9 or c in [?-, ?_, ?:, ?., ?@] do
+       when c in ?a..?z or c in ?A..?Z or c in ?0..?9 or c in [?-, ?_, ?:, ?., ?@, ??, ?!] do
     read_attr_name(rest, [<<c>> | acc])
   end
 
@@ -539,7 +541,7 @@ defmodule Number42.Refactors.Analysis.Heex.Tree do
   defp read_tag_name(bin), do: read_tag_name(bin, [])
 
   defp read_tag_name(<<c, rest::binary>>, acc)
-       when c in ?a..?z or c in ?A..?Z or c in ?0..?9 or c in [?-, ?_, ?., ?:, ?/] do
+       when c in ?a..?z or c in ?A..?Z or c in ?0..?9 or c in [?-, ?_, ?., ?:, ?/, ??, ?!] do
     read_tag_name(rest, [<<c>> | acc])
   end
 
