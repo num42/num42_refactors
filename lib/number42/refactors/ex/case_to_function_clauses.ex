@@ -318,7 +318,7 @@ defmodule Number42.Refactors.Ex.CaseToFunctionClauses do
 
     cond do
       not var_used_in_branch?(body, guard, scrutinee_name) -> pattern_text
-      bare_var_named?(pattern, scrutinee_name) -> pattern_text
+      pattern_binds?(pattern, scrutinee_name) -> pattern_text
       underscore_pattern?(pattern) -> Atom.to_string(scrutinee_name)
       true -> "#{pattern_text} = #{scrutinee_name}"
     end
@@ -341,11 +341,19 @@ defmodule Number42.Refactors.Ex.CaseToFunctionClauses do
     end)
   end
 
-  defp bare_var_named?(pattern, name) do
-    case bare_var(pattern) do
-      {:ok, ^name} -> true
-      _ -> false
-    end
+  # A pattern that already binds the scrutinee name shadows it exactly
+  # like the original `case` clause did, so aliasing it again would emit
+  # the self-referential `{:ok, file} = file` the compiler rejects.
+  defp pattern_binds?(pattern, name) do
+    {_, bound?} =
+      Macro.prewalk(pattern, false, fn
+        # A pinned var reads the outer binding instead of creating one.
+        {:^, _, _}, acc -> {[], acc}
+        {^name, _, ctx} = node, _acc when is_atom(ctx) -> {node, true}
+        node, acc -> {node, acc}
+      end)
+
+    bound?
   end
 
   defp underscore_pattern?({:_, _, ctx}) when is_atom(ctx), do: true

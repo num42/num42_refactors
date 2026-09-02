@@ -795,12 +795,36 @@ defmodule Number42.Refactors.Ex.ExtractHeexFor do
 
   defp rewrite_curlies_in_text(text, locals), do: text |> do_rewrite_curlies(locals, 0, [], [])
 
+  # Textual substitution also hit field accesses (`group.group`), keyword
+  # keys (`%{group: …}`) and string literals (`"choice-group:"`), so the
+  # locals are promoted on the AST, where only real variables match.
   defp rewrite_locals_in_code(code, locals) do
-    locals
-    |> Enum.reduce(code, fn name, acc ->
-      pattern = ~r/(?<![@\w])#{Regex.escape(Atom.to_string(name))}(?!\w)/
-      Regex.replace(pattern, acc, "@#{name}")
+    Sourceror.parse_string(code) |> promote_locals_or_keep(code, locals)
+  end
+
+  defp promote_locals_or_keep({:ok, ast}, code, locals) do
+    ast
+    # Postwalk, so the `@name` we emit is never revisited and re-wrapped.
+    |> Macro.postwalk(fn
+      {name, meta, ctx} when is_atom(name) and is_atom(ctx) ->
+        promote_local(name, meta, ctx, locals)
+
+      node ->
+        node
     end)
+    |> to_string_or_keep(code)
+  end
+
+  defp promote_locals_or_keep(_error, code, _locals), do: code
+
+  defp promote_local(name, meta, ctx, locals) do
+    if name in locals, do: {:@, meta, [{name, meta, nil}]}, else: {name, meta, ctx}
+  end
+
+  defp to_string_or_keep(ast, code) do
+    Sourceror.to_string(ast)
+  rescue
+    _ -> code
   end
 
   defp scan_elixir(code, pattern_vars, {assigns, locals}),

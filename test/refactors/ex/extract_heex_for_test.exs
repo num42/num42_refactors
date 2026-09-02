@@ -49,6 +49,52 @@ defmodule Number42.Refactors.Ex.ExtractHeexForTest do
 
       assert_rewrites(@subject, before_source, after_source)
     end
+
+    test "only the local variable itself gets the assign prefix" do
+      before_source = ~S'''
+      defmodule MyView do
+        def render(assigns) do
+          ~H"""
+          <ul>
+            <%= for group <- @groups do %>
+              <li
+                data-row={group.group}
+                class={if @highlight == "choice-group:#{group.group}", do: "flash"}
+              >
+                <.entry click_values={%{group: group.group}} />
+              </li>
+            <% end %>
+          </ul>
+          """
+        end
+      end
+      '''
+
+      after_source = ~S'''
+      defmodule MyView do
+        def render(assigns) do
+          ~H"""
+          <ul>
+            <%= for group <- @groups do %><.render_group_component group={group} highlight={@highlight} /><% end %>
+          </ul>
+          """
+        end
+
+        defp render_group_component(assigns) do
+          ~H"""
+          <li
+            data-row={@group.group}
+            class={if @highlight == "choice-group:#{@group.group}", do: "flash"}
+          >
+            <.entry click_values={%{group: @group.group}} />
+          </li>
+          """
+        end
+      end
+      '''
+
+      assert_rewrites(@subject, before_source, after_source)
+    end
   end
 
   describe "leaves alone" do

@@ -216,6 +216,28 @@ defmodule Number42.Refactors.Ex.CaseToFunctionClausesTest do
       assert_rewrites(@subject, before_source, expected, @on)
     end
 
+    test "pattern that shadows the scrutinee name needs no rebind" do
+      before_source = """
+      defmodule M do
+        def f(file) do
+          case file do
+            {:ok, file} -> send(file)
+            {:error, err} -> err
+          end
+        end
+      end
+      """
+
+      expected = """
+      defmodule M do
+        def f({:ok, file}), do: send(file)
+        def f({:error, err}), do: err
+      end
+      """
+
+      assert_rewrites(@subject, before_source, expected, @on)
+    end
+
     test "defp is lifted too" do
       before_source = """
       defmodule M do
