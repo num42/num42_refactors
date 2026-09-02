@@ -33,10 +33,28 @@ defmodule Number42.Refactors.Ex.MergeNearCloneFunctions do
     * **same-module** — the cluster's occurrences live in one file. The shared
       helper is added to that module; each occurrence is rewritten in place.
     * **cross-file** — occurrences span files (resolved via `prepare`/
-      `source_files`). The shared helper is added to the survivor's module; each
-      clone elsewhere is rewritten to a qualified delegation. (No file is
-      deleted — an Elixir `def` is one member of a larger module, unlike a
-      single-`def` component file.)
+      `source_files`). The shared body moves into a `{LCP}.Helper` module — the
+      least common denominator of the occurrences' module names plus `Helper` —
+      written next to the modules it serves, or appended to it when it already
+      exists. Every occurrence, the base included, is left as a thin qualified
+      delegation, so existing callers keep their entry point. Only the aliases
+      the moved body mentions travel with it.
+
+  ## Choosing the helper module
+
+      {MergeNearCloneFunctions,
+       enabled: true,
+       helper_module_globs: [{"apps/whk_portal_web/**", "WhkPortalWeb.Helpers"}],
+       default_helper_module: "WhkPortal.Shared.Helper"}
+
+    * `:helper_module_globs` — `{glob, prefix}` pairs, matched against every
+      occurrence path (relative to `:write_root`). On a match the prefix replaces
+      the LCP's namespace and only its last segment is kept, so an area collects
+      one helper per namespace: LCP `WhkPortalWeb.ConfiguratorLive.MenuUI` under
+      the glob above becomes `WhkPortalWeb.Helpers.MenuUI`.
+    * `:default_helper_module` — used only when the module names share no prefix
+      at all, where no level owns them and the LCP rule has nothing to derive
+      from. Without it that cluster declines.
 
   ## Value-based lift (robust against normalisation drift)
 
@@ -68,6 +86,7 @@ defmodule Number42.Refactors.Ex.MergeNearCloneFunctions do
 
   use Number42.Refactors.Refactor
 
+  alias Mix.Tasks.Refactor.Shared
   alias Number42.Refactors.Analysis.AstHelpers
   alias Number42.Refactors.Ex.NearClones
 
@@ -123,7 +142,12 @@ defmodule Number42.Refactors.Ex.MergeNearCloneFunctions do
   defp config(opts) do
     %{
       threshold: Keyword.get(opts, :threshold, @default_threshold),
-      min_merge_mass: Keyword.get(opts, :min_merge_mass, @default_min_merge_mass)
+      min_merge_mass: Keyword.get(opts, :min_merge_mass, @default_min_merge_mass),
+      max_mass: Keyword.get(opts, :max_mass),
+      write_root: Keyword.get(opts, :write_root, File.cwd!()),
+      helper_module_globs: Keyword.get(opts, :helper_module_globs, []),
+      default_helper_module: Keyword.get(opts, :default_helper_module),
+      dry_run: Keyword.get(opts, :dry_run, false)
     }
   end
 
@@ -181,9 +205,11 @@ defmodule Number42.Refactors.Ex.MergeNearCloneFunctions do
       NearClones.from_files(files, cluster_opts(cfg))
       |> Enum.filter(&(&1.mergeable and cross_file?(&1)))
 
+    alias_lines = Map.new(contents, fn {f, src} -> {f, module_alias_lines(src)} end)
+
     rewrites =
       clusters
-      |> Enum.flat_map(&cross_file_rewrites(&1, clause_counts, module_names))
+      |> Enum.flat_map(&cross_file_rewrites(&1, clause_counts, module_names, alias_lines, cfg))
       |> Enum.reduce(%{}, fn {file, entry}, acc ->
         Map.update(acc, file, [entry], &[entry | &1])
       end)
@@ -199,7 +225,7 @@ defmodule Number42.Refactors.Ex.MergeNearCloneFunctions do
   # occurrence (rewrite the def to call the shared helper) plus one `:host` entry
   # on the survivor's file (append the shared helper to the survivor module).
   # Declines (returns `[]`) when the private-call lift can't be made sound.
-  defp cross_file_rewrites(cluster, clause_counts, module_names) do
+  defp cross_file_rewrites(cluster, clause_counts, module_names, alias_lines, cfg) do
     base = Enum.find(cluster.occurrences, &(&1.diffs == []))
     def_sets = Map.new(clause_counts, fn {f, counts} -> {f, MapSet.new(Map.keys(counts))} end)
 
@@ -209,14 +235,74 @@ defmodule Number42.Refactors.Ex.MergeNearCloneFunctions do
          {:ok, slots} <- divergence_slots(cluster.occurrences),
          :ok <- all_unambiguous(slots, base.ast),
          {:ok, privs} <- shared_private_calls(cluster.occurrences, def_sets),
-         host_module when is_binary(host_module) <- module_names[base.file] do
-      # Cross-file keeps the base's own name: the host's original-arity wrapper
-      # uses it, and every delegate calls `Host.<name>` — the public identity
-      # callers already know.
-      build_cross_file_entries(cluster, base, slots, privs, base.name, host_module)
+         {:ok, target} <- helper_module(cluster, module_names, cfg) do
+      # Cross-file keeps the base's own name: every delegate calls
+      # `Helper.<name>` — the public identity callers already know.
+      emit_helper_module(cluster, base, slots, privs, target, alias_lines, cfg)
+      build_cross_file_entries(cluster, base, slots, privs, base.name, inspect(target))
     else
       _ -> []
     end
+  end
+
+  # The helper lands on the least common denominator of the clones' module names
+  # plus `Helper`, so it sits at the level that actually owns all of them rather
+  # than inside whichever module happened to win the survivor pick.
+  defp helper_module(cluster, module_names, cfg) do
+    files = cluster.occurrences |> Enum.map(& &1.file) |> Enum.uniq()
+    parts = Enum.map(files, &module_names[&1])
+
+    if Enum.any?(parts, &is_nil/1) do
+      :error
+    else
+      lcp = parts |> Enum.map(&Module.split(Module.concat([&1]))) |> longest_common_prefix()
+      target_from(lcp, files, cfg)
+    end
+  end
+
+  # A glob wins over the derived name: the prefix it maps to replaces the LCP's
+  # own namespace, keeping only its last segment so each area gets one helper.
+  defp target_from(lcp, files, cfg) do
+    case glob_prefix(files, cfg.helper_module_globs, cfg.write_root) do
+      {:ok, prefix} ->
+        {:ok, Module.concat(Module.split(Module.concat([prefix])) ++ List.wrap(List.last(lcp)))}
+
+      :error when lcp != [] ->
+        {:ok, Module.concat(lcp ++ ["Helper"])}
+
+      # No shared namespace owns these modules, so the name has to be configured.
+      :error ->
+        case cfg.default_helper_module do
+          nil -> :error
+          configured -> {:ok, Module.concat([configured])}
+        end
+    end
+  end
+
+  # Globs are written against the project root, the same coordinate space as the
+  # `.refactor.exs` inputs, so absolute corpus paths are matched relative to it.
+  defp glob_prefix(files, globs, write_root) do
+    Enum.find_value(globs, :error, fn {glob, prefix} ->
+      if Enum.all?(files, &path_matches?(glob, &1, write_root)), do: {:ok, prefix}
+    end)
+  end
+
+  defp path_matches?(glob, path, write_root) do
+    Shared.glob_match?(glob, path) or
+      Shared.glob_match?(glob, Path.relative_to(path, write_root))
+  end
+
+  defp longest_common_prefix([]), do: []
+  defp longest_common_prefix([single]), do: single
+
+  defp longest_common_prefix(lists) do
+    lists
+    |> Enum.zip()
+    |> Enum.take_while(fn tuple ->
+      elems = Tuple.to_list(tuple)
+      Enum.all?(elems, &(&1 == hd(elems)))
+    end)
+    |> Enum.map(&elem(&1, 0))
   end
 
   # Decline if any occurrence's `{name, arity}` has more than one clause in its
@@ -274,23 +360,161 @@ defmodule Number42.Refactors.Ex.MergeNearCloneFunctions do
   end
 
   defp build_cross_file_entries(cluster, base, slots, privs, helper, host_module) do
-    # The base occurrence's def is rewritten *in place* into the public helper —
-    # the survivor hosts it, no self-delegation. Every other occurrence delegates
-    # to `Host.helper(...)`.
-    host =
-      {base.file, {:host_inplace, %{base: base, slots: slots, privs: privs, helper: helper}}}
+    # The body now lives in the emitted helper module, so *every* occurrence —
+    # the base included — becomes a thin delegation to it.
+    cluster.occurrences
+    |> Enum.map(fn o ->
+      values = occurrence_slot_values(o, base, slots)
 
-    delegations =
-      cluster.occurrences
-      |> Enum.reject(&(&1.file == base.file and &1.line == base.line))
-      |> Enum.map(fn o ->
-        values = occurrence_slot_values(o, base, slots)
+      {o.file,
+       {:delegate, %{occ: o, helper: helper, host: host_module, values: values, privs: privs}}}
+    end)
+  end
 
-        {o.file,
-         {:delegate, %{occ: o, helper: helper, host: host_module, values: values, privs: privs}}}
+  # ---- helper module emission ----------------------------------------------
+
+  defp emit_helper_module(_cluster, _base, _slots, _privs, _target, _alias_lines, %{dry_run: true}),
+       do: :ok
+
+  defp emit_helper_module(cluster, base, slots, privs, target, alias_lines, cfg) do
+    with {:ok, rendered} <- render_helper_def(base, slots, privs) do
+      source_paths = cluster.occurrences |> Enum.map(& &1.file) |> Enum.uniq()
+      path = AstHelpers.shared_module_path(target, cfg.write_root, source_paths)
+      aliases = needed_aliases(Map.get(alias_lines, base.file, []), base.ast)
+
+      File.mkdir_p!(Path.dirname(path))
+
+      if File.exists?(path) do
+        append_helper(path, rendered, base)
+      else
+        File.write!(path, render_fresh_helper(target, aliases, rendered))
+      end
+    end
+
+    :ok
+  end
+
+  defp render_fresh_helper(target, aliases, rendered) do
+    alias_block =
+      if aliases == [], do: "", else: Enum.map_join(aliases, "\n", &("  " <> &1)) <> "\n\n"
+
+    "defmodule #{inspect(target)} do\n" <>
+      "  @moduledoc \"Bodies shared by near-clone functions of the modules below this one.\"\n\n" <>
+      alias_block <> indent(rendered, "  ") <> "\nend\n"
+  end
+
+  # Appending keeps a helper module that already collected earlier clusters, and
+  # skips a `{name, arity}` it already carries so a rerun stays idempotent.
+  defp append_helper(path, rendered, base) do
+    source = File.read!(path)
+
+    if helper_present?(source, base) do
+      :ok
+    else
+      File.write!(path, splice_before_module_end(source, rendered))
+    end
+  end
+
+  defp helper_present?(source, base) do
+    source
+    |> module_clause_counts()
+    |> Map.keys()
+    |> Enum.any?(fn {name, _arity} -> name == base.name end)
+  end
+
+  defp splice_before_module_end(source, addition) do
+    lines = String.split(source, "\n")
+
+    idx =
+      lines
+      |> Enum.with_index()
+      |> Enum.reverse()
+      |> Enum.find_value(fn {line, i} -> if String.trim(line) == "end", do: i, else: nil end)
+
+    case idx do
+      nil ->
+        source <> "\n" <> addition
+
+      i ->
+        (Enum.take(lines, i) ++ ["", indent(addition, "  ")] ++ Enum.drop(lines, i))
+        |> Enum.join("\n")
+    end
+  end
+
+  # Only the aliases the moved body actually mentions travel with it; carrying the
+  # whole module's alias list would import names the helper never uses.
+  defp needed_aliases(alias_lines, ast) do
+    used = used_alias_heads(ast)
+
+    Enum.filter(alias_lines, fn {_line, heads} ->
+      Enum.any?(heads, &MapSet.member?(used, &1))
+    end)
+    |> Enum.map(&elem(&1, 0))
+  end
+
+  defp used_alias_heads(ast) do
+    ast
+    |> Macro.prewalk([], fn
+      {:__aliases__, _, [head | _]} = node, acc when is_atom(head) -> {node, [head | acc]}
+      node, acc -> {node, acc}
+    end)
+    |> elem(1)
+    |> MapSet.new()
+  end
+
+  # `{rendered_alias_line, [bound_head_atoms]}` for every alias in the file, so a
+  # multi-alias `alias A.{B, C}` can be matched on either name it binds.
+  defp module_alias_lines(source) do
+    case Sourceror.parse_string(source) do
+      {:ok, ast} ->
+        ast
+        |> Macro.prewalker()
+        |> Enum.flat_map(fn
+          {:alias, _, _} = node -> [{Sourceror.to_string(node), alias_heads(node)}]
+          _ -> []
+        end)
+
+      _ ->
+        []
+    end
+  end
+
+  defp alias_heads({:alias, _, [{{:., _, [_base, :{}]}, _, parts}]}),
+    do: Enum.flat_map(parts, &last_segment/1)
+
+  defp alias_heads({:alias, _, [target]}), do: last_segment(target)
+
+  defp alias_heads({:alias, _, [_target, opts]}) when is_list(opts) do
+    case Keyword.get(opts, :as) do
+      nil -> []
+      as -> last_segment(as)
+    end
+  end
+
+  defp alias_heads(_), do: []
+
+  defp last_segment({:__aliases__, _, segments}), do: [List.last(segments)]
+  defp last_segment(_), do: []
+
+  # The lifted body as a standalone public def for the helper module.
+  defp render_helper_def(base, slots, privs) do
+    value_params =
+      Enum.with_index(slots, fn {_from, kind} = slot, i ->
+        {slot, param_name(%{kind: kind}, i)}
       end)
 
-    [host | delegations]
+    body =
+      base.ast
+      |> lift_slot_values(value_params)
+      |> lift_private_calls(privs)
+
+    value_names = Enum.map(value_params, fn {_slot, n} -> Atom.to_string(n) end)
+    priv_names = Enum.map(privs, fn {name, _arity} -> "fun_#{name}" end)
+    params = base.arg_strings ++ value_names ++ priv_names
+
+    {:ok,
+     "def #{base.name}(#{Enum.join(params, ", ")}) do\n" <>
+       (body |> Sourceror.to_string() |> indent("  ")) <> "\nend"}
   end
 
   defp occurrence_slot_values(o, _base, slots) do
@@ -323,15 +547,6 @@ defmodule Number42.Refactors.Ex.MergeNearCloneFunctions do
     end
   end
 
-  defp entry_patches({:host_inplace, h}, source) do
-    with {:ok, rendered} <- render_cross_helper(h),
-         {:ok, range} <- range_of_def(h.base, source) do
-      [%{change: String.trim_trailing(rendered), range: range}]
-    else
-      _ -> []
-    end
-  end
-
   defp entry_patches({:delegate, d}, source) do
     case range_of_def(d.occ, source) do
       {:ok, range} -> [%{change: render_cross_delegation(d), range: range}]
@@ -348,44 +563,6 @@ defmodule Number42.Refactors.Ex.MergeNearCloneFunctions do
   #
   # When there is nothing to lift (no slots, no privs), there is no arity change
   # and no wrapper is needed — the in-place body is simply made public.
-  defp render_cross_helper(h) do
-    value_params =
-      Enum.with_index(h.slots, fn {_from, kind} = slot, i ->
-        {slot, param_name(%{kind: kind}, i)}
-      end)
-
-    body =
-      h.base.ast
-      |> lift_slot_values(value_params)
-      |> lift_private_calls(h.privs)
-
-    base_args = h.base.arg_strings
-    value_names = Enum.map(value_params, fn {_slot, n} -> Atom.to_string(n) end)
-    priv_names = Enum.map(h.privs, fn {name, _arity} -> "fun_#{name}" end)
-    extra = value_names ++ priv_names
-
-    helper_head = "#{h.helper}(#{Enum.join(base_args ++ extra, ", ")})"
-
-    helper_def =
-      "def #{helper_head} do\n" <>
-        (body |> Sourceror.to_string() |> indent("    ")) <> "\n  end"
-
-    {:ok, prepend_wrapper(h, base_args, extra, helper_def)}
-  end
-
-  # No extra params ⇒ arity unchanged ⇒ no wrapper, just the public body.
-  defp prepend_wrapper(_h, _base_args, [], helper_def), do: helper_def
-
-  defp prepend_wrapper(h, base_args, _extra, helper_def) do
-    capture = capture_vars(length(base_args))
-    own_values = Enum.map(h.slots, fn {from, _kind} -> value_to_string(from) end)
-    own_privs = Enum.map(h.privs, fn {name, arity} -> "&#{name}/#{arity}" end)
-    forwarded = Enum.join(capture ++ own_values ++ own_privs, ", ")
-
-    "def #{h.helper}(#{Enum.join(capture, ", ")}),\n" <>
-      "    do: #{h.helper}(#{forwarded})\n\n  " <> helper_def
-  end
-
   defp lift_slot_values(ast, value_params) do
     Enum.reduce(value_params, ast, fn {{from, kind}, name}, acc ->
       replace_first(acc, %{from: from, kind: kind}, name)
@@ -464,7 +641,10 @@ defmodule Number42.Refactors.Ex.MergeNearCloneFunctions do
   # ---- plan: which values to lift ------------------------------------------
 
   defp cluster_opts(cfg) do
-    [threshold: cfg.threshold, min_merge_mass: cfg.min_merge_mass, min_mass: 10]
+    base = [threshold: cfg.threshold, min_merge_mass: cfg.min_merge_mass, min_mass: 10]
+
+    # Without this the caller's cap is dropped and NearClones silently applies its own.
+    if cfg.max_mass, do: [{:max_mass, cfg.max_mass} | base], else: base
   end
 
   @type plan :: %{
